@@ -28,6 +28,28 @@ while getopts "n" opt; do
 done
 shift $((OPTIND - 1))
 
+# Register the Claude Code pane-map hook if it is not already there.
+#
+# This is a no-op read when the hook is present, which is the common case. It
+# lives here rather than only in the installers because Homebrew formulas must
+# not write to ~/.claude — without this, every brew user would silently run with
+# no hook and get wrong pane binding.
+#
+# Never fatal: a missing or unhappy hook costs accurate pane binding, not the
+# session. Exit 3 (a settings.json that does not parse) is the one case worth
+# surfacing, because it means we deliberately touched nothing.
+ensure_hook() {
+  command -v claudemux-head >/dev/null 2>&1 || return 0
+  local rc=0
+  claudemux-head hook ensure >/dev/null 2>/tmp/claudemux-hook.$$ || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    cat /tmp/claudemux-hook.$$ >&2
+  fi
+  rm -f /tmp/claudemux-hook.$$
+  return 0
+}
+ensure_hook
+
 # resolve_dir QUERY — echo an existing directory for QUERY: itself if it's a
 # real dir, otherwise the best zoxide match. Non-zero exit if unresolved.
 resolve_dir() {
