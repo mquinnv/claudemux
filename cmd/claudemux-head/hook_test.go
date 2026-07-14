@@ -224,6 +224,62 @@ func TestHookEnsureRefusesMalformedSettings(t *testing.T) {
 	}
 }
 
+// Malformed settings.json must leave the operation a COMPLETE no-op: not just
+// refusing to write the config, but also refusing to copy the hook script.
+// A half-done install (script copied but settings not updated) is worse than
+// no install at all — the hook directive points to a path that may disappear
+// or be out of sync.
+func TestHookEnsureMalformedSettingsCopiesNothing(t *testing.T) {
+	orig := `{"model": "opus", TRUNCATED`
+	settingsPath := writeSettings(t, orig)
+	script := stubScript(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runHookEnsure([]string{"--script", script}, &stdout, &stderr)
+
+	if code != 3 {
+		t.Fatalf("runHookEnsure() = %d, want 3 for a malformed settings.json", code)
+	}
+
+	// Verify settings.json was not touched
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != orig {
+		t.Error("settings.json was modified despite being unparseable — it must be left exactly as found")
+	}
+
+	// Verify the hook script was not copied
+	home, _ := os.UserHomeDir()
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	installed := filepath.Join(hooksDir, hookScriptName)
+
+	if _, err := os.Stat(installed); !os.IsNotExist(err) {
+		t.Errorf("hook script was copied despite malformed config: %v — a half-done install is worse than none", err)
+	}
+
+	if _, err := os.Stat(hooksDir); !os.IsNotExist(err) {
+		t.Errorf("hooks/ directory was created despite malformed config — a half-done install is worse than none")
+	}
+}
+
+// The exit-2 usage path must be exercised: an unknown flag should return 2
+// and report the error to stderr.
+func TestHookEnsureUsageErrorOnUnknownFlag(t *testing.T) {
+	writeSettings(t, "")
+
+	var stdout, stderr bytes.Buffer
+	code := runHookEnsure([]string{"--bogus"}, &stdout, &stderr)
+
+	if code != 2 {
+		t.Errorf("runHookEnsure(--bogus) = %d, want 2 for usage error", code)
+	}
+	if stderr.String() == "" {
+		t.Error("stderr empty, want usage error reported")
+	}
+}
+
 // A backup must exist before we overwrite a file that had content.
 func TestHookEnsureBacksUpBeforeWriting(t *testing.T) {
 	p := writeSettings(t, `{"model": "opus"}`)
