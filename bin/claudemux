@@ -40,12 +40,14 @@ shift $((OPTIND - 1))
 # surfacing, because it means we deliberately touched nothing.
 ensure_hook() {
   command -v claudemux-head >/dev/null 2>&1 || return 0
-  local rc=0
-  claudemux-head hook ensure >/dev/null 2>/tmp/claudemux-hook.$$ || rc=$?
-  if [ "$rc" -eq 3 ]; then
-    cat /tmp/claudemux-hook.$$ >&2
-  fi
-  rm -f /tmp/claudemux-hook.$$
+  local err rc=0
+  err="$(mktemp)"
+  claudemux-head hook ensure >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 3 ] && cat "$err" >&2
+  rm -f "$err"
+  # Explicit: the `[ ... ] && cat` above is the last command otherwise, and its
+  # status would escape to `set -e` whenever rc is not 3 — killing the launcher
+  # in the *common* case.
   return 0
 }
 ensure_hook
