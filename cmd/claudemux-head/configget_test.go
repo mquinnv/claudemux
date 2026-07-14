@@ -66,7 +66,7 @@ func TestConfigLookupBool(t *testing.T) {
 
 func TestRunConfigGetPrintsValueAndExitsZero(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "claude-env")
+	dir := filepath.Join(root, "claudemux")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestRunConfigGetPrintsValueAndExitsZero(t *testing.T) {
 	}
 }
 
-// claude-env calls this on EVERY launch, for orgs the user has not configured.
+// claudemux calls this on EVERY launch, for orgs the user has not configured.
 // An absent key must be a quiet exit 1, never a crash and never noise on stderr.
 func TestRunConfigGetAbsentKeyExitsOneSilently(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml at all
@@ -123,11 +123,11 @@ func TestRunConfigGetWrongArgCount(t *testing.T) {
 }
 
 // A malformed config.yml is fatal for the TUI, and must also be fatal here —
-// but distinguishable from "absent key" (exit 1) so claude-env's `|| true` does
+// but distinguishable from "absent key" (exit 1) so claudemux's `|| true` does
 // not mask a real config error into silence. Exit 3, with an explanation.
 func TestRunConfigGetMalformedConfigExitsThree(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "claude-env")
+	dir := filepath.Join(root, "claudemux")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

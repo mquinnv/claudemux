@@ -151,7 +151,7 @@ type Summarizer struct {
 //
 // The key comes from the process environment, or failing that from the file named
 // by summary.api_key_file (see claudeHeadEnvPaths). It deliberately does not read
-// the monitored project's env: claude-head watches sessions across many repos and
+// the monitored project's env: claudemux-head watches sessions across many repos and
 // must not inherit their secrets, nor care which repo a pane was launched from.
 //
 // ANTHROPIC_BASE_URL is honored explicitly because the unconditional
@@ -172,7 +172,7 @@ func summarizerEnvOptions(cfg SummaryConfig) []option.RequestOption {
 }
 
 // configValue prefers the process environment, then the configured key file.
-// The process environment winning is what makes `op run -- claude-head` work
+// The process environment winning is what makes `op run -- claudemux-head` work
 // with no file on disk at all.
 func configValue(keyFile, key string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {

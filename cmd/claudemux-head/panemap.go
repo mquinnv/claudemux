@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// paneMap mirrors the JSON written by hooks/claude-head-map.sh.
+// paneMap mirrors the JSON written by hooks/claudemux-map.sh.
 type paneMap struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
@@ -24,13 +24,13 @@ func paneMapDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".claude", "claude-head", "panes")
+	return filepath.Join(home, ".claude", "claudemux", "panes")
 }
 
 // claudePaneCandidates scans `tmux list-panes` output ("%pane @window command"
 // per line) and returns every pane, excluding self, running claude (matched
 // exactly as "claude", or "node" for runtimes that report the shim, so
-// "claude-head" panes never match). Candidates are ordered by preference:
+// "claudemux-head" panes never match). Candidates are ordered by preference:
 // same-window claude, same-window node, other-window claude, other-window
 // node; ordering within a group is stable (listing order). self's window is
 // found by locating self's own line in the listing; if self isn't present,

@@ -1,4 +1,4 @@
-module github.com/mquinnv/claude-env
+module github.com/mquinnv/claudemux
 
 go 1.26.2
 

@@ -38,7 +38,7 @@ func (d Duration) MarshalYAML() (any, error) {
 	return d.String(), nil
 }
 
-// Config is claude-head's non-secret configuration. Secrets are deliberately
+// Config is claudemux-head's non-secret configuration. Secrets are deliberately
 // NOT here: they live in a separate line-oriented env file (see env.go) that a
 // secret manager can serve over a FIFO, which YAML cannot be.
 type Config struct {
@@ -67,7 +67,7 @@ type SummaryConfig struct {
 	APIKeyFile string `yaml:"api_key_file"`
 }
 
-// OnePasswordConfig is consumed by bin/claude-env via `claude-head config get`,
+// OnePasswordConfig is consumed by bin/claudemux via `claudemux-head config get`,
 // not by the TUI. It ships empty: Accounts maps a GitHub org to the 1Password
 // account that holds its secrets, and any built-in mapping would be one user's
 // employer structure baked into everyone's binary.
@@ -90,9 +90,9 @@ func defaultConfig() Config {
 // $XDG_CONFIG_HOME replaces the default when set, rather than being searched
 // before it.
 //
-// Named for the package (claude-env), not for this binary (claude-head). The two
-// ship together and share one configuration: claude-env reads the same file via
-// `claude-head config get`, so a second directory would only be a second place to
+// Named for the package (claudemux), not for this binary (claudemux-head). The two
+// ship together and share one configuration: claudemux reads the same file via
+// `claudemux-head config get`, so a second directory would only be a second place to
 // look.
 //
 // Hand-rolled on purpose. os.UserConfigDir() returns ~/Library/Application
@@ -100,13 +100,13 @@ func defaultConfig() Config {
 // belongs and not where this project's users keep it.
 func configDir() (string, error) {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "claude-env"), nil
+		return filepath.Join(x, "claudemux"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "claude-env"), nil
+	return filepath.Join(home, ".config", "claudemux"), nil
 }
 
 // loadConfig reads config.yml, returning defaults for the keys it does not name.
@@ -158,7 +158,7 @@ func loadConfig() (Config, error) {
 // resolveAPIKeyFile turns summary.api_key_file into an absolute path: the
 // default (<config dir>/env) when unset, and a `~`-expanded path otherwise.
 //
-// Resolved here, once, rather than at each read: `claude-head config get
+// Resolved here, once, rather than at each read: `claudemux-head config get
 // summary.api_key_file` should print the file actually consulted, not a blank
 // that the reader has to know how to expand.
 func resolveAPIKeyFile(cfg *Config, dir string) {

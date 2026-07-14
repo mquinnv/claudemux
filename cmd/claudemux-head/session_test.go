@@ -13,7 +13,7 @@ func TestEncodeProjectPath(t *testing.T) {
 		want  string
 	}{
 		{"/Users/alice/Projects/foo", "-Users-alice-Projects-foo"},
-		{"/Users/alice/Projects/claude-head", "-Users-alice-Projects-claude-head"},
+		{"/Users/alice/Projects/claudemux-head", "-Users-alice-Projects-claudemux-head"},
 		{"/home/user/code", "-home-user-code"},
 	}
 	for _, tt := range tests {

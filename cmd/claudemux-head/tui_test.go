@@ -884,9 +884,9 @@ func TestNewModelSeedsSummarizingWithSummarizer(t *testing.T) {
 		t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 		// summarizerEnvOptions also looks up ANTHROPIC_BASE_URL, which isn't set
 		// above, so without this configValue falls through to the real
-		// claude-head env file on this machine (a 1Password-backed FIFO blocks
+		// claudemux-head env file on this machine (a 1Password-backed FIFO blocks
 		// for envFileTimeout).
-		t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+		t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 		m := newModel(defaultConfig(), path, "sess", false)
 		if m.summarizer == nil {
 			t.Fatal("summarizer = nil, want non-nil when ANTHROPIC_API_KEY is set")
@@ -898,9 +898,9 @@ func TestNewModelSeedsSummarizingWithSummarizer(t *testing.T) {
 
 	t.Run("without an api key", func(t *testing.T) {
 		t.Setenv("ANTHROPIC_API_KEY", "")
-		// Without this, configValue falls through to the real claude-head env
+		// Without this, configValue falls through to the real claudemux-head env
 		// file on this machine (and any FIFO-backed one blocks for envFileTimeout).
-		t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+		t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 		m := newModel(defaultConfig(), path, "sess", false)
 		if m.summarizer != nil {
 			t.Fatal("summarizer non-nil, want nil when ANTHROPIC_API_KEY is unset")
@@ -916,7 +916,7 @@ func TestNewModelSeedsSummarizingWithSummarizer(t *testing.T) {
 // must not be billed for it.
 func TestNewSummarizerDisabledByConfig(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 
 	cfg := defaultConfig().Summary
 	cfg.Enabled = false
@@ -928,7 +928,7 @@ func TestNewSummarizerDisabledByConfig(t *testing.T) {
 
 func TestNewSummarizerEnabledUsesConfiguredModel(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 
 	cfg := defaultConfig().Summary
 	cfg.Model = "claude-sonnet-5"

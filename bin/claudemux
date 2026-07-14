@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claude-env [-n] [dir|query ...]
+# Usage: claudemux [-n] [dir|query ...]
 #
-# Requires: tmux, claude-head (on PATH), git. Optional: op (1Password
+# Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
 #
 # Each directory gets its own session named after the directory basename.
-# Layout: top-left = claude-head (short) | below it = claude (focused) | right = shell (full height)
+# Layout: top-left = claudemux-head (short) | below it = claude (focused) | right = shell (full height)
 #
 # A bare arg that isn't a directory is resolved via zoxide (`z`) history.
 #
@@ -23,7 +23,7 @@ FORCE_NEW=false
 while getopts "n" opt; do
   case "$opt" in
     n) FORCE_NEW=true ;;
-    *) echo "Usage: claude-env [-n] [dir|query ...]" >&2; exit 1 ;;
+    *) echo "Usage: claudemux [-n] [dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -111,7 +111,7 @@ project_field() {
 CH_CONFIG_VALUE=""
 CH_CONFIG_ERR=""
 
-# ch_config_get KEY — read claude-head's configured value for KEY into
+# ch_config_get KEY — read claudemux-head's configured value for KEY into
 # CH_CONFIG_VALUE (empty when the key is absent or the config is broken).
 #
 # It reports through variables rather than stdout **on purpose**: a caller
@@ -122,13 +122,13 @@ CH_CONFIG_ERR=""
 # subshell; the assignment and the error handling happen here.
 #
 # An absent key (exit 1) is the normal case — an org the user never configured —
-# and stays silent. A malformed config.yml (exit 3) is NOT: re-emit claude-head's
+# and stays silent. A malformed config.yml (exit 3) is NOT: re-emit claudemux-head's
 # diagnostic, or a broken config degrades into an indistinguishable secrets-less
 # launch. Always returns 0, so callers need no `|| true` under `set -e`.
 ch_config_get() {
   local err rc=0
   err="$(mktemp)"
-  CH_CONFIG_VALUE="$(claude-head config get "$1" 2>"$err")" || rc=$?
+  CH_CONFIG_VALUE="$(claudemux-head config get "$1" 2>"$err")" || rc=$?
   if [ "$rc" -eq 3 ]; then
     # One broken file is one problem, however many keys we go on to ask for.
     [ -z "$CH_CONFIG_ERR" ] && cat "$err" >&2
@@ -141,7 +141,7 @@ ch_config_get() {
 
 # op_account_for DIR — the 1Password account for DIR's repo. Precedence:
 #   1. explicit `op_account` in DIR/.project.yml
-#   2. onepassword.accounts.<github-org> from claude-head's config.yml
+#   2. onepassword.accounts.<github-org> from claudemux-head's config.yml
 #   3. onepassword.default_account from the same
 # An empty result is valid and expected: `op` then picks its own default account.
 op_account_for() {
@@ -184,7 +184,7 @@ inject_op_env() {
   local -a acct_args=()
   [ -n "$acct" ] && acct_args=(--account "$acct")
   if ! env_out="$(op environment read "$env_id" "${acct_args[@]+"${acct_args[@]}"}")"; then
-    echo "claude-env: op environment read $env_id failed; launching without secrets" >&2
+    echo "claudemux: op environment read $env_id failed; launching without secrets" >&2
     return 1
   fi
   while IFS= read -r line; do
@@ -221,7 +221,7 @@ create_session() {
   [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
   [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
 
-  # top-left = claude-head (4 rows: first prompt, last prompt, state line, meters),
+  # top-left = claudemux-head (4 rows: first prompt, last prompt, state line, meters),
   # below it = claude, right = shell (full height, 30% wide — the head
   # statusbar needs the extra width or it drops its right-side gauges).
   # Track panes by ID — the short head pane sits above claude, so positional
@@ -236,7 +236,7 @@ create_session() {
   fi
   tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir"
   head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
-  tmux send-keys -t "$head_pane" 'claude-head' C-m
+  tmux send-keys -t "$head_pane" 'claudemux-head' C-m
   tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
   tmux select-pane -t "$claude_pane"
 

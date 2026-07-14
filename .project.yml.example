@@ -1,4 +1,4 @@
-# claude-env reads this from the root of a project you launch it in.
+# claudemux reads this from the root of a project you launch it in.
 # Copy to .project.yml. NOTE: .project.yml is gitignored on purpose —
 # op_env is an ID pointing at your secrets, and should not be committed.
 
@@ -9,13 +9,13 @@ color: blue
 # Passed to `claude -n`, naming the session in Claude Code.
 name: my-project
 
-# 1Password Environment ID. When set, claude-env reads that Environment once at
+# 1Password Environment ID. When set, claudemux reads that Environment once at
 # launch and injects its variables into the tmux session environment, so every
 # pane inherits them and Claude never calls `op` itself. Omit to launch without
 # secret injection.
 # op_env: abcdefghijklmnopqrstuvwxyz
 
-# 1Password account for the above. Optional: without it, claude-env maps this
-# repo's GitHub org through `onepassword.accounts` in ~/.config/claude-env/config.yml,
+# 1Password account for the above. Optional: without it, claudemux maps this
+# repo's GitHub org through `onepassword.accounts` in ~/.config/claudemux/config.yml,
 # then falls back to `onepassword.default_account`, then to op's own default.
 # op_account: my.1password.com

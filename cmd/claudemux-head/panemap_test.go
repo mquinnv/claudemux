@@ -11,7 +11,7 @@ import (
 func TestClaudePaneCandidatesPrefersClaudeOverEarlierNode(t *testing.T) {
 	// %30 (node dev server) is listed before %33 (claude), both in self's
 	// window (@1) — claude must still be preferred.
-	listing := "%35 @1 claude-head\n%30 @1 node\n%33 @1 claude\n"
+	listing := "%35 @1 claudemux-head\n%30 @1 node\n%33 @1 claude\n"
 	got := claudePaneCandidates(listing, "%35")
 	want := []string{"%33", "%30"}
 	if !reflect.DeepEqual(got, want) {
@@ -23,7 +23,7 @@ func TestClaudePaneCandidatesPrefersSameWindow(t *testing.T) {
 	// %40 is claude in another window (@2); %33 is claude in self's window
 	// (@1). Same-window must be preferred over other-window even though
 	// %40 appears first in listing order.
-	listing := "%35 @1 claude-head\n%40 @2 claude\n%33 @1 claude\n"
+	listing := "%35 @1 claudemux-head\n%40 @2 claude\n%33 @1 claude\n"
 	got := claudePaneCandidates(listing, "%35")
 	want := []string{"%33", "%40"}
 	if !reflect.DeepEqual(got, want) {
@@ -40,7 +40,7 @@ func TestClaudePaneCandidatesExcludesSelf(t *testing.T) {
 }
 
 func TestClaudePaneCandidatesNeverMatchesClaudeHeadOrShell(t *testing.T) {
-	listing := "%1 @1 claude-head\n%2 @1 bash\n%3 @1 fish\n"
+	listing := "%1 @1 claudemux-head\n%2 @1 bash\n%3 @1 fish\n"
 	got := claudePaneCandidates(listing, "%1")
 	if len(got) != 0 {
 		t.Fatalf("expected no candidates, got %v", got)
@@ -58,7 +58,7 @@ func TestClaudePaneCandidatesAllGroups(t *testing.T) {
 	// Full ordering: same-window claude, same-window node, other-window
 	// claude, other-window node — regardless of listing order.
 	listing := strings.Join([]string{
-		"%1 @1 claude-head", // self
+		"%1 @1 claudemux-head", // self
 		"%2 @2 node",        // other-window node
 		"%3 @2 claude",      // other-window claude
 		"%4 @1 node",        // same-window node

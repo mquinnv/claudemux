@@ -12,12 +12,12 @@ import (
 func main() {
 	// Subcommand dispatch must precede flag.Parse(): `config` is a bare first
 	// arg, not a flag, and flag.Parse() would stop at it and silently ignore the
-	// rest. bin/claude-env depends on this path.
+	// rest. bin/claudemux depends on this path.
 	if len(os.Args) > 1 && os.Args[1] == "config" {
 		if len(os.Args) > 2 && os.Args[2] == "get" {
 			os.Exit(runConfigGet(os.Args[3:], os.Stdout, os.Stderr))
 		}
-		fmt.Fprintln(os.Stderr, "usage: claude-head config get <dotted.path>")
+		fmt.Fprintln(os.Stderr, "usage: claudemux-head config get <dotted.path>")
 		os.Exit(2)
 	}
 

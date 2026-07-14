@@ -54,10 +54,10 @@ func configLookup(cfg Config, dotted string) (string, bool) {
 	}
 }
 
-// runConfigGet implements `claude-head config get <dotted.path>` and returns the
+// runConfigGet implements `claudemux-head config get <dotted.path>` and returns the
 // process exit code.
 //
-// The exit codes are a contract with bin/claude-env, which calls this on every
+// The exit codes are a contract with bin/claudemux, which calls this on every
 // launch — via its ch_config_get helper, which inspects the code rather than
 // discarding it:
 //
@@ -74,13 +74,13 @@ func configLookup(cfg Config, dotted string) (string, bool) {
 //	    that bug — no test covers this seam, so it is on you.
 func runConfigGet(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: claude-head config get <dotted.path>")
+		fmt.Fprintln(stderr, "usage: claudemux-head config get <dotted.path>")
 		return 2
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(stderr, "claude-head: %v\n", err)
+		fmt.Fprintf(stderr, "claudemux-head: %v\n", err)
 		return 3
 	}
 

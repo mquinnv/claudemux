@@ -410,9 +410,9 @@ func TestSummarizeErrorsOnWhitespaceOnlyLines(t *testing.T) {
 
 func TestNewSummarizerNilWithoutKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
-	// Without this, configValue falls through to the real claude-head env
+	// Without this, configValue falls through to the real claudemux-head env
 	// file on this machine (and any FIFO-backed one blocks for envFileTimeout).
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 	if s := newSummarizer(defaultConfig().Summary); s != nil {
 		t.Error("newSummarizer() must return nil without a key — a keyless SDK client would fall back to the OAuth profile and spend the subscription budget")
 	}
@@ -420,7 +420,7 @@ func TestNewSummarizerNilWithoutKey(t *testing.T) {
 
 func TestNewSummarizerNilWithWhitespaceOnlyKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "   ")
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 	if s := newSummarizer(defaultConfig().Summary); s != nil {
 		t.Error("newSummarizer() must return nil for a whitespace-only key — a blank key would 401 on every poll instead of cleanly disabling the feature")
 	}
@@ -435,7 +435,7 @@ func TestNewSummarizerNeverAuthenticatesFromAmbientCredentials(t *testing.T) {
 	// Not strictly required by the current bypass-on-caller-options code path,
 	// but pinned anyway: this test's entire point is ambient-credential
 	// isolation, so it must not itself depend on what's on this machine.
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 	d := &fakeDoer{body: toolUseResponse("a", "b")}
 
 	s := newSummarizer(defaultConfig().Summary, option.WithHTTPClient(d))
@@ -490,8 +490,8 @@ func TestSummarizerEnvOptionsDefaultBaseURL(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	// The empty ANTHROPIC_BASE_URL above would otherwise fall through to
-	// whatever ANTHROPIC_BASE_URL the real claude-head env file supplies.
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	// whatever ANTHROPIC_BASE_URL the real claudemux-head env file supplies.
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 
 	d := &fakeDoer{body: toolUseResponse("a", "b")}
 	s := newSummarizer(defaultConfig().Summary, append(summarizerEnvOptions(defaultConfig().Summary), option.WithHTTPClient(d))...)
@@ -512,7 +512,7 @@ func TestSummarizerEnvOptionsDefaultBaseURL(t *testing.T) {
 func TestSummarizerEnvOptionsNilWithoutKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.internal.example")
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 
 	if opts := summarizerEnvOptions(defaultConfig().Summary); opts != nil {
 		t.Error("summarizerEnvOptions(defaultConfig().Summary) must be nil without a key — a base URL alone is not a credential and must not construct a client")

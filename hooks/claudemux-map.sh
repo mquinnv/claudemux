@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code hook (SessionStart + UserPromptSubmit): record which session
-# lives in which tmux pane so claude-head can follow its sibling pane's
+# lives in which tmux pane so claudemux-head can follow its sibling pane's
 # transcript. Keyed by $TMUX_PANE (inherited from the claude process).
 #
 # MUST stay silent on stdout: UserPromptSubmit stdout is injected into the
@@ -9,7 +9,7 @@ set -euo pipefail
 
 [ -n "${TMUX_PANE:-}" ] || exit 0
 
-dir="$HOME/.claude/claude-head/panes"
+dir="$HOME/.claude/claudemux/panes"
 mkdir -p "$dir"
 
 map="$(jq -c '{session_id: .session_id, transcript_path: .transcript_path, cwd: .cwd}' 2>/dev/null || true)"

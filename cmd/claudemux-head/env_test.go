@@ -10,15 +10,15 @@ import (
 )
 
 // TestMain is the backstop for the whole class of bug this file guards
-// against: it defaults CLAUDE_HEAD_ENV to a path that does not exist, so no
-// test can reach claude-head's real env file — in production potentially a
+// against: it defaults CLAUDEMUX_ENV to a path that does not exist, so no
+// test can reach claudemux-head's real env file — in production potentially a
 // FIFO mounted by a secret manager (1Password Environments, for one) serving
 // a live secret — unless it explicitly opts in via t.Setenv. Individual tests
-// may still pin CLAUDE_HEAD_ENV themselves; that stays fine and
+// may still pin CLAUDEMUX_ENV themselves; that stays fine and
 // self-documenting, this is just the safety net for any test (present or
 // future) that forgets to.
 func TestMain(m *testing.M) {
-	os.Setenv("CLAUDE_HEAD_ENV", filepath.Join(os.TempDir(), "claude-head-absent-env"))
+	os.Setenv("CLAUDEMUX_ENV", filepath.Join(os.TempDir(), "claudemux-head-absent-env"))
 	os.Exit(m.Run())
 }
 
@@ -42,7 +42,7 @@ func envFileTimeoutForTest(d time.Duration) func() {
 }
 
 func TestEnvFileValuePlainFile(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", writeEnvFile(t, "ANTHROPIC_API_KEY=sk-from-file\n"))
+	t.Setenv("CLAUDEMUX_ENV", writeEnvFile(t, "ANTHROPIC_API_KEY=sk-from-file\n"))
 
 	if got := envFileValue("", "ANTHROPIC_API_KEY"); got != "sk-from-file" {
 		t.Errorf("envFileValue() = %q, want %q", got, "sk-from-file")
@@ -50,7 +50,7 @@ func TestEnvFileValuePlainFile(t *testing.T) {
 }
 
 func TestConfigValueProcessEnvWinsOverFile(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", writeEnvFile(t, "ANTHROPIC_API_KEY=sk-from-file\n"))
+	t.Setenv("CLAUDEMUX_ENV", writeEnvFile(t, "ANTHROPIC_API_KEY=sk-from-file\n"))
 	t.Setenv("ANTHROPIC_API_KEY", "sk-from-process-env")
 
 	if got := configValue("", "ANTHROPIC_API_KEY"); got != "sk-from-process-env" {
@@ -65,7 +65,7 @@ func TestEnvFileValueCommentsBlankLinesAndWhitespace(t *testing.T) {
 		"   \n" +
 		"# ANTHROPIC_API_KEY=commented-out-should-be-ignored\n" +
 		"  ANTHROPIC_API_KEY  =  sk-with-surrounding-space  \n"
-	t.Setenv("CLAUDE_HEAD_ENV", writeEnvFile(t, contents))
+	t.Setenv("CLAUDEMUX_ENV", writeEnvFile(t, contents))
 
 	if got := envFileValue("", "ANTHROPIC_API_KEY"); got != "sk-with-surrounding-space" {
 		t.Errorf("envFileValue() = %q, want %q", got, "sk-with-surrounding-space")
@@ -78,7 +78,7 @@ func TestEnvFileValueCommentsBlankLinesAndWhitespace(t *testing.T) {
 // to strings.Split (which would truncate at every '=') can't silently
 // corrupt keys.
 func TestEnvFileValueEqualsSignInValueRoundTrips(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", writeEnvFile(t, "ANTHROPIC_API_KEY=sk-abc==\n"))
+	t.Setenv("CLAUDEMUX_ENV", writeEnvFile(t, "ANTHROPIC_API_KEY=sk-abc==\n"))
 
 	if got := envFileValue("", "ANTHROPIC_API_KEY"); got != "sk-abc==" {
 		t.Errorf("envFileValue() = %q, want %q — a value containing '=' must round-trip intact", got, "sk-abc==")
@@ -86,7 +86,7 @@ func TestEnvFileValueEqualsSignInValueRoundTrips(t *testing.T) {
 }
 
 func TestEnvFileValueMissingFile(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "does-not-exist"))
 
 	done := make(chan string, 1)
 	go func() { done <- envFileValue("", "ANTHROPIC_API_KEY") }()
@@ -102,7 +102,7 @@ func TestEnvFileValueMissingFile(t *testing.T) {
 }
 
 // TestEnvFileValueFIFOTimeout is the most important test in this file: env.go
-// reads claude-head's config from files that, in production, may be FIFOs
+// reads claudemux-head's config from files that, in production, may be FIFOs
 // mounted by a secret manager (1Password Environments, for one). Opening a
 // FIFO with no writer blocks forever, so a regression that removed the
 // timeout would hang the whole TUI at startup. This test creates a real
@@ -140,7 +140,7 @@ func TestEnvFileValueFIFOTimeout(t *testing.T) {
 // contention (an empty-but-not-timed-out read), not a dead writer.
 //
 // This drives envFileValue (not readEnvFileValue directly) through
-// CLAUDE_HEAD_ENV, with a short injected timeout via a package-level override
+// CLAUDEMUX_ENV, with a short injected timeout via a package-level override
 // so the test runs fast and deterministic rather than waiting on the real 2s
 // production value.
 func TestEnvFileValueWriterlessFIFOTimesOutOnceNotFour(t *testing.T) {
@@ -148,7 +148,7 @@ func TestEnvFileValueWriterlessFIFOTimesOutOnceNotFour(t *testing.T) {
 	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
 		t.Fatalf("Mkfifo() error = %v", err)
 	}
-	t.Setenv("CLAUDE_HEAD_ENV", fifoPath)
+	t.Setenv("CLAUDEMUX_ENV", fifoPath)
 
 	const shortTimeout = 100 * time.Millisecond
 	restoreTimeout := envFileTimeoutForTest(shortTimeout)
@@ -174,15 +174,15 @@ func TestEnvFileValueWriterlessFIFOTimesOutOnceNotFour(t *testing.T) {
 
 func TestClaudeHeadEnvPathsPrecedence(t *testing.T) {
 	explicit := writeEnvFile(t, "ANTHROPIC_API_KEY=sk-from-explicit-path\n")
-	t.Setenv("CLAUDE_HEAD_ENV", explicit)
+	t.Setenv("CLAUDEMUX_ENV", explicit)
 
 	paths := claudeHeadEnvPaths("")
 	if len(paths) != 1 || paths[0] != explicit {
-		t.Fatalf("claudeHeadEnvPaths() = %v, want exactly [%q] when CLAUDE_HEAD_ENV is set — it must beat both the configured api_key_file and the default, not merely be tried first", paths, explicit)
+		t.Fatalf("claudeHeadEnvPaths() = %v, want exactly [%q] when CLAUDEMUX_ENV is set — it must beat both the configured api_key_file and the default, not merely be tried first", paths, explicit)
 	}
 
 	if got := envFileValue("", "ANTHROPIC_API_KEY"); got != "sk-from-explicit-path" {
-		t.Errorf("envFileValue() = %q, want the value from the CLAUDE_HEAD_ENV path", got)
+		t.Errorf("envFileValue() = %q, want the value from the CLAUDEMUX_ENV path", got)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestEnvFileValueRetriesTransientlyEmptyFIFO(t *testing.T) {
 	if err := syscall.Mkfifo(path, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
-	t.Setenv("CLAUDE_HEAD_ENV", path)
+	t.Setenv("CLAUDEMUX_ENV", path)
 
 	// First open is served an empty pipe (the "lost the race" case); the second is
 	// served the real content.
@@ -220,12 +220,12 @@ func TestEnvFileValueRetriesTransientlyEmptyFIFO(t *testing.T) {
 // The env file lives beside config.yml in the XDG config dir. It must NOT be
 // looked for in ~/Projects — that path was hardcoded to one developer's machine.
 func TestClaudeHeadEnvPathsUsesConfigDir(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", "")
+	t.Setenv("CLAUDEMUX_ENV", "")
 	t.Setenv("XDG_CONFIG_HOME", "/xdg")
 
 	paths := claudeHeadEnvPaths("")
 
-	want := filepath.Join("/xdg", "claude-env", "env")
+	want := filepath.Join("/xdg", "claudemux", "env")
 	if len(paths) != 1 || paths[0] != want {
 		t.Errorf("claudeHeadEnvPaths(%q) = %v, want exactly [%q]", "", paths, want)
 	}
@@ -236,27 +236,27 @@ func TestClaudeHeadEnvPathsUsesConfigDir(t *testing.T) {
 	}
 }
 
-// A configured api_key_file is used when CLAUDE_HEAD_ENV is not set — this is
+// A configured api_key_file is used when CLAUDEMUX_ENV is not set — this is
 // what lets the secret live somewhere other than the default (e.g. a FIFO a
 // secret manager already mounts at a path of its own choosing).
 func TestClaudeHeadEnvPathsUsesConfiguredKeyFile(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", "")
+	t.Setenv("CLAUDEMUX_ENV", "")
 	t.Setenv("XDG_CONFIG_HOME", "/xdg")
 
-	paths := claudeHeadEnvPaths("/elsewhere/claude-env/env")
+	paths := claudeHeadEnvPaths("/elsewhere/claudemux/env")
 
-	if len(paths) != 1 || paths[0] != "/elsewhere/claude-env/env" {
-		t.Errorf("claudeHeadEnvPaths() = %v, want exactly [%q] — a configured api_key_file must beat the default", paths, "/elsewhere/claude-env/env")
+	if len(paths) != 1 || paths[0] != "/elsewhere/claudemux/env" {
+		t.Errorf("claudeHeadEnvPaths() = %v, want exactly [%q] — a configured api_key_file must beat the default", paths, "/elsewhere/claudemux/env")
 	}
 }
 
-// CLAUDE_HEAD_ENV still overrides a configured api_key_file outright.
+// CLAUDEMUX_ENV still overrides a configured api_key_file outright.
 func TestClaudeHeadEnvVarBeatsConfiguredKeyFile(t *testing.T) {
-	t.Setenv("CLAUDE_HEAD_ENV", "/from/env/var")
+	t.Setenv("CLAUDEMUX_ENV", "/from/env/var")
 
 	paths := claudeHeadEnvPaths("/from/config/file")
 
 	if len(paths) != 1 || paths[0] != "/from/env/var" {
-		t.Errorf("claudeHeadEnvPaths() = %v, want exactly [%q] — CLAUDE_HEAD_ENV must override the configured path, not merely precede it", paths, "/from/env/var")
+		t.Errorf("claudeHeadEnvPaths() = %v, want exactly [%q] — CLAUDEMUX_ENV must override the configured path, not merely precede it", paths, "/from/env/var")
 	}
 }

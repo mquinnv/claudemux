@@ -6,7 +6,7 @@
 # and echoes a 6-digit hex (no leading #). Returns 1 if nothing is found.
 #
 # Single source of truth for the named palette — used by the tmux chrome hooks
-# and by ~/bin/claude-env. Tune the hexes here to taste.
+# and by ~/bin/claudemux. Tune the hexes here to taste.
 #
 # Named colors mirror Claude Code's /color set:
 #   red blue green yellow purple orange pink cyan

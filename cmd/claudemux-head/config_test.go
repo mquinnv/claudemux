@@ -16,7 +16,7 @@ import (
 func writeConfig(t *testing.T, contents string) {
 	t.Helper()
 	root := t.TempDir()
-	dir := filepath.Join(root, "claude-env")
+	dir := filepath.Join(root, "claudemux")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestLoadConfigAPIKeyFileDefaultsToConfigDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(root, "claude-env", "env")
+	want := filepath.Join(root, "claudemux", "env")
 	if cfg.Summary.APIKeyFile != want {
 		t.Errorf("Summary.APIKeyFile = %q, want %q", cfg.Summary.APIKeyFile, want)
 	}
@@ -129,7 +129,7 @@ func TestLoadConfigAPIKeyFileDefaultsToConfigDir(t *testing.T) {
 // The secret can live anywhere — including a path a secret manager already
 // mounts a FIFO at, which is the whole reason this is a path and not the key.
 func TestLoadConfigAPIKeyFileHonorsExplicitPathAndExpandsTilde(t *testing.T) {
-	writeConfig(t, "summary:\n  api_key_file: ~/.config/claude-env/env\n")
+	writeConfig(t, "summary:\n  api_key_file: ~/.config/claudemux/env\n")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -139,7 +139,7 @@ func TestLoadConfigAPIKeyFileHonorsExplicitPathAndExpandsTilde(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".config", "claude-env", "env")
+	want := filepath.Join(home, ".config", "claudemux", "env")
 	if cfg.Summary.APIKeyFile != want {
 		t.Errorf("Summary.APIKeyFile = %q, want %q — a leading ~ must expand, or the path is read literally and never found", cfg.Summary.APIKeyFile, want)
 	}
@@ -195,12 +195,12 @@ func TestConfigDirPrefersXDGConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dir != filepath.Join("/xdg", "claude-env") {
-		t.Errorf("configDir() = %q, want /xdg/claude-head", dir)
+	if dir != filepath.Join("/xdg", "claudemux") {
+		t.Errorf("configDir() = %q, want /xdg/claudemux-head", dir)
 	}
 }
 
-// os.UserConfigDir() returns ~/Library/Application Support on macOS. claude-head
+// os.UserConfigDir() returns ~/Library/Application Support on macOS. claudemux-head
 // must use ~/.config there, so configDir must be hand-rolled.
 func TestConfigDirFallsBackToDotConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -213,7 +213,7 @@ func TestConfigDirFallsBackToDotConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".config", "claude-env")
+	want := filepath.Join(home, ".config", "claudemux")
 	if dir != want {
 		t.Errorf("configDir() = %q, want %q — not os.UserConfigDir(), which is ~/Library/Application Support on macOS", dir, want)
 	}

@@ -23,21 +23,21 @@ import (
 // waiting on the real 2s production value.
 var envFileTimeout = 2 * time.Second
 
-// claudeHeadEnvPaths lists the files claude-head reads its OWN secrets from,
+// claudeHeadEnvPaths lists the files claudemux-head reads its OWN secrets from,
 // highest precedence first. Deliberately not the monitored project's env:
-// claude-head watches sessions across many repos and must never inherit their
+// claudemux-head watches sessions across many repos and must never inherit their
 // secrets, nor depend on which repo a pane happened to launch from.
 //
 // keyFile is summary.api_key_file, already resolved to an absolute path by
 // loadConfig. It is passed in rather than re-derived so config.yml stays the
 // single place that decides where the secret comes from.
 //
-// CLAUDE_HEAD_ENV, when set, is the ONLY path consulted — it overrides both the
+// CLAUDEMUX_ENV, when set, is the ONLY path consulted — it overrides both the
 // configured path and the default outright rather than merely being tried first,
-// so a caller can point claude-head at a specific file and be certain nothing
+// so a caller can point claudemux-head at a specific file and be certain nothing
 // else is read.
 func claudeHeadEnvPaths(keyFile string) []string {
-	if p := os.Getenv("CLAUDE_HEAD_ENV"); p != "" {
+	if p := os.Getenv("CLAUDEMUX_ENV"); p != "" {
 		return []string{p}
 	}
 	if keyFile != "" {
@@ -55,7 +55,7 @@ func claudeHeadEnvPaths(keyFile string) []string {
 // envFileRetryDelays are the backoffs between attempts to read one env file.
 //
 // A FIFO-backed env file (e.g. a mounted 1Password Environment) serves one reader
-// at a time: when several claude-head panes start at once they race on the open,
+// at a time: when several claudemux-head panes start at once they race on the open,
 // and the losers see an empty pipe — not an error, just no key, which would
 // silently disable the summarizer for most panes. Contention is transient (a loser
 // succeeds milliseconds later), so retry. The first attempt is immediate; these
