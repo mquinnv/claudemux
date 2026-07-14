@@ -1,0 +1,52 @@
+#!/bin/bash
+# Shared project-color resolver. Source this, then call:
+#     resolve_project_hex "$start_dir"
+# It walks $start_dir and ancestors for the nearest project color, preferring
+# .project.yml (`color: <named|#hex>`) then legacy .project-color (#hex/named),
+# and echoes a 6-digit hex (no leading #). Returns 1 if nothing is found.
+#
+# Single source of truth for the named palette — used by the tmux chrome hooks
+# and by ~/bin/claude-env. Tune the hexes here to taste.
+#
+# Named colors mirror Claude Code's /color set:
+#   red blue green yellow purple orange pink cyan
+
+# name_to_hex NAME|#HEX|HEX -> 6-digit hex (no #), or non-zero if unrecognized.
+name_to_hex() {
+    case "$1" in
+        red)    echo ff4d4d ;;
+        blue)   echo 4d79ff ;;
+        green)  echo 4dd24d ;;
+        yellow) echo ffd24d ;;
+        purple) echo b34dff ;;
+        orange) echo ff944d ;;
+        pink)   echo ff4dd2 ;;
+        cyan)   echo 4dd2d2 ;;
+        \#*)    echo "${1#\#}" ;;
+        *)
+            if printf '%s' "$1" | grep -qiE '^[0-9a-fA-F]{6}$'; then
+                printf '%s' "$1"
+            else
+                return 1
+            fi
+            ;;
+    esac
+}
+
+resolve_project_hex() {
+    local dir="$1" raw=""
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+        if [ -f "$dir/.project.yml" ]; then
+            raw=$(sed -n 's/^[[:space:]]*color:[[:space:]]*//p' "$dir/.project.yml" \
+                  | head -1 | tr -d "\"' \r")
+            [ -n "$raw" ] && break
+        fi
+        if [ -f "$dir/.project-color" ]; then
+            raw=$(tr -d '[:space:]' < "$dir/.project-color")
+            [ -n "$raw" ] && break
+        fi
+        dir=$(dirname "$dir")
+    done
+    [ -n "$raw" ] || return 1
+    name_to_hex "$raw"
+}

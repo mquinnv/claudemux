@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# Launch tmux sessions with a Claude Code environment.
+# Usage: claude-env [-n] [dir|query ...]
+#
+# Requires: tmux, claude-head (on PATH), git. Optional: op (1Password
+# Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
+#
+# Each directory gets its own session named after the directory basename.
+# Layout: top-left = claude-head (short) | below it = claude (focused) | right = shell (full height)
+#
+# A bare arg that isn't a directory is resolved via zoxide (`z`) history.
+#
+# Options:
+#   -n   Create a new session even if one with the same name exists
+#        (appends -2, -3, ... to the session name).
+#
+# Isolation/worktrees are intentionally NOT handled here — Claude Code's own
+# `--worktree` manages that. This script just launches and attaches.
+
+set -euo pipefail
+
+FORCE_NEW=false
+while getopts "n" opt; do
+  case "$opt" in
+    n) FORCE_NEW=true ;;
+    *) echo "Usage: claude-env [-n] [dir|query ...]" >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# resolve_dir QUERY — echo an existing directory for QUERY: itself if it's a
+# real dir, otherwise the best zoxide match. Non-zero exit if unresolved.
+resolve_dir() {
+  local q="$1"
+  if [ -d "$q" ]; then
+    (cd "$q" && pwd)
+    return 0
+  fi
+  if command -v zoxide >/dev/null 2>&1; then
+    local hit
+    hit="$(zoxide query -- "$q" 2>/dev/null || true)"
+    if [ -n "$hit" ] && [ -d "$hit" ]; then
+      echo "$hit"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# apply_status_color SESSION DIR — set SESSION's tmux status bar and active
+# pane border style from the nearest project color (DIR and ancestors). fg
+# auto-picks black/white by background luminance. tmux options, so they
+# persist — set once at launch/attach, no focus hooks needed. Leaves the
+# default style if no color.
+apply_status_color() {
+  local resolver hex r g b luminance fg
+  resolver="$(dirname "$(readlink -f "$0")")/project-color-resolve.sh"
+  [ -f "$resolver" ] || return 0
+  # shellcheck disable=SC1090
+  . "$resolver"
+  hex="$(resolve_project_hex "$2" 2>/dev/null || true)"
+  [ -n "$hex" ] || return 0
+  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+  luminance=$(( (r * 299 + g * 587 + b * 114) / 1000 ))
+  if [ "$luminance" -gt 150 ]; then fg="#000000"; else fg="#ffffff"; fi
+  tmux set -t "$1" status-style "bg=#${hex},fg=${fg}"
+  # pane-active-border-style is a window option; sessions here are single-window
+  tmux set -w -t "$1" pane-active-border-style "fg=#${hex}"
+}
+
+# apply_tab_color DIR — set the iTerm2 tab color from the nearest project color
+# (DIR and ancestors), written to the controlling terminal just before we
+# exec-attach. Set once here (NOT via tmux focus hooks, which used to repaint
+# every tab on each focus change). No-op if there's no /dev/tty or no color.
+apply_tab_color() {
+  [ -e /dev/tty ] || return 0
+  local resolver hex r g b
+  resolver="$(dirname "$(readlink -f "$0")")/project-color-resolve.sh"
+  [ -f "$resolver" ] || return 0
+  # shellcheck disable=SC1090
+  . "$resolver"
+  hex="$(resolve_project_hex "$1" 2>/dev/null || true)"
+  [ -n "$hex" ] || return 0
+  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+  printf '\033]6;1;bg;red;brightness;%d\a'   "$r" > /dev/tty
+  printf '\033]6;1;bg;green;brightness;%d\a' "$g" > /dev/tty
+  printf '\033]6;1;bg;blue;brightness;%d\a'  "$b" > /dev/tty
+}
+
+# attach SESSION DIR — paint the status bar + iTerm2 tab for DIR, then
+# exec-attach SESSION.
+attach() {
+  apply_status_color "$1" "$2"
+  apply_tab_color "$2" || true
+  exec tmux attach -t "$1"
+}
+
+# project_field FILE KEY — echo the trimmed, unquoted value of a top-level
+# `KEY: value` line from a simple flat .project.yml. Empty if absent.
+project_field() {
+  [ -f "$1" ] || return 0
+  sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" "$1" | head -1 \
+    | sed -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//"
+}
+
+# ch_config_get's out-parameters. Initialized because `set -u` aborts on the
+# first read of an unset variable.
+#
+#   CH_CONFIG_VALUE — the value for the requested key, or "" if it has none.
+#   CH_CONFIG_ERR   — non-empty once config.yml has been found to be malformed.
+CH_CONFIG_VALUE=""
+CH_CONFIG_ERR=""
+
+# ch_config_get KEY — read claude-head's configured value for KEY into
+# CH_CONFIG_VALUE (empty when the key is absent or the config is broken).
+#
+# It reports through variables rather than stdout **on purpose**: a caller
+# writing `x="$(ch_config_get k)"` would run this in a subshell, and the
+# CH_CONFIG_ERR bookkeeping — which is what keeps one broken config from being
+# reported once per lookup — would be discarded with it. Assigning from a
+# command substitution INSIDE the function is fine: only the binary runs in the
+# subshell; the assignment and the error handling happen here.
+#
+# An absent key (exit 1) is the normal case — an org the user never configured —
+# and stays silent. A malformed config.yml (exit 3) is NOT: re-emit claude-head's
+# diagnostic, or a broken config degrades into an indistinguishable secrets-less
+# launch. Always returns 0, so callers need no `|| true` under `set -e`.
+ch_config_get() {
+  local err rc=0
+  err="$(mktemp)"
+  CH_CONFIG_VALUE="$(claude-head config get "$1" 2>"$err")" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # One broken file is one problem, however many keys we go on to ask for.
+    [ -z "$CH_CONFIG_ERR" ] && cat "$err" >&2
+    CH_CONFIG_ERR=1
+  fi
+  [ "$rc" -ne 0 ] && CH_CONFIG_VALUE=""
+  rm -f "$err"
+  return 0
+}
+
+# op_account_for DIR — the 1Password account for DIR's repo. Precedence:
+#   1. explicit `op_account` in DIR/.project.yml
+#   2. onepassword.accounts.<github-org> from claude-head's config.yml
+#   3. onepassword.default_account from the same
+# An empty result is valid and expected: `op` then picks its own default account.
+op_account_for() {
+  local work_dir="$1" acct origin org
+  acct="$(project_field "$work_dir/.project.yml" op_account)"
+  if [ -n "$acct" ]; then
+    echo "$acct"
+    return 0
+  fi
+
+  origin="$(git -C "$work_dir" remote get-url origin 2>/dev/null || true)"
+  org="$(sed -n 's#.*github\.com[:/]\([^/]*\)/.*#\1#p' <<< "$origin")"
+  if [ -n "$org" ]; then
+    ch_config_get "onepassword.accounts.$org"
+    if [ -n "$CH_CONFIG_VALUE" ]; then
+      echo "$CH_CONFIG_VALUE"
+      return 0
+    fi
+    # A config.yml that does not parse resolves nothing, so asking it for a
+    # second key would only re-fail — and re-print — for no new information.
+    [ -n "$CH_CONFIG_ERR" ] && return 0
+  fi
+
+  ch_config_get onepassword.default_account
+  printf '%s' "$CH_CONFIG_VALUE"
+}
+
+# inject_op_env SESSION DIR — if DIR's .project.yml names a 1Password
+# Environment (op_env), read it once and copy its variables into SESSION's
+# tmux session environment. One authorization per session; every pane
+# inherits, and claude/sub-agents never call op themselves. Returns 0 only
+# when variables were injected (caller respawns pane 0, whose shell predates
+# the injection). Multiline values are truncated at the first newline — keep
+# those out of Environments.
+inject_op_env() {
+  local session="$1" work_dir="$2" env_id acct env_out line key
+  env_id="$(project_field "$work_dir/.project.yml" op_env)"
+  [ -n "$env_id" ] || return 1
+  acct="$(op_account_for "$work_dir")"
+  local -a acct_args=()
+  [ -n "$acct" ] && acct_args=(--account "$acct")
+  if ! env_out="$(op environment read "$env_id" "${acct_args[@]+"${acct_args[@]}"}")"; then
+    echo "claude-env: op environment read $env_id failed; launching without secrets" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    key="${line%%=*}"
+    tmux set-environment -t "$session" "$key" "${line#*=}"
+  done <<< "$env_out"
+}
+
+create_session() {
+  local work_dir="$1"
+  local session_name
+  session_name="$(basename "$work_dir")"
+
+  if tmux has-session -t "$session_name" 2>/dev/null; then
+    if [ "$FORCE_NEW" = true ]; then
+      local i=2
+      while tmux has-session -t "${session_name}-${i}" 2>/dev/null; do
+        ((i++))
+      done
+      session_name="${session_name}-${i}"
+    else
+      attach "$session_name" "$work_dir"
+    fi
+  fi
+
+  # Project metadata (.project.yml: color + name), passed to claude at launch:
+  # name via -n, color as a "/color X" prompt argument. No post-startup
+  # send-keys — typing into the pane during boot used to collide with it.
+  local proj_color proj_name claude_cmd
+  proj_color="$(project_field "$work_dir/.project.yml" color)"
+  proj_name="$(project_field "$work_dir/.project.yml" name)"
+  claude_cmd="claude --permission-mode auto"
+  [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
+  [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
+
+  # top-left = claude-head (4 rows: first prompt, last prompt, state line, meters),
+  # below it = claude, right = shell (full height, 30% wide — the head
+  # statusbar needs the extra width or it drops its right-side gauges).
+  # Track panes by ID — the short head pane sits above claude, so positional
+  # indices would shift under us.
+  local claude_pane head_pane
+  tmux new-session -d -s "$session_name" -c "$work_dir" -x "$(tput cols)" -y "$(tput lines)"
+  claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
+  # 1Password Environment vars go into the session environment before the
+  # other panes spawn; pane 0 already exists, so respawn its shell to inherit.
+  if inject_op_env "$session_name" "$work_dir"; then
+    tmux respawn-pane -k -t "$claude_pane"
+  fi
+  tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir"
+  head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+  tmux send-keys -t "$head_pane" 'claude-head' C-m
+  tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
+  tmux select-pane -t "$claude_pane"
+
+  # Pin the head pane to exactly 4 rows. The `-l 4` at split time does NOT
+  # survive attach: with window-size=latest, attaching a client whose size
+  # differs from the tput-derived new-session size makes tmux redistribute
+  # pane heights proportionally, shrinking the head pane below 4 (losing the
+  # prompt lines and/or statusbar). A window-resized hook re-pins it to 4 on
+  # every resize — the attach included — so all four rows always render.
+  tmux set-hook -t "$session_name" window-resized "resize-pane -t $head_pane -y 4"
+
+  attach "$session_name" "$work_dir"
+}
+
+# No args: attach the sole session if there's exactly one, else launch in $PWD.
+if [ "$#" -eq 0 ]; then
+  session_count="$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$session_count" -eq 1 ]; then
+    only_session="$(tmux list-sessions -F '#{session_name}' 2>/dev/null)"
+    only_path="$(tmux display-message -p -t "${only_session}:" '#{pane_current_path}' 2>/dev/null || true)"
+    attach "$only_session" "$only_path"
+  fi
+  create_session "$(pwd)"
+fi
+
+for arg in "$@"; do
+  if dir="$(resolve_dir "$arg")"; then
+    create_session "$dir"
+  else
+    echo "Skipping '$arg': not a directory and no zoxide match found" >&2
+  fi
+done

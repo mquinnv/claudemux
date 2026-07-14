@@ -1,0 +1,14 @@
+# Build output. Anchored with a leading slash on purpose: a bare `claude-head`
+# also matches the cmd/claude-head/ SOURCE directory, silently ignoring every
+# file a contributor adds there.
+/claude-head
+
+# Per-user project config. Contains op_env, an ID pointing at your secrets.
+# Gitignored so that neither this repo nor any repo using claude-env can leak it.
+# See .project.yml.example for the format.
+.project.yml
+
+# Local agent/process artifacts
+.claude/settings.local.json
+.superpowers/
+docs/superpowers/
