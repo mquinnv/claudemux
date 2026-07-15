@@ -1179,6 +1179,29 @@ func TestTabRenameArgsNoPane(t *testing.T) {
 }
 
 // An empty label must not rename the window to blank.
+// A model that ignores the <=24-char instruction, or slips in a newline, must
+// not put an over-long or multi-line string into the tmux window name.
+func TestTabRenameArgsClampsLabel(t *testing.T) {
+	got, ok := tabRenameArgs("%3", "fix   the\ncrm bundling regression across the whole webpack pipeline")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	label := got[len(got)-1]
+	if r := []rune(label); len(r) > 24 {
+		t.Errorf("label %q is %d runes, want <= 24", label, len(r))
+	}
+	if strings.ContainsAny(label, "\n\t") {
+		t.Errorf("label %q still contains a newline/tab, want whitespace collapsed", label)
+	}
+}
+
+// A label that is only whitespace normalizes to empty -> nothing to rename.
+func TestTabRenameArgsWhitespaceOnlyLabel(t *testing.T) {
+	if _, ok := tabRenameArgs("%3", "   \n  "); ok {
+		t.Error("ok = true for a whitespace-only label, want false")
+	}
+}
+
 func TestTabRenameArgsEmptyLabel(t *testing.T) {
 	if _, ok := tabRenameArgs("%3", ""); ok {
 		t.Error("ok = true with empty label, want false")
