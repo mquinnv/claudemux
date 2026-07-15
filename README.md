@@ -46,17 +46,6 @@ curl -fsSL https://raw.githubusercontent.com/mquinnv/claudemux/main/install.sh |
 Installs to `~/.local/bin` (override with `CLAUDEMUX_PREFIX`). Verifies the release
 checksum before installing.
 
-**npm:**
-
-```bash
-npx claudemux ~/path/to/project     # or: npm i -g claudemux
-```
-
-This package fetches its binary in a `postinstall` script. npm 11+ is trending toward
-blocking `postinstall` by default (the `allow-scripts`-style config some teams enable) —
-if scripts are blocked (e.g. `npm install --ignore-scripts`), the package installs with
-no binary. Use Homebrew or the shell installer if your environment blocks install scripts.
-
 **From source** (needs Go):
 
 ```bash

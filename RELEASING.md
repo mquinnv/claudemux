@@ -1,9 +1,9 @@
 # Releasing claudemux
 
-Cutting a new version touches three channels that consume one set of GitHub
+Cutting a new version touches two channels that consume one set of GitHub
 Release artifacts. The order matters — publish the release **first**, because the
-Homebrew formula and the npm package both point at release tarballs by URL, and a
-package that ships before its tarball exists fetches a 404.
+Homebrew formula points at release tarballs by URL, and a formula that ships
+before its tarball exists fetches a 404.
 
 Replace `X.Y.Z` throughout.
 
@@ -53,22 +53,10 @@ brew install mquinnv/tap/claudemux                   # from the pushed tap
 claudemux-head version                               # prints X.Y.Z
 ```
 
-## 3. npm package
-
-```bash
-# In npm/package.json bump "version" to X.Y.Z, then:
-cd npm && npm publish --access public   # needs `npm login` first (interactive)
-```
-
-`install.js` builds the download URL as `v${version}` from `package.json`, so the
-version there must match the tag exactly, and step 1 must already be published or
-the postinstall fetch 404s.
-
-## Sanity check after all three
+## Sanity check both channels
 
 ```bash
 # each in a scratch HOME
 brew install mquinnv/tap/claudemux
 curl -fsSL https://raw.githubusercontent.com/mquinnv/claudemux/main/install.sh | sh
-npx claudemux@X.Y.Z --help 2>/dev/null || true
 ```
