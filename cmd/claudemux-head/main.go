@@ -9,10 +9,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// version is stamped by the release workflow's -ldflags. "dev" for local builds.
+var version = "dev"
+
 func main() {
 	// Subcommand dispatch must precede flag.Parse(): `config` is a bare first
 	// arg, not a flag, and flag.Parse() would stop at it and silently ignore the
 	// rest. bin/claudemux depends on this path.
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "config" {
 		if len(os.Args) > 2 && os.Args[2] == "get" {
 			os.Exit(runConfigGet(os.Args[3:], os.Stdout, os.Stderr))

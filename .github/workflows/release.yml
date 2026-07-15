@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Build every platform
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+
+          # No Windows: the tool requires tmux and bash.
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            stage="$(mktemp -d)"
+
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${version}" \
+              -o "$stage/claudemux-head" ./cmd/claudemux-head
+
+            # All four files land as SIBLINGS: claudemux finds the colour
+            # resolver, and claudemux-head finds the hook script, by looking
+            # next to themselves.
+            cp bin/claudemux bin/project-color-resolve.sh "$stage/"
+            cp hooks/claudemux-map.sh "$stage/"
+            cp LICENSE README.md "$stage/"
+            chmod +x "$stage/claudemux" "$stage/project-color-resolve.sh" "$stage/claudemux-map.sh"
+
+            tar -czf "dist/claudemux_${version}_${os}_${arch}.tar.gz" -C "$stage" .
+          done
+
+          cd dist && shasum -a 256 ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
