@@ -93,4 +93,12 @@ case ":$PATH:" in
      echo "    export PATH=\"$PREFIX:\$PATH\"" ;;
 esac
 
+# This installer is intentionally standalone (it does not use or require brew).
+# But if brew IS here, the formula is the better-managed option — it handles
+# tmux/jq/git and `brew upgrade` — so point the user at it without switching to it.
+if command -v brew >/dev/null 2>&1; then
+  echo "claudemux: Homebrew detected — for managed upgrades and automatic"
+  echo "    tmux/jq/git, you may prefer:  brew install mquinnv/tap/claudemux"
+fi
+
 echo "claudemux: done. Run: claudemux <project-dir>"
