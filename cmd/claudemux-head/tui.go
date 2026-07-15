@@ -106,6 +106,7 @@ type model struct {
 	polling            bool
 	summarizer         *Summarizer
 	minSummaryInterval time.Duration
+	tabTitle           bool
 	summarizing        bool
 	lastSummaryAt      time.Time
 	// summaryGen identifies the session a summarize call was issued for. It is
@@ -138,6 +139,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		polling:            true,
 		summarizer:         summarizer,
 		minSummaryInterval: cfg.Summary.MinInterval.Duration,
+		tabTitle:           cfg.Summary.TabTitle,
 		// Init unconditionally fires the seed summarize call when summarizer
 		// != nil (see Init below); this flag must already be held at that
 		// point, for the same reason polling starts true above — Init has a
@@ -364,6 +366,15 @@ func (m model) canSummarize(now time.Time) bool {
 	return now.Sub(m.lastSummaryAt) >= m.minSummaryInterval
 }
 
+// tabCmdFor returns the window-rename command for a freshly landed summary, or
+// nil when the tab title is disabled, we are not in tmux, or the label is empty.
+func (m model) tabCmdFor(s Summary) tea.Cmd {
+	if !m.tabTitle {
+		return nil
+	}
+	return renameTabCmd(m.selfPane, s.Tab)
+}
+
 func (m model) summarize() tea.Cmd {
 	s := m.summarizer
 	first := m.firstPrompt
@@ -466,6 +477,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err == nil {
 			m.summary = msg.summary
+			return m, m.tabCmdFor(msg.summary)
 		}
 	}
 

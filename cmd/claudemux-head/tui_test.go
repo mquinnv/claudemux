@@ -1154,3 +1154,61 @@ func TestViewShowsTheLiveLineWhenOnlyOneFits(t *testing.T) {
 		t.Errorf("at height 3 there is no room for `topic`\ngot:\n%s", out)
 	}
 }
+
+func TestTabRenameArgs(t *testing.T) {
+	got, ok := tabRenameArgs("%3", "crm bundling")
+	if !ok {
+		t.Fatal("ok = false, want true for a real pane + label")
+	}
+	want := []string{"rename-window", "-t", "%3", "crm bundling"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("arg[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Outside tmux (no TMUX_PANE) there is nothing to rename.
+func TestTabRenameArgsNoPane(t *testing.T) {
+	if _, ok := tabRenameArgs("", "crm bundling"); ok {
+		t.Error("ok = true with empty pane, want false")
+	}
+}
+
+// An empty label must not rename the window to blank.
+func TestTabRenameArgsEmptyLabel(t *testing.T) {
+	if _, ok := tabRenameArgs("%3", ""); ok {
+		t.Error("ok = true with empty label, want false")
+	}
+}
+
+// renameTabCmd returns nil (no command) whenever there is nothing to do, so the
+// caller can append it unconditionally.
+func TestRenameTabCmdNilWhenNothingToDo(t *testing.T) {
+	if renameTabCmd("", "crm bundling") != nil {
+		t.Error("renameTabCmd with no pane should be nil")
+	}
+	if renameTabCmd("%3", "") != nil {
+		t.Error("renameTabCmd with no label should be nil")
+	}
+}
+
+// A landed summary renames the window only when tabTitle is on, a pane exists,
+// and the label is non-empty. This drives the model's summaryMsg handler and
+// asserts on the returned command's presence via the model's decision helper.
+func TestSummaryTriggersRenameWhenEnabled(t *testing.T) {
+	m := model{tabTitle: true, selfPane: "%3", summaryGen: 1}
+	if m.tabCmdFor(Summary{Topic: "t", Now: "n", Tab: "crm bundling"}) == nil {
+		t.Error("expected a rename command when tabTitle on, pane set, label present")
+	}
+}
+
+func TestSummaryNoRenameWhenTabTitleOff(t *testing.T) {
+	m := model{tabTitle: false, selfPane: "%3", summaryGen: 1}
+	if m.tabCmdFor(Summary{Topic: "t", Now: "n", Tab: "crm bundling"}) != nil {
+		t.Error("expected no rename command when tabTitle is off")
+	}
+}

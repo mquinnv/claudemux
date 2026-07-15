@@ -295,6 +295,12 @@ create_session() {
   # every resize — the attach included — so all four rows always render.
   tmux set-hook -t "$session_name" window-resized "resize-pane -t $head_pane -y 4"
 
+  # Let the terminal tab track the tmux window name — claudemux-head renames the
+  # window to the Haiku `tab` label as the session's focus settles. Set here so
+  # the user needs no ~/.tmux.conf change.
+  tmux set -t "$session_name" set-titles on
+  tmux set -t "$session_name" set-titles-string '#W'
+
   attach "$session_name" "$work_dir"
 }
 
