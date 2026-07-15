@@ -65,6 +65,11 @@ type SummaryConfig struct {
 	// Empty means the default: <config dir>/env. loadConfig resolves it to an
 	// absolute path, so a caller never has to re-derive the default.
 	APIKeyFile string `yaml:"api_key_file"`
+	// TabTitle renames the session's tmux window to the Haiku `tab` label, which
+	// tmux propagates to the terminal tab. Default true. Independent of Enabled:
+	// with Enabled true and this false, the status pane still summarizes but the
+	// window/tab is left alone.
+	TabTitle bool `yaml:"tab_title"`
 }
 
 // OnePasswordConfig is consumed by bin/claudemux via `claudemux-head config get`,
@@ -82,6 +87,7 @@ func defaultConfig() Config {
 			Enabled:     true,
 			Model:       "claude-haiku-4-5",
 			MinInterval: Duration{20 * time.Second},
+			TabTitle:    true,
 		},
 	}
 }

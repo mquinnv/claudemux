@@ -219,6 +219,37 @@ func TestConfigDirFallsBackToDotConfig(t *testing.T) {
 	}
 }
 
+func TestTabTitleDefaultsTrue(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Summary.TabTitle {
+		t.Error("Summary.TabTitle = false, want true by default")
+	}
+}
+
+func TestTabTitleCanBeDisabled(t *testing.T) {
+	writeConfig(t, "summary:\n  tab_title: false\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Summary.TabTitle {
+		t.Error("Summary.TabTitle = true, want false when set false in the file")
+	}
+	// Setting only tab_title must not disturb the other summary defaults.
+	if !cfg.Summary.Enabled {
+		t.Error("Summary.Enabled = false — a partial file zeroed an unrelated default")
+	}
+	if cfg.Summary.Model != "claude-haiku-4-5" {
+		t.Errorf("Summary.Model = %q, want the default preserved", cfg.Summary.Model)
+	}
+}
+
 func TestDurationMarshalYAML(t *testing.T) {
 	cfg := Config{
 		Summary: SummaryConfig{
