@@ -45,7 +45,9 @@ jobs:
             tar -czf "dist/claudemux_${version}_${os}_${arch}.tar.gz" -C "$stage" .
           done
 
-          cd dist && shasum -a 256 ./*.tar.gz > SHA256SUMS
+          # Bare filenames, no `./` prefix: install.sh and the Homebrew formula
+          # look these up by exact name, and a `./` would make that silently miss.
+          cd dist && shasum -a 256 claudemux_*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish the release
