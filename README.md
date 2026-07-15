@@ -17,13 +17,13 @@ You run `claudemux`; `claudemux-head` is what it draws.
 `claudemux some-project` creates a tmux session laid out like this:
 
 ```
-┌────────────────────────┬──────────┐
-│ claudemux-head  (4 rows)  │          │
-├────────────────────────┤  shell   │
-│                        │  (30%)   │
-│ claude                 │          │
-│                        │          │
-└────────────────────────┴──────────┘
+┌────────────────────────────┬──────────┐
+│ claudemux-head   (4 rows)  │          │
+├────────────────────────────┤  shell   │
+│                            │  (30%)   │
+│ claude                     │          │
+│                            │          │
+└────────────────────────────┴──────────┘
 ```
 
 `claudemux-head` gets a fixed 4-row pane at the top left (it re-pins itself to 4 rows on
@@ -158,6 +158,38 @@ of tracking the real file:
 ```bash
 cp .project.yml.example .project.yml
 ```
+
+## Appearance: project colors
+
+The `color:` field in `.project.yml` drives two things at once, so a session is
+visually identifiable at a glance:
+
+- **The tmux status bar and active-pane border** for the session are tinted to that
+  color (the foreground auto-picks black or white for contrast).
+- **The terminal tab**, via iTerm2's tab-color escape sequence, is tinted to match — so
+  the tab in your terminal and the session inside it share a color.
+
+`color:` accepts a named color (`red blue green yellow purple orange pink cyan`) or a
+`#rrggbb` hex value. With no `color:`, claudemux leaves tmux and the tab at their
+defaults.
+
+The tab coloring is **iTerm2-specific**. Other terminals silently ignore the escape
+sequence — you still get the tmux status-bar color, just not the tab tint. Nothing
+breaks; the color simply doesn't appear on the tab.
+
+## tmux notes
+
+**claudemux needs no `~/.tmux.conf`.** It sets everything it depends on per session at
+launch — the status-bar style, the split layout, and a `window-resized` hook that
+re-pins the `claudemux-head` pane to exactly 4 rows on every resize (including on
+attach). That hook exists specifically to cope with tmux's default `window-size latest`
+behavior, which otherwise redistributes pane heights when a client attaches and would
+shrink the head pane below 4 rows, clipping the status line. So the tool works out of the
+box regardless of your tmux configuration; it doesn't read, require, or recommend any
+particular settings.
+
+The one hard requirement is that `tmux` is installed and on `PATH` (Homebrew installs it
+for you; see [Dependencies](#dependencies)).
 
 ## Billing
 
