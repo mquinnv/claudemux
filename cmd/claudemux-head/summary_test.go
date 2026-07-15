@@ -223,7 +223,11 @@ func (f *fakeDoer) Do(req *http.Request) (*http.Response, error) {
 }
 
 func toolUseResponse(topic, now string) string {
-	input, _ := json.Marshal(map[string]string{"topic": topic, "now": now})
+	return toolUseResponseWithTab(topic, now, "test tab")
+}
+
+func toolUseResponseWithTab(topic, now, tab string) string {
+	input, _ := json.Marshal(map[string]string{"topic": topic, "now": now, "tab": tab})
 	return toolUseResponseRaw(summarizeToolName, json.RawMessage(input))
 }
 
@@ -560,5 +564,46 @@ func TestSummarizeRejectsPlaceholderLines(t *testing.T) {
 					"error so the pane falls back to the raw prompts", tt.topic, tt.now)
 			}
 		})
+	}
+}
+
+func TestSummaryDecodesTabField(t *testing.T) {
+	var s Summary
+	if err := json.Unmarshal([]byte(`{"topic":"t","now":"n","tab":"crm bundling"}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Tab != "crm bundling" {
+		t.Errorf("Tab = %q, want %q", s.Tab, "crm bundling")
+	}
+}
+
+// The system prompt must instruct the model to produce `tab`, or the forced
+// tool call will fill it with something unconstrained.
+func TestSystemPromptDescribesTab(t *testing.T) {
+	if !strings.Contains(summarySystemPrompt, "tab") {
+		t.Error("summarySystemPrompt does not mention the tab field")
+	}
+	// The length rule is the load-bearing constraint for a narrow tab; make sure
+	// it is stated so a prompt edit can't silently drop it.
+	if !strings.Contains(summarySystemPrompt, "24") {
+		t.Error("summarySystemPrompt does not state the tab length limit (24)")
+	}
+}
+
+func TestSummarizeErrorsOnEmptyTab(t *testing.T) {
+	d := &fakeDoer{body: toolUseResponseWithTab("fixing the worktree chip", "running tests", "")}
+	s := testSummarizer(d)
+
+	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+		t.Error("Summarize() error = nil, want an error when tab is empty even though topic and now are set")
+	}
+}
+
+func TestSummarizeErrorsOnPlaceholderTab(t *testing.T) {
+	d := &fakeDoer{body: toolUseResponseWithTab("fixing the worktree chip", "running tests", "<UNKNOWN>")}
+	s := testSummarizer(d)
+
+	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+		t.Error("Summarize() error = nil, want an error when tab is a placeholder")
 	}
 }

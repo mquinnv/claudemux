@@ -100,6 +100,11 @@ Call the summarize tool with two lines:
 - now: what it is doing RIGHT NOW — the current step. Derive it from the END of
   the transcript.
 
+- tab: a 2-4 word tab label — the shortest phrase naming the project or task.
+  lowercase, 24 characters maximum, no punctuation. Derive it from the same
+  durable goal as ` + "`topic`" + ` (never the current step), so the tab stays steady
+  while ` + "`now`" + ` changes.
+
 Each line: lowercase, under 60 characters, no trailing period, no quotes.
 Name concrete things (files, commands, features) — never "working on the task".
 
@@ -137,6 +142,7 @@ func placeholderLine(s string) bool {
 type Summary struct {
 	Topic string `json:"topic"`
 	Now   string `json:"now"`
+	Tab   string `json:"tab"`
 }
 
 // Summarizer turns a session transcript into the topic/now status lines.
@@ -235,8 +241,12 @@ func (s *Summarizer) Summarize(ctx context.Context, firstPrompt string, events [
 					"type":        "string",
 					"description": "What the session is doing right now.",
 				},
+				"tab": map[string]any{
+					"type":        "string",
+					"description": "A 2-4 word lowercase tab label, 24 characters max, no punctuation. Same durable goal as topic, compressed.",
+				},
 			},
-			Required: []string{"topic", "now"},
+			Required: []string{"topic", "now", "tab"},
 		},
 	}
 
@@ -263,7 +273,7 @@ func (s *Summarizer) Summarize(ctx context.Context, firstPrompt string, events [
 		if err := json.Unmarshal([]byte(tu.JSON.Input.Raw()), &out); err != nil {
 			return Summary{}, fmt.Errorf("summarize tool input: %w", err)
 		}
-		if placeholderLine(out.Topic) || placeholderLine(out.Now) {
+		if placeholderLine(out.Topic) || placeholderLine(out.Now) || placeholderLine(out.Tab) {
 			return Summary{}, errors.New("summarize returned an empty or placeholder line")
 		}
 		return out, nil
