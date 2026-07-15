@@ -87,11 +87,51 @@ echo "claudemux: installed to $PREFIX"
 # Register the Claude Code hook so nobody hand-edits settings.json.
 "$PREFIX/claudemux-head" hook ensure || echo "claudemux: could not register the hook automatically" >&2
 
+# Offer to put $PREFIX on PATH. Only when it isn't already, and only
+# interactively: a `curl | sh` install has the SCRIPT on stdin, so a bare `read`
+# would consume the script rather than the user — the prompt and the reply both
+# go through /dev/tty, the real terminal. With no tty (CI) or a shell we don't
+# know how to edit, we never mutate anything; we just print the line.
+manual="export PATH=\"$PREFIX:\$PATH\""
 case ":$PATH:" in
-  *":$PREFIX:"*) ;;
-  *) echo "claudemux: WARNING — $PREFIX is not on your PATH. Add it:"
-     echo "    export PATH=\"$PREFIX:\$PATH\"" ;;
+  *":$PREFIX:"*) already_on_path=1 ;;
+  *)             already_on_path=0 ;;
 esac
+
+if [ "$already_on_path" -eq 0 ]; then
+  # rc file + line syntax per shell. fish has its own idempotent path builtin.
+  case "$(basename "${SHELL:-}")" in
+    zsh)  path_rc="$HOME/.zshrc";                  path_line="$manual" ;;
+    bash) path_rc="$HOME/.bashrc";                 path_line="$manual" ;;
+    fish) path_rc="$HOME/.config/fish/config.fish"; path_line="fish_add_path $PREFIX" ;;
+    *)    path_rc="" ;;
+  esac
+
+  if [ -e /dev/tty ] && [ -n "$path_rc" ]; then
+    printf 'claudemux: %s is not on your PATH. Add it to %s now? [y/N] ' "$PREFIX" "$path_rc" > /dev/tty
+    read -r answer < /dev/tty || answer=""
+    case "$answer" in
+      y|Y|yes|YES)
+        mkdir -p "$(dirname "$path_rc")"
+        if [ -f "$path_rc" ] && grep -qF "$PREFIX" "$path_rc" 2>/dev/null; then
+          echo "claudemux: $path_rc already references $PREFIX — leaving it as is."
+        else
+          printf '\n# Added by the claudemux installer\n%s\n' "$path_line" >> "$path_rc"
+          echo "claudemux: added $PREFIX to $path_rc"
+        fi
+        echo "claudemux: restart your shell (or run \`$manual\`) to pick it up."
+        ;;
+      *)
+        echo "claudemux: skipped. Add it yourself with:"
+        echo "    $manual"
+        ;;
+    esac
+  else
+    # Non-interactive, or an unrecognized shell: never edit a file unasked.
+    echo "claudemux: $PREFIX is not on your PATH. Add it with:"
+    echo "    $manual"
+  fi
+fi
 
 # This installer is intentionally standalone (it does not use or require brew).
 # But if brew IS here, the formula is the better-managed option — it handles
