@@ -112,6 +112,7 @@ Code sessions open on the same project.
 ```yaml
 summary:
   enabled: true
+  tab_title: true
   model: claude-haiku-4-5
   min_interval: 20s
   api_key_file: ~/.config/claudemux/env
@@ -131,6 +132,10 @@ onepassword:
   This is the only thing bounding what an active session costs you, so treat it as a
   spending control. `0` is legal and means *no floor* — every turn may fire a call.
   A negative value is rejected at startup (it would remove the limit, not set one).
+- `summary.tab_title` — rename each session's tmux window (and thus the terminal
+  tab) to the short Haiku `tab` label, so a row of tabs reads like a list of what
+  each session is doing. Default `true`. Set `false` to keep the status-pane
+  summary but leave the window/tab untouched. Independent of `summary.enabled`.
 - `onepassword.default_account` / `onepassword.accounts` — consumed by `claudemux`, not
   by the TUI itself, to pick a 1Password account when injecting an `op_env`. Ships empty;
   see `.project.yml` below.
@@ -176,6 +181,18 @@ defaults.
 The tab coloring is **iTerm2-specific**. Other terminals silently ignore the escape
 sequence — you still get the tmux status-bar color, just not the tab tint. Nothing
 breaks; the color simply doesn't appear on the tab.
+
+### Tab titles
+
+The status pane's summarizer also produces a short 2–4 word label for the
+session, and claudemux renames the tmux window to it — which the terminal shows
+as the tab title. As the session's focus settles, the tab goes from the launch
+default to something like `crm bundling`. Because the title comes from the tmux
+window name, it also appears as the window label in the tmux status bar.
+
+This needs no tmux configuration — claudemux sets `set-titles` itself. It applies
+only inside tmux, and only while summaries are on; turn it off with
+`summary.tab_title: false`. Outside tmux there is nothing to rename.
 
 ## tmux notes
 
