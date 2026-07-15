@@ -28,6 +28,29 @@ while getopts "n" opt; do
 done
 shift $((OPTIND - 1))
 
+# resolve_self — absolute path of this script with symlinks followed.
+#
+# Not `readlink -f "$0"`: BSD readlink gained -f only on macOS 12.3 (2022), so on
+# older macOS it errors, $0 stays unresolved, and the color resolver beside the
+# real script is never found — silently dropping project colors for a
+# Homebrew/symlinked install. This pure-shell walk works everywhere; greadlink
+# (GNU coreutils) is used when present as a fast path.
+resolve_self() {
+  if command -v greadlink >/dev/null 2>&1; then
+    greadlink -f "$1"
+    return
+  fi
+  local p="$1" t
+  while [ -L "$p" ]; do
+    t="$(readlink "$p")"
+    case "$t" in
+      /*) p="$t" ;;
+      *)  p="$(dirname "$p")/$t" ;;
+    esac
+  done
+  printf '%s/%s\n' "$(cd "$(dirname "$p")" && pwd)" "$(basename "$p")"
+}
+
 # Register the Claude Code pane-map hook if it is not already there.
 #
 # This is a no-op read when the hook is present, which is the common case. It
@@ -78,7 +101,7 @@ resolve_dir() {
 # default style if no color.
 apply_status_color() {
   local resolver hex r g b luminance fg
-  resolver="$(dirname "$(readlink -f "$0")")/project-color-resolve.sh"
+  resolver="$(dirname "$(resolve_self "$0")")/project-color-resolve.sh"
   [ -f "$resolver" ] || return 0
   # shellcheck disable=SC1090
   . "$resolver"
@@ -99,7 +122,7 @@ apply_status_color() {
 apply_tab_color() {
   [ -e /dev/tty ] || return 0
   local resolver hex r g b
-  resolver="$(dirname "$(readlink -f "$0")")/project-color-resolve.sh"
+  resolver="$(dirname "$(resolve_self "$0")")/project-color-resolve.sh"
   [ -f "$resolver" ] || return 0
   # shellcheck disable=SC1090
   . "$resolver"
