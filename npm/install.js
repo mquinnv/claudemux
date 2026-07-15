@@ -33,12 +33,24 @@ try {
   for (const f of ["claudemux-head", "claudemux", "project-color-resolve.sh", "claudemux-map.sh"]) {
     fs.chmodSync(path.join(vendor, f), 0o755);
   }
-  // Register the Claude Code hook so nobody hand-edits settings.json.
-  execFileSync(path.join(vendor, "claudemux-head"), ["hook", "ensure"], { stdio: "inherit" });
 } catch (err) {
   console.error(`claudemux: install failed: ${err.message}`);
   console.error(`claudemux: you can install manually from https://github.com/${REPO}`);
   process.exit(1);
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// Register the Claude Code hook — best-effort, OUTSIDE the try above and never
+// fatal. `hook ensure` can legitimately exit non-zero (e.g. a settings.json that
+// does not parse), and the binaries are already installed by this point, so a
+// hook hiccup must not fail `npm install`. The launcher re-registers at startup
+// anyway, so this is only a convenience.
+try {
+  execFileSync(path.join(vendor, "claudemux-head"), ["hook", "ensure"], { stdio: "inherit" });
+} catch {
+  console.error(
+    "claudemux: could not register the Claude Code hook now; it will be " +
+      "registered the first time you run `claudemux`.",
+  );
 }
