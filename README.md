@@ -31,13 +31,41 @@ every resize), `claude` runs below it, and a shell takes the right 30% of the wi
 
 ## Install
 
+**Homebrew** (recommended — it installs `tmux`, `jq`, and `git` for you):
+
+```bash
+brew install mquinnv/tap/claudemux
+```
+
+**Shell** (no dependencies beyond `curl` and `tar`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mquinnv/claudemux/main/install.sh | sh
+```
+
+Installs to `~/.local/bin` (override with `CLAUDEMUX_PREFIX`). Verifies the release
+checksum before installing.
+
+**npm:**
+
+```bash
+npx claudemux ~/path/to/project     # or: npm i -g claudemux
+```
+
+This package fetches its binary in a `postinstall` script. npm 11+ is trending toward
+blocking `postinstall` by default (the `allow-scripts`-style config some teams enable) —
+if scripts are blocked (e.g. `npm install --ignore-scripts`), the package installs with
+no binary. Use Homebrew or the shell installer if your environment blocks install scripts.
+
+**From source** (needs Go):
+
 ```bash
 go install github.com/mquinnv/claudemux/cmd/claudemux-head@latest
 ```
 
-That puts `claudemux-head` on your `PATH` (assuming `$(go env GOPATH)/bin` is on it). The
-launcher script and its color resolver aren't part of the Go module — clone the repo and
-symlink them:
+That puts `claudemux-head` on your `PATH` (assuming `$(go env GOPATH)/bin` is on it), but
+**only the status-pane binary** — the Go module doesn't include the `claudemux` launcher
+or its color resolver. Clone the repo and symlink those separately:
 
 ```bash
 git clone https://github.com/mquinnv/claudemux
@@ -60,6 +88,9 @@ different directories, breaks project-color resolution silently (it just no-ops)
 
 ## Dependencies
 
+Homebrew installs and pins `tmux`, `jq`, and `git` for you. On the other channels
+they're your responsibility:
+
 | Tool | Required by | Without it |
 |---|---|---|
 | `tmux` | `claudemux` | `claudemux` cannot run at all |
@@ -70,53 +101,19 @@ different directories, breaks project-color resolution silently (it just no-ops)
 | `op` (1Password CLI) | `claudemux` (`op_env` injection) | sessions launch without injected secrets |
 | iTerm2 | `claudemux` (tab coloring) | other terminals silently ignore the OSC escape sequences |
 
-## The Claude Code hook
+## The pane-map hook
 
-`claudemux-head` needs to know which tmux pane is running the `claude` process it should
-follow — its *sibling* pane, not just "whatever session changed most recently." The hook
-records that mapping.
+`claudemux-head` follows the transcript of the `claude` process in its *sibling* pane. A
+small Claude Code hook records which session lives in which tmux pane so it can do that.
 
-**Without the hook, claudemux-head falls back to most-recently-active-session detection**,
-which picks whichever `.jsonl` transcript in the project directory has the newest mtime.
-That's wrong the moment you have more than one Claude Code session open on the same
-project — the head pane can silently lock onto a different session than the one it sits
-next to. Install the hook.
+**You do not need to install or configure this.** Every install channel registers it, and
+`claudemux` re-checks at launch, so it is repaired automatically if it goes missing. It is
+written to `~/.claude/settings.json` — existing hooks and settings are preserved, and a
+backup is taken before any change.
 
-```bash
-mkdir -p ~/.claude/hooks
-ln -sf "$PWD/claudemux/hooks/claudemux-map.sh" ~/.claude/hooks/claudemux-map.sh
-```
-
-Register it on **both** `SessionStart` and `UserPromptSubmit` in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          { "type": "command", "command": "~/.claude/hooks/claudemux-map.sh" }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "~/.claude/hooks/claudemux-map.sh" }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Both events matter: `SessionStart` records the mapping when a pane first opens;
-`UserPromptSubmit` keeps it current across `/clear`, `resume`, and compaction, which
-rotate the transcript file underneath a live session.
-
-The hook **must stay silent on stdout** — `UserPromptSubmit` stdout is injected directly
-into the model's context, so any hook output there would leak into the conversation.
-`hooks/claudemux-map.sh` already respects this; if you write your own, do too.
+Without the hook, `claudemux-head` falls back to picking whichever transcript in the
+project directory changed most recently. That is wrong as soon as you have two Claude
+Code sessions open on the same project.
 
 ## Configuration
 
