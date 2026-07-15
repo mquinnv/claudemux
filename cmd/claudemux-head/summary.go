@@ -85,9 +85,9 @@ const (
 	summaryMaxTokens  = 200
 )
 
-const summarySystemPrompt = `You label a live coding session for a two-line terminal status display.
+const summarySystemPrompt = `You label a live coding session for a two-line terminal status display and a short tab title.
 
-Call the summarize tool with two lines:
+Call the summarize tool with these fields:
 
 - topic: what this session is FOR — the goal the human is pursuing.
   Derive it PRIMARILY from the "first prompt" line: that is the human's original
