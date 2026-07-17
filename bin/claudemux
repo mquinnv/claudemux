@@ -139,7 +139,15 @@ apply_tab_color() {
 attach() {
   apply_status_color "$1" "$2"
   apply_tab_color "$2" || true
-  exec tmux attach -t "$1"
+  # Not `exec`: running tmux as a child lets the launcher — and the shell that
+  # invoked it — regain control when the session ends and read our exit code.
+  # Reaching here means the launch succeeded, so we report success (0)
+  # regardless of the tmux client's own exit status; the shell wrapper uses
+  # that 0 to close the terminal tab once the session is gone. A failure that
+  # exits *before* attach leaves a non-zero code, keeping the tab (and its
+  # error) on screen.
+  tmux attach -t "$1"
+  exit 0
 }
 
 # project_field FILE KEY — echo the trimmed, unquoted value of a top-level
@@ -315,10 +323,16 @@ if [ "$#" -eq 0 ]; then
   create_session "$(pwd)"
 fi
 
+# Each argument becomes (or reattaches to) its own session. The first arg that
+# resolves calls create_session, which attaches and never returns; unresolved
+# args are reported and skipped. Falling through the loop means nothing
+# resolved — exit non-zero so the shell wrapper keeps this message visible
+# instead of closing the tab on a "successful" no-op.
 for arg in "$@"; do
   if dir="$(resolve_dir "$arg")"; then
     create_session "$dir"
   else
-    echo "Skipping '$arg': not a directory and no zoxide match found" >&2
+    echo "claudemux: '$arg' is not a directory and has no zoxide match" >&2
   fi
 done
+exit 1
