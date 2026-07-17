@@ -47,14 +47,11 @@ func findMostRecentSession(entries []sessionEntry) string {
 	return entries[0].SessionID
 }
 
-// mostRecentlyActiveSession returns the path of the most-recently-modified
-// .jsonl file in dir. ok is false when dir has no session files or can't be
-// read — callers should keep their current binding in that case. This is the
-// "most-recently-active" (MRA) selector the live monitor uses to follow a
-// session that rotates underneath it (new session, /clear, resume, compaction).
-func mostRecentlyActiveSession(dir string) (string, bool) {
-	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil || len(matches) == 0 {
+// newestByModTime returns the most-recently-modified path from matches, sorting
+// the slice in place. ok is false for an empty slice. A path that can't be
+// stat'd sorts as not-newer, so it never wins over a readable file.
+func newestByModTime(matches []string) (string, bool) {
+	if len(matches) == 0 {
 		return "", false
 	}
 	sort.Slice(matches, func(i, j int) bool {
@@ -66,6 +63,38 @@ func mostRecentlyActiveSession(dir string) (string, bool) {
 		return infoI.ModTime().After(infoJ.ModTime())
 	})
 	return matches[0], true
+}
+
+// mostRecentlyActiveSession returns the path of the most-recently-modified
+// .jsonl file in dir. ok is false when dir has no session files or can't be
+// read — callers should keep their current binding in that case. This is the
+// "most-recently-active" (MRA) selector the live monitor uses to follow a
+// session that rotates underneath it (new session, /clear, resume, compaction).
+func mostRecentlyActiveSession(dir string) (string, bool) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil {
+		return "", false
+	}
+	return newestByModTime(matches)
+}
+
+// transcriptForSession returns the newest transcript named "<sessionID>.jsonl"
+// across every per-project folder under projectsDir. A session's transcript
+// moves to a different encoded project dir when its cwd crosses into (or out of)
+// a git worktree, so the pane map's recorded transcript_path can dangle while
+// the session keeps writing under a new dir. The session id is stable across
+// that move, so globbing by it recovers the live transcript without having to
+// re-derive Claude Code's project-dir encoding (which drops '/', '.', and '+'
+// alike to '-' and so can't be reversed). ok is false when no such file exists.
+func transcriptForSession(projectsDir, sessionID string) (string, bool) {
+	if projectsDir == "" || sessionID == "" {
+		return "", false
+	}
+	matches, err := filepath.Glob(filepath.Join(projectsDir, "*", sessionID+".jsonl"))
+	if err != nil {
+		return "", false
+	}
+	return newestByModTime(matches)
 }
 
 // discoverSessionsFromJSONL finds sessions by listing .jsonl files in the project

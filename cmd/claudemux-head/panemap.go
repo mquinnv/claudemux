@@ -80,13 +80,13 @@ func claudePaneCandidates(listing, self string) []string {
 	return candidates
 }
 
-// claudePaneCandidatesLive lists the claude/node panes in the same tmux
-// session as self (a pane id like "%35"), ordered by preference (see
-// claudePaneCandidates), for the caller to try in turn. Returns nil outside
-// tmux or on error.
-func claudePaneCandidatesLive(self string) []string {
+// listPanes returns the raw `tmux list-panes` output for self's session, one
+// pane per line as "#{pane_id} #{window_id} #{pane_current_command}
+// #{pane_current_path}". pane_current_path is last because it is the only field
+// that can contain spaces. Empty string outside tmux or on error.
+func listPanes(self string) string {
 	if self == "" {
-		return nil
+		return ""
 	}
 	// The poll loop calls this every second; a wedged tmux server must never
 	// hang it. Bound the subprocess with a hard deadline and treat a timeout
@@ -94,11 +94,38 @@ func claudePaneCandidatesLive(self string) []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-s", "-t", self,
-		"-F", "#{pane_id} #{window_id} #{pane_current_command}").Output()
+		"-F", "#{pane_id} #{window_id} #{pane_current_command} #{pane_current_path}").Output()
 	if err != nil {
-		return nil
+		return ""
 	}
-	return claudePaneCandidates(string(out), self)
+	return string(out)
+}
+
+// panePaths maps each pane id to its live cwd (pane_current_path) from a
+// listPanes listing. The path is everything after the first three space-
+// separated fields — every earlier field is space-free — so a cwd containing
+// spaces survives intact. Lines without a path (fewer than four fields) are
+// skipped.
+func panePaths(listing string) map[string]string {
+	paths := map[string]string{}
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.SplitN(line, " ", 4)
+		if len(fields) < 4 || fields[0] == "" {
+			continue
+		}
+		paths[fields[0]] = fields[3]
+	}
+	return paths
+}
+
+// claudeProjectsPath is the dir under which Claude Code writes per-project
+// transcript folders. Empty when the home dir can't be resolved.
+func claudeProjectsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects")
 }
 
 // readPaneMap returns the transcript path and live cwd recorded for paneID.
@@ -128,15 +155,62 @@ func readPaneMap(dir, paneID string) (string, string, bool) {
 	return m.TranscriptPath, m.Cwd, true
 }
 
-// mappedTranscript composes candidate-pane discovery with the map lookup:
-// it tries each claude/node pane candidate in preference order and returns
-// the transcript path and live cwd for the first one the hook has recorded
-// a map for. ok is false if no candidate has a usable map.
+// readPaneSession returns the session id the hook recorded for paneID. Unlike
+// readPaneMap it does NOT require the recorded transcript to still exist: only
+// the map's cwd and transcript_path go stale when an autonomous session cd's
+// into a worktree (the hook rewrites the map only on SessionStart /
+// UserPromptSubmit), while the session id is stable across that move. It stays a
+// valid key for locating the session's current transcript. ok is false when the
+// map file is absent, unparseable, or carries no session id.
+func readPaneSession(dir, paneID string) (string, bool) {
+	if dir == "" || paneID == "" {
+		return "", false
+	}
+	name := strings.TrimPrefix(paneID, "%") + ".json"
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return "", false
+	}
+	var m paneMap
+	if err := json.Unmarshal(data, &m); err != nil || m.SessionID == "" {
+		return "", false
+	}
+	return m.SessionID, true
+}
+
+// mappedTranscript resolves the sibling claude pane's live cwd and current
+// transcript. It prefers tmux's pane_current_path — always current — over the
+// hook-recorded cwd, which lags until the next SessionStart/UserPromptSubmit and
+// so goes stale the moment an autonomous session cd's into a worktree. The
+// transcript is found by the pane's stable session id (via transcriptForSession)
+// rather than the map's recorded transcript_path, which dangles across the same
+// move. It walks candidates in preference order and binds to the first with a
+// recorded session id, so cwd and transcript always describe the same session.
+//
+//   - ok is false only when no claude/node candidate pane exists at all.
+//   - cwd is the pane's live path and drives the worktree chip; it is
+//     authoritative even when no session id or transcript is known.
+//   - transcript is "" when no candidate has a recorded session id yet, or the
+//     session's transcript can't be found on disk — the caller keeps its
+//     current binding in that case.
 func mappedTranscript(selfPane, dir string) (string, string, bool) {
-	for _, pane := range claudePaneCandidatesLive(selfPane) {
-		if transcript, cwd, ok := readPaneMap(dir, pane); ok {
-			return transcript, cwd, true
+	listing := listPanes(selfPane)
+	if listing == "" {
+		return "", "", false
+	}
+	candidates := claudePaneCandidates(listing, selfPane)
+	if len(candidates) == 0 {
+		return "", "", false
+	}
+	paths := panePaths(listing)
+	for _, pane := range candidates {
+		if sid, ok := readPaneSession(dir, pane); ok {
+			transcript, _ := transcriptForSession(claudeProjectsPath(), sid)
+			return transcript, paths[pane], true
 		}
 	}
-	return "", "", false
+	// No candidate has a recorded session id yet. Still report the preferred
+	// pane's live cwd so the worktree chip tracks reality; there's no
+	// transcript to follow until the hook writes a map for it.
+	return "", paths[candidates[0]], true
 }

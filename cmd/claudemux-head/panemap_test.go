@@ -157,3 +157,62 @@ func TestReadPaneMapRejectsGarbage(t *testing.T) {
 		t.Fatal("expected not-ok for absent map file")
 	}
 }
+
+func TestPanePaths(t *testing.T) {
+	listing := "%124 @44 claude /Users/x/repo/.claude/worktrees/feat+wt\n" +
+		"%125 @44 fish /Users/x/repo\n" +
+		"%35 @1 claudemux-head\n" // no path field -> skipped
+	got := panePaths(listing)
+	if got["%124"] != "/Users/x/repo/.claude/worktrees/feat+wt" {
+		t.Errorf("%%124 path = %q", got["%124"])
+	}
+	if got["%125"] != "/Users/x/repo" {
+		t.Errorf("%%125 path = %q", got["%125"])
+	}
+	if _, ok := got["%35"]; ok {
+		t.Errorf("%%35 has no path field and must be skipped, got %q", got["%35"])
+	}
+}
+
+// A cwd containing spaces must survive: the path is the whole remainder after
+// the first three space-separated (space-free) fields.
+func TestPanePathsPreservesSpacesInPath(t *testing.T) {
+	got := panePaths("%1 @1 claude /Users/x/My Repo/sub\n")
+	if got["%1"] != "/Users/x/My Repo/sub" {
+		t.Errorf("path = %q, want %q", got["%1"], "/Users/x/My Repo/sub")
+	}
+}
+
+// The core regression: after a session cd's into a worktree its recorded
+// transcript_path dangles, so readPaneMap rejects the map — but the session id
+// is still readable, which is what locates the live transcript.
+func TestReadPaneSessionSurvivesDanglingTranscript(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"session_id":"sess-abc","transcript_path":"` +
+		filepath.Join(dir, "gone.jsonl") + `","cwd":"/stale/base"}`
+	if err := os.WriteFile(filepath.Join(dir, "124.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// readPaneMap rejects it (transcript missing)...
+	if _, _, ok := readPaneMap(dir, "%124"); ok {
+		t.Fatal("readPaneMap should reject a map whose transcript is gone")
+	}
+	// ...but readPaneSession still yields the stable session id.
+	sid, ok := readPaneSession(dir, "%124")
+	if !ok || sid != "sess-abc" {
+		t.Fatalf("readPaneSession = %q ok=%v, want %q true", sid, ok, "sess-abc")
+	}
+}
+
+func TestReadPaneSessionRejectsMissingOrEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "5.json"), []byte(`{"session_id":""}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readPaneSession(dir, "%5"); ok {
+		t.Error("expected not-ok for empty session_id")
+	}
+	if _, ok := readPaneSession(dir, "%404"); ok {
+		t.Error("expected not-ok for absent map file")
+	}
+}

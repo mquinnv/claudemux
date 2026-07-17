@@ -179,3 +179,43 @@ func mustParseTime(t *testing.T, s string) time.Time {
 	}
 	return parsed
 }
+
+// transcriptForSession finds a session's transcript by its stable id across
+// every project dir, and when the id appears in two dirs (base + worktree
+// encodings, as happens across a mid-session cd into a worktree) it returns the
+// most recently modified — the live one.
+func TestTranscriptForSession(t *testing.T) {
+	projects := t.TempDir()
+	base := filepath.Join(projects, "-Users-x-repo")
+	wt := filepath.Join(projects, "-Users-x-repo--claude-worktrees-feat")
+	for _, d := range []string{base, wt} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sid := "sess-abc"
+	baseFile := filepath.Join(base, sid+".jsonl")
+	wtFile := filepath.Join(wt, sid+".jsonl")
+	for _, f := range []string{baseFile, wtFile} {
+		if err := os.WriteFile(f, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Make the worktree copy strictly newer than the base copy.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(baseFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := transcriptForSession(projects, sid)
+	if !ok || got != wtFile {
+		t.Fatalf("transcriptForSession = %q ok=%v, want %q true", got, ok, wtFile)
+	}
+
+	if _, ok := transcriptForSession(projects, "no-such-session"); ok {
+		t.Error("expected not-ok for an unknown session id")
+	}
+	if _, ok := transcriptForSession(projects, ""); ok {
+		t.Error("expected not-ok for an empty session id")
+	}
+}

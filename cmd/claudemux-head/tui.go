@@ -310,7 +310,10 @@ func (m model) pollData() tea.Cmd {
 		if follow {
 			if mapped, cwd, ok := mappedTranscript(selfPane, paneDir); ok {
 				mappedCwd = cwd
-				if mapped != jsonlPath {
+				// mapped is "" when the pane's live cwd is known but its
+				// transcript isn't yet — keep the current binding then rather
+				// than adopting an empty path.
+				if mapped != "" && mapped != jsonlPath {
 					activeJSONL = mapped
 				}
 			} else if mra, ok := mostRecentlyActiveSession(filepath.Dir(jsonlPath)); ok && mra != jsonlPath {
