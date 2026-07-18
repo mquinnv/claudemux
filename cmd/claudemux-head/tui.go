@@ -584,11 +584,15 @@ func clipLine(line string, width int) string {
 	return ansi.Truncate(line, width, "…")
 }
 
+// defaultBarW is the gauge bar width used everywhere except the dedicated
+// meters line, which grows its bars to fill the pane (see renderMetersLine).
+const defaultBarW = 10
+
 // ctxSegment renders the "ctx <bar> <pct>%" gauge segment shared by
-// renderStatusbar and renderMetersLine.
-func ctxSegment(m model) string {
+// renderStatusbar and renderMetersLine. barW is the bar's cell width.
+func ctxSegment(m model, barW int) string {
 	return fmt.Sprintf("ctx %s %d%%",
-		renderBar(10, m.contextPct, thresholdColor(m.contextPct)),
+		renderBar(barW, m.contextPct, thresholdColor(m.contextPct)),
 		int(m.contextPct+0.5))
 }
 
@@ -626,9 +630,9 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if chip != "" {
 		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
 	}
-	leftParts = append(leftParts, ctxSegment(m))
+	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
 
-	rightParts := rateGaugeParts(m, now)
+	rightParts := rateGaugeParts(m, now, defaultBarW)
 
 	left := strings.Join(leftParts, " · ")
 	right := strings.Join(rightParts, " · ")
@@ -692,8 +696,8 @@ func stateDot(kind StateKind) string {
 // callers drop from when space is tight: eta, then wk, then 5h. Returns nil
 // when rate-limit data isn't available (m.rateOK == false). Shared by
 // renderStatusbar and renderMetersLine so both panels build the identical
-// gauge text from the same rules.
-func rateGaugeParts(m model, now time.Time) []string {
+// gauge text from the same rules. barW is each gauge's bar cell width.
+func rateGaugeParts(m model, now time.Time, barW int) []string {
 	if !m.rateOK {
 		return nil
 	}
@@ -701,11 +705,11 @@ func rateGaugeParts(m model, now time.Time) []string {
 	wkPct := float64(m.rateLimits.SevenDay.UsedPercent)
 	parts := []string{
 		fmt.Sprintf("5h %s %d%%→%s",
-			renderBar(10, fhPct, thresholdColor(fhPct)),
+			renderBar(barW, fhPct, thresholdColor(fhPct)),
 			m.rateLimits.FiveHour.UsedPercent,
 			m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
 		fmt.Sprintf("wk %s %d%%→%s",
-			renderBar(10, wkPct, thresholdColor(wkPct)),
+			renderBar(barW, wkPct, thresholdColor(wkPct)),
 			m.rateLimits.SevenDay.UsedPercent,
 			m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
 	}
@@ -771,16 +775,42 @@ func renderStateLine(m model, now time.Time) string {
 // on the right (5h, wk, eta), here joined left-to-right with " · " (no
 // right-alignment needed since it has the full line to itself). When the
 // line overflows the pane width, gauges drop from the end in today's order
-// (eta → wk → 5h); the ctx gauge always stays.
+// (eta → wk → 5h); the ctx gauge always stays. Unlike the packed statusbar,
+// the surviving bars then widen past defaultBarW to consume the leftover
+// columns, so the meters fill the pane rather than stranding it as padding.
 func renderMetersLine(m model, now time.Time) string {
-	parts := append([]string{ctxSegment(m)}, rateGaugeParts(m, now)...)
-
 	avail := m.width - 2 // columns inside the " "..." " padding below
 	if avail < 1 {
 		avail = 1
 	}
+	build := func(barW int) []string {
+		return append([]string{ctxSegment(m, barW)}, rateGaugeParts(m, now, barW)...)
+	}
+
+	// First decide how many gauges fit at the baseline bar width, dropping
+	// from the end as before. Only the bars flex below, so gauge count is
+	// settled here and never changes as they widen.
+	parts := build(defaultBarW)
 	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
 		parts = parts[:len(parts)-1]
+	}
+
+	// Spend the leftover columns widening every surviving bar equally: this
+	// line has the pane to itself, so a 10-cell bar wastes most of it on a
+	// wide pane. Only ctx/5h/wk carry bars — the trailing eta segment is
+	// plain text — so the slack splits across those, not across every part,
+	// or the eta's share would just become trailing blank space. Integer
+	// division leaves a few columns unspent rather than risking an overflow
+	// that clipLine would then chop.
+	barCount := len(parts)
+	if barCount > 3 {
+		barCount = 3
+	}
+	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
+		wide := build(defaultBarW + grow)[:len(parts)]
+		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
+			parts = wide
+		}
 	}
 	return statusbarStyle.Width(m.width).Render(clipLine(" "+strings.Join(parts, " · ")+" ", m.width))
 }

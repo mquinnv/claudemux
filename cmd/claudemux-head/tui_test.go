@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // When the active Claude session in a directory rotates (a newer .jsonl
@@ -354,7 +355,7 @@ func TestRenderMetersLineDropsRightGroupKeepsCtx(t *testing.T) {
 	// render intact, clipLine truncates it too rather than wrapping the line.
 	// So this loop only asserts "ctx never drops" down to that floor; behavior
 	// below the floor is covered by TestRenderLinesNeverWrapAtNarrowWidths.
-	ctxFloor := lipgloss.Width(ctxSegment(m)) + 2
+	ctxFloor := lipgloss.Width(ctxSegment(m, defaultBarW)) + 2
 	sawEtaDrop, sawWkDrop := false, false
 	for w := fullW; w >= ctxFloor; w-- {
 		m.width = w
@@ -380,6 +381,54 @@ func TestRenderMetersLineDropsRightGroupKeepsCtx(t *testing.T) {
 	}
 	if !sawWkDrop {
 		t.Fatal("never observed wk being dropped as width shrank")
+	}
+}
+
+// The meters line owns its whole line, so it widens its bars to consume the
+// leftover columns instead of leaving a fixed 10-cell bar adrift on a wide
+// pane. Slack splits across the three bar-carrying gauges only, so at most
+// barCount-1 columns may go unspent.
+func TestRenderMetersLineWidensBarsToFillPane(t *testing.T) {
+	now := time.Now()
+	m := model{
+		contextPct: 42,
+		rateOK:     true,
+		rateLimits: RateLimits{
+			FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+			SevenDay: Window{UsedPercent: 73, ResetsAt: now.Add(3 * 24 * time.Hour)},
+		},
+		pctSamples: []pctSample{
+			{at: now.Add(-10 * time.Minute), pct: 10},
+			{at: now, pct: 20},
+		},
+	}
+
+	barCells := func(s string) int {
+		n := 0
+		for _, r := range s {
+			if r == '█' || r == '░' {
+				n++
+			}
+		}
+		return n
+	}
+
+	var prevBars int
+	for _, w := range []int{80, 100, 120, 160, 200} {
+		m.width = w
+		line := renderMetersLine(m, now)
+
+		// The rendered line is background-filled to the pane width, so measure
+		// fill by the content before the trailing pad rather than by width.
+		content := len(" ") + lipgloss.Width(strings.TrimRight(ansi.Strip(line), " "))
+		if unspent := w - content; unspent > 3 {
+			t.Errorf("at width %d, %d columns left unspent (want <= 3): %q", w, unspent, line)
+		}
+		if bars := barCells(line); bars <= prevBars {
+			t.Errorf("at width %d, total bar cells = %d, want more than %d at the previous width", w, bars, prevBars)
+		} else {
+			prevBars = bars
+		}
 	}
 }
 
