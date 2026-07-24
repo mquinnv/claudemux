@@ -67,6 +67,8 @@ type Event struct {
 	ToolUses    []ToolUse
 	ToolResults []ToolResult
 	Usage       *Usage
+	Cwd         string // transcript's per-entry cwd; tracks worktree moves
+	IsSidechain bool   // true for subagent (Task) entries — excluded from the worktree chip
 	RawLine     string
 }
 
@@ -220,17 +222,19 @@ func parseEvent(line string) (Event, bool) {
 		return Event{}, false
 	}
 	var raw struct {
-		Type       string          `json:"type"`
-		IsMeta     bool            `json:"isMeta"`
-		Timestamp  string          `json:"timestamp"`
-		Message    json.RawMessage `json:"message"`
-		LastPrompt string          `json:"lastPrompt"` // present on type=last-prompt events
+		Type        string          `json:"type"`
+		IsMeta      bool            `json:"isMeta"`
+		Timestamp   string          `json:"timestamp"`
+		Cwd         string          `json:"cwd"`
+		IsSidechain bool            `json:"isSidechain"`
+		Message     json.RawMessage `json:"message"`
+		LastPrompt  string          `json:"lastPrompt"` // present on type=last-prompt events
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Event{}, false
 	}
 
-	ev := Event{Type: raw.Type, IsMeta: raw.IsMeta, Timestamp: raw.Timestamp, RawLine: line}
+	ev := Event{Type: raw.Type, IsMeta: raw.IsMeta, Timestamp: raw.Timestamp, Cwd: raw.Cwd, IsSidechain: raw.IsSidechain, RawLine: line}
 
 	if raw.Type == "last-prompt" && raw.LastPrompt != "" {
 		ev.UserText = cleanCommandText(raw.LastPrompt)

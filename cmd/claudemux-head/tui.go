@@ -74,13 +74,24 @@ type model struct {
 	selfPane string
 	paneDir  string
 
-	// paneCwd is the live cwd the hook recorded for the mapped pane on the
-	// most recent poll ("" when no mapping was used, e.g. the MRA fallback
-	// or no mapping found — see worktreeChip). Unlike jsonlPath's encoded
-	// project dir, this reflects where the session's cwd is *now*, so it
-	// clears the worktree chip once the session's cwd returns to the base
-	// repo even though the transcript stays under the worktree-encoded dir.
-	paneCwd string
+	// sessionCwd is the latest cwd the *main* session recorded in its
+	// transcript (last non-sidechain entry's cwd), recomputed from the event
+	// ring each poll. It — not tmux's pane cwd — drives the worktree chip: the
+	// claude process never chdir's when the agent enters a worktree (the
+	// EnterWorktree/ExitWorktree and cd-in-a-tool paths all leave the OS
+	// process where it launched), so tmux's pane_current_path stays pinned to
+	// the base repo, while the transcript's cwd faithfully tracks every move
+	// in and out. Subagent sidechains are excluded so a Task running off in
+	// its own worktree doesn't hijack the head's chip.
+	sessionCwd string
+
+	// cmdWorktree is the worktree the session is driving *at arm's length* —
+	// its cwd stays in the main repo while its commands reach into a linked
+	// worktree by explicit path (git -C <wt>, cd <wt> && …, container names).
+	// Recomputed each poll from the recent command window; "" when no single
+	// worktree dominates. Only consulted when sessionCwd itself isn't a
+	// worktree (see worktreeChip).
+	cmdWorktree string
 
 	// Persistent state
 	reader         *EventReader
@@ -169,6 +180,23 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	if m.reader != nil {
 		m.firstPrompt = m.reader.FirstPrompt()
 	}
+	m.sessionCwd = lastMainCwd(m.allEvents, m.sessionCwd)
+	m.cmdWorktree = commandWorktree(m.sessionCwd, m.allEvents, now)
+}
+
+// lastMainCwd returns the cwd of the most recent main-session (non-sidechain)
+// event that carries one, scanning the ring newest-first. prev is returned
+// unchanged when the ring holds no such event this poll — a tail of pure
+// sidechain (subagent) activity must not blank the chip, and a not-yet-seeded
+// ring must not clear a cwd already known. It only ever moves forward to a real
+// observed cwd.
+func lastMainCwd(events []Event, prev string) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if e := events[i]; e.Cwd != "" && !e.IsSidechain {
+			return e.Cwd
+		}
+	}
+	return prev
 }
 
 // switchSession re-binds the monitor to a different session .jsonl: it opens a
@@ -188,6 +216,9 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	m.reader = r
 	m.allEvents = seeded
 	m.firstPrompt = r.FirstPrompt()
+	// Clean slate: the new session's own cwd must come from its own events, not
+	// linger from the session we just left. Its seed always carries one.
+	m.sessionCwd = ""
 
 	// The new session starts clean: the old session's topic must not survive as
 	// the next call's prevTopic, because summarySystemPrompt tells the model to
@@ -306,10 +337,8 @@ func (m model) pollData() tea.Cmd {
 		// project dir, surface it so Update can re-bind. Empty when not
 		// following or nothing newer exists.
 		activeJSONL := ""
-		mappedCwd := ""
 		if follow {
-			if mapped, cwd, ok := mappedTranscript(selfPane, paneDir); ok {
-				mappedCwd = cwd
+			if mapped, _, ok := mappedTranscript(selfPane, paneDir); ok {
 				// mapped is "" when the pane's live cwd is known but its
 				// transcript isn't yet — keep the current binding then rather
 				// than adopting an empty path.
@@ -325,7 +354,6 @@ func (m model) pollData() tea.Cmd {
 		return dataMsg{
 			time:         time.Now(),
 			activeJSONL:  activeJSONL,
-			mappedCwd:    mappedCwd,
 			newEvents:    newEvents,
 			rateLimits:   rl,
 			rateLimitErr: rlErr,
@@ -336,7 +364,6 @@ func (m model) pollData() tea.Cmd {
 type dataMsg struct {
 	time         time.Time
 	activeJSONL  string // non-empty when a newer session file should be adopted
-	mappedCwd    string // live cwd from the pane map used this poll; "" if none used
 	newEvents    []Event
 	rateLimits   RateLimits
 	rateLimitErr error
@@ -414,10 +441,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dataMsg:
 		m.polling = false
-		// Always reflect this poll's mapping state, even when it's empty —
-		// that's how the worktree chip clears once the mapping disappears
-		// (mapped pane gone) or the live cwd moves back to the base repo.
-		m.paneCwd = msg.mappedCwd
 		// Session rotated: re-bind to the newer file and discard this batch's
 		// events (they were tailed from the old reader). They refresh on the
 		// next poll.
@@ -905,18 +928,25 @@ func worktreeNameFromCwd(cwd string) string {
 	return rest
 }
 
-// worktreeChip selects the worktree chip's source of truth: the live cwd the
-// hook most recently recorded, when one is known, otherwise the transcript
-// path's encoded project dir. A live cwd takes priority even when it yields
-// no chip (a base-repo cwd correctly clears the chip even though the
-// transcript dir is still worktree-encoded — that's the whole point of
-// tracking live cwd instead of trusting the transcript dir forever). The
-// transcript-derived fallback only applies when no live cwd is known at all,
-// e.g. the hook mapping is unavailable or this poll fell back to the MRA
-// glob.
+// worktreeChip selects the worktree chip's source of truth, in priority order:
+//
+//  1. sessionCwd genuinely inside a worktree — the session was launched there
+//     or entered via native EnterWorktree. worktreeNameForCwd sees both
+//     Claude's ".claude/worktrees" layout and plain `git worktree add`
+//     siblings. This tracks the session in and out turn by turn, so a base-repo
+//     cwd correctly yields no chip here even while the transcript still lives
+//     under a worktree-encoded project dir from an earlier turn.
+//  2. cmdWorktree — the session's cwd is the main repo but its recent commands
+//     drive a linked worktree by explicit path (the common flow: an agent works
+//     a worktree at arm's length, never chdir'ing into it).
+//  3. The transcript-path fallback (native encoding only), used solely before
+//     the first event is seeded, when no cwd is known yet.
 func (m model) worktreeChip() string {
-	if m.paneCwd != "" {
-		return worktreeNameFromCwd(m.paneCwd)
+	if m.sessionCwd != "" {
+		if name := worktreeNameForCwd(m.sessionCwd); name != "" {
+			return name
+		}
+		return m.cmdWorktree
 	}
 	return worktreeName(m.jsonlPath)
 }

@@ -584,33 +584,68 @@ func TestWorktreeNameFromCwd(t *testing.T) {
 	}
 }
 
-// worktreeChip prefers the live cwd over the transcript path whenever a live
-// cwd is known at all — even when the live cwd yields no chip, because the
-// session's cwd has returned to the base repo while the transcript stays
-// under a worktree-encoded project dir from where the session started. This
-// is the core regression this fix addresses: a stale worktree chip must
-// clear once the session leaves the worktree.
-func TestModelWorktreeChipPrefersLiveCwd(t *testing.T) {
+// worktreeChip is driven by the main session's transcript cwd (sessionCwd),
+// which tracks the session in and out of worktrees turn by turn. A base-repo
+// sessionCwd clears the chip even while the transcript still lives under a
+// worktree-encoded project dir from an earlier turn — the core regression this
+// fix addresses. The transcript-path fallback applies only before any cwd is
+// known.
+func TestModelWorktreeChip(t *testing.T) {
 	worktreeJSONLPath := "/Users/alice/.claude/projects/-Users-alice-Projects-webapp--claude-worktrees-feature-branch/abc.jsonl"
 
-	// Base-repo live cwd: no chip, even though the transcript dir is
+	// Base-repo session cwd: no chip, even though the transcript dir is
 	// worktree-encoded.
-	m := model{jsonlPath: worktreeJSONLPath, paneCwd: "/Users/alice/Projects/webapp"}
+	m := model{jsonlPath: worktreeJSONLPath, sessionCwd: "/Users/alice/Projects/webapp"}
 	if got := m.worktreeChip(); got != "" {
-		t.Errorf("worktreeChip() = %q, want \"\" (base-repo live cwd must clear the chip)", got)
+		t.Errorf("worktreeChip() = %q, want \"\" (base-repo session cwd must clear the chip)", got)
 	}
 
-	// No live cwd known this poll: falls back to the transcript-derived
-	// name.
-	m = model{jsonlPath: worktreeJSONLPath, paneCwd: ""}
+	// No cwd known yet (pre-seed): falls back to the transcript-derived name.
+	m = model{jsonlPath: worktreeJSONLPath, sessionCwd: ""}
 	if got := m.worktreeChip(); got != "feature-branch" {
 		t.Errorf("worktreeChip() = %q, want %q (transcript fallback)", got, "feature-branch")
 	}
 
-	// Live cwd itself under a worktree: cwd-derived chip.
-	m = model{jsonlPath: worktreeJSONLPath, paneCwd: "/Users/alice/Projects/webapp/.claude/worktrees/feature-branch"}
+	// Session cwd under a native worktree: cwd-derived chip.
+	m = model{
+		jsonlPath:  worktreeJSONLPath,
+		sessionCwd: "/Users/alice/Projects/webapp/.claude/worktrees/feature-branch",
+	}
 	if got := m.worktreeChip(); got != "feature-branch" {
-		t.Errorf("worktreeChip() = %q, want %q (cwd-derived)", got, "feature-branch")
+		t.Errorf("worktreeChip() = %q, want %q (native cwd-derived)", got, "feature-branch")
+	}
+}
+
+// The chip's cwd comes from the last non-sidechain event; a tail of subagent
+// (sidechain) activity in a different worktree must not hijack it, and a base
+// repo returned-to after worktree work must clear it.
+func TestLastMainCwd(t *testing.T) {
+	base := "/Users/alice/Projects/webapp"
+	wt := base + "/.claude/worktrees/feature"
+	agentWt := base + "/.claude/worktrees/agent-xyz"
+
+	// Newest main event wins over an older one.
+	got := lastMainCwd([]Event{{Cwd: base}, {Cwd: wt}}, "")
+	if got != wt {
+		t.Errorf("lastMainCwd = %q, want %q", got, wt)
+	}
+
+	// A trailing sidechain event is ignored; the last MAIN cwd stands.
+	got = lastMainCwd([]Event{{Cwd: wt}, {Cwd: agentWt, IsSidechain: true}}, "")
+	if got != wt {
+		t.Errorf("lastMainCwd (sidechain tail) = %q, want %q", got, wt)
+	}
+
+	// Returned to base repo: chip source is base, not the earlier worktree.
+	got = lastMainCwd([]Event{{Cwd: wt}, {Cwd: base}}, "")
+	if got != base {
+		t.Errorf("lastMainCwd (returned to base) = %q, want %q", got, base)
+	}
+
+	// No usable event this poll (pure sidechain / not-yet-seeded): keep prev.
+	got = lastMainCwd([]Event{{Cwd: agentWt, IsSidechain: true}}, "prev-cwd")
+	if got != "prev-cwd" {
+		t.Errorf("lastMainCwd (no main event) = %q, want %q", got, "prev-cwd")
 	}
 }
 
