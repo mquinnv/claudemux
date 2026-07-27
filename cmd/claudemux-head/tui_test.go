@@ -56,6 +56,49 @@ func TestSwitchSessionRebindsToNewerFile(t *testing.T) {
 	}
 }
 
+// A freshly-started session has no assistant turns yet, so its transcript
+// carries no usage (and often no model). Rotating onto it must RESET the
+// context gauge and model — recomputeFromEvents alone can't, because it only
+// overwrites those fields when the new ring has something to say, so the old
+// session's near-full ctx% would survive the rebind and render as if the new
+// session were already at 92%.
+func TestSwitchSessionResetsContextAndModel(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "old-sess.jsonl")
+	if err := os.WriteFile(old, []byte(`{"type":"assistant","timestamp":"2026-05-15T10:00:00Z","message":{"model":"claude-old","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1000,"cache_read_input_tokens":180000,"output_tokens":500}}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{
+		jsonlPath:    old,
+		sessionID:    "old-sess",
+		followActive: true,
+		reader:       newEventReader(old),
+	}
+	m.reader.SeedFromEnd(500)
+	m.allEvents, _ = m.reader.Seeded()
+	m.recomputeFromEvents(time.Now())
+	if m.contextPct < 80 {
+		t.Fatalf("precondition: contextPct = %v, want the old session near full", m.contextPct)
+	}
+
+	// The new session so far holds only the user's first prompt: no assistant
+	// turn, no usage, no model.
+	newp := filepath.Join(dir, "new-sess.jsonl")
+	if err := os.WriteFile(newp, []byte(`{"type":"user","timestamp":"2026-05-29T10:00:00Z","message":{"content":"hello"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.switchSession(newp, time.Now())
+
+	if m.contextPct != 0 {
+		t.Errorf("contextPct = %v, want 0 (fresh session has no usage yet)", m.contextPct)
+	}
+	if m.modelName != "" {
+		t.Errorf("modelName = %q, want \"\" (fresh session has no assistant turn yet)", m.modelName)
+	}
+}
+
 func TestLastUserPrompt(t *testing.T) {
 	events := []Event{
 		{Type: "last-prompt", UserText: "first thing"},

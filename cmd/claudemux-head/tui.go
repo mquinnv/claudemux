@@ -219,6 +219,12 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// Clean slate: the new session's own cwd must come from its own events, not
 	// linger from the session we just left. Its seed always carries one.
 	m.sessionCwd = ""
+	// Same for the context gauge and model: recomputeFromEvents only overwrites
+	// them when the new ring carries a usage/model event, and a just-started
+	// session (only the first user prompt on disk) carries neither — without
+	// this reset the old session's near-full ctx% renders against the new one.
+	m.contextPct = 0
+	m.modelName = ""
 
 	// The new session starts clean: the old session's topic must not survive as
 	// the next call's prevTopic, because summarySystemPrompt tells the model to
