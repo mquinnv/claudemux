@@ -226,10 +226,11 @@ op_account_for() {
 
 # inject_op_env SESSION DIR — if DIR's .project.yml names a 1Password
 # Environment (op_env), read it once and copy its variables into SESSION's
-# tmux session environment. One authorization per session; every pane
-# inherits, and claude/sub-agents never call op themselves. Returns 0 only
-# when variables were injected (caller respawns pane 0, whose shell predates
-# the injection). Multiline values are truncated at the first newline — keep
+# tmux session environment. One authorization per session; panes spawned (or
+# respawned) afterwards inherit, and claude/sub-agents never call op
+# themselves. Returns 0 only when variables were injected — the caller
+# (deferred_launch) then respawns the panes whose shells predate the
+# injection. Multiline values are truncated at the first newline — keep
 # those out of Environments.
 inject_op_env() {
   local session="$1" work_dir="$2" env_id acct env_out line key
@@ -247,6 +248,51 @@ inject_op_env() {
     key="${line%%=*}"
     tmux set-environment -t "$session" "$key" "${line#*=}"
   done <<< "$env_out"
+}
+
+# pane_cmd PANE — PANE's current foreground command, "" if the pane is gone.
+pane_cmd() {
+  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null || true
+}
+
+# deferred_launch SESSION DIR CLAUDE_PANE SHELL_PANE CLAUDE_CMD — finish an
+# op_env launch off the critical path. `op environment read` costs ~10s of
+# pure CPU per call (measured on op 2.38; no auth prompt involved — the
+# decryption itself is that slow), so create_session backgrounds this and
+# attaches immediately instead of leaving the user at a blank terminal.
+#
+# Once the secrets are in the session environment, the claude and shell panes
+# are respawned so their shells inherit them — but only while still sitting on
+# the same foreground command they spawned with. A pane the user has already
+# started something in is left alone; in particular, if they got impatient and
+# launched claude by hand, it is neither killed nor double-launched. The head
+# pane is never respawned: claudemux-head deliberately does not read the
+# monitored project's env (see summarizerEnvOptions).
+#
+# Runs as a background job with stdout/stderr discarded — anything written
+# here would scribble over the attached tmux client — so failure is surfaced
+# via display-message instead, and claude still launches (without secrets),
+# matching the old synchronous behavior.
+deferred_launch() {
+  local session="$1" work_dir="$2" claude_pane="$3" shell_pane="$4" claude_cmd="$5"
+  local claude_cmd0 shell_cmd0
+  claude_cmd0="$(pane_cmd "$claude_pane")"
+  shell_cmd0="$(pane_cmd "$shell_pane")"
+  if inject_op_env "$session" "$work_dir"; then
+    if [ -n "$shell_cmd0" ] && [ "$(pane_cmd "$shell_pane")" = "$shell_cmd0" ]; then
+      tmux respawn-pane -k -t "$shell_pane"
+    fi
+    if [ -n "$claude_cmd0" ] && [ "$(pane_cmd "$claude_pane")" = "$claude_cmd0" ]; then
+      tmux respawn-pane -k -t "$claude_pane"
+    fi
+  else
+    tmux display-message -t "$claude_pane" \
+      'claudemux: 1Password environment failed — starting claude without secrets' || true
+  fi
+  if [ -n "$claude_cmd0" ] && [ "$(pane_cmd "$claude_pane")" = "$claude_cmd0" ]; then
+    tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
+  fi
+  return 0
 }
 
 create_session() {
@@ -281,18 +327,24 @@ create_session() {
   # statusbar needs the extra width or it drops its right-side gauges).
   # Track panes by ID — the short head pane sits above claude, so positional
   # indices would shift under us.
-  local claude_pane head_pane
+  local claude_pane head_pane shell_pane
   tmux new-session -d -s "$session_name" -c "$work_dir" -x "$(tput cols)" -y "$(tput lines)"
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
-  # 1Password Environment vars go into the session environment before the
-  # other panes spawn; pane 0 already exists, so respawn its shell to inherit.
-  if inject_op_env "$session_name" "$work_dir"; then
-    tmux respawn-pane -k -t "$claude_pane"
-  fi
-  tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir"
+  shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
   head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
   tmux send-keys -t "$head_pane" 'claudemux-head' C-m
-  tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
+
+  # With an op_env, claude's launch is handed to a background injector so the
+  # attach below happens NOW rather than after op's ~10s decryption (see
+  # deferred_launch). The leading space on the notice keeps it out of fish
+  # history; the respawn wipes it from the pane once the secrets land.
+  if [ -n "$(project_field "$work_dir/.project.yml" op_env)" ]; then
+    tmux send-keys -t "$claude_pane" \
+      " echo 'claudemux: unlocking 1Password environment — claude will start here…'" C-m
+    deferred_launch "$session_name" "$work_dir" "$claude_pane" "$shell_pane" "$claude_cmd" >/dev/null 2>&1 &
+  else
+    tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
+  fi
   tmux select-pane -t "$claude_pane"
 
   # Pin the head pane to exactly 4 rows. The `-l 4` at split time does NOT
