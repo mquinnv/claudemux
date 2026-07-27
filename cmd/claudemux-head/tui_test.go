@@ -1305,8 +1305,7 @@ func TestTabRenameArgsNoPane(t *testing.T) {
 	}
 }
 
-// An empty label must not rename the window to blank.
-// A model that ignores the <=24-char instruction, or slips in a newline, must
+// A model that ignores the length instruction, or slips in a newline, must
 // not put an over-long or multi-line string into the tmux window name.
 func TestTabRenameArgsClampsLabel(t *testing.T) {
 	got, ok := tabRenameArgs("%3", "fix   the\ncrm bundling regression across the whole webpack pipeline")
@@ -1314,11 +1313,39 @@ func TestTabRenameArgsClampsLabel(t *testing.T) {
 		t.Fatal("ok = false, want true")
 	}
 	label := got[len(got)-1]
-	if r := []rune(label); len(r) > 24 {
-		t.Errorf("label %q is %d runes, want <= 24", label, len(r))
+	if r := []rune(label); len(r) > tabTitleMaxRunes {
+		t.Errorf("label %q is %d runes, want <= %d", label, len(r), tabTitleMaxRunes)
 	}
 	if strings.ContainsAny(label, "\n\t") {
 		t.Errorf("label %q still contains a newline/tab, want whitespace collapsed", label)
+	}
+}
+
+// The clamp must cut between words, never mid-word: "tickets tutorial record…"
+// in a tmux tab reads as a bug, not a label.
+func TestTabRenameArgsTruncatesAtWordBoundary(t *testing.T) {
+	got, ok := tabRenameArgs("%3", "fix the crm bundling regression across the whole webpack pipeline")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	label := got[len(got)-1]
+	want := "fix the crm bundling regression across…"
+	if label != want {
+		t.Errorf("label = %q, want %q", label, want)
+	}
+}
+
+// A single word longer than the clamp has no boundary to prefer — it still
+// rune-chops rather than yielding an empty label.
+func TestTabRenameArgsClampsSingleLongWord(t *testing.T) {
+	got, ok := tabRenameArgs("%3", strings.Repeat("x", 80))
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	label := got[len(got)-1]
+	want := strings.Repeat("x", tabTitleMaxRunes-1) + "…"
+	if label != want {
+		t.Errorf("label = %q, want %q", label, want)
 	}
 }
 

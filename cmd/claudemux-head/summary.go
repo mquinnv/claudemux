@@ -100,8 +100,8 @@ Call the summarize tool with these fields:
 - now: what it is doing RIGHT NOW — the current step. Derive it from the END of
   the transcript.
 
-- tab: a 2-4 word tab label — the shortest phrase naming the project or task.
-  lowercase, 24 characters maximum, no punctuation. Derive it from the same
+- tab: a 2-5 word tab label — the shortest phrase naming the project or task.
+  lowercase, 32 characters maximum, no punctuation. Derive it from the same
   durable goal as ` + "`topic`" + ` (never the current step), so the tab stays steady
   while ` + "`now`" + ` changes.
 
@@ -243,7 +243,7 @@ func (s *Summarizer) Summarize(ctx context.Context, firstPrompt string, events [
 				},
 				"tab": map[string]any{
 					"type":        "string",
-					"description": "A 2-4 word lowercase tab label, 24 characters max, no punctuation. Same durable goal as topic, compressed.",
+					"description": "A 2-5 word lowercase tab label, 32 characters max, no punctuation. Same durable goal as topic, compressed.",
 				},
 			},
 			Required: []string{"topic", "now", "tab"},

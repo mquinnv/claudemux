@@ -585,8 +585,8 @@ func TestSystemPromptDescribesTab(t *testing.T) {
 	}
 	// The length rule is the load-bearing constraint for a narrow tab; make sure
 	// it is stated so a prompt edit can't silently drop it.
-	if !strings.Contains(summarySystemPrompt, "24") {
-		t.Error("summarySystemPrompt does not state the tab length limit (24)")
+	if !strings.Contains(summarySystemPrompt, "32") {
+		t.Error("summarySystemPrompt does not state the tab length limit (32)")
 	}
 }
 
