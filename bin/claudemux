@@ -137,6 +137,11 @@ apply_tab_color() {
 # attach SESSION DIR — paint the status bar + iTerm2 tab for DIR, then
 # exec-attach SESSION.
 attach() {
+  # tmux's default status-left-length is 10, which truncates any session name
+  # longer than 8 columns ("[claudemu"). Session names here are directory
+  # basenames, so give them room. Set on every attach, not just creation, so
+  # sessions that predate this fix pick it up too.
+  tmux set -t "$1" status-left-length 32
   apply_status_color "$1" "$2"
   apply_tab_color "$2" || true
   # Not `exec`: running tmux as a child lets the launcher — and the shell that
