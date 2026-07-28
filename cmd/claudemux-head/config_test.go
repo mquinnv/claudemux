@@ -274,3 +274,39 @@ func TestDurationMarshalYAML(t *testing.T) {
 		t.Errorf("marshalled YAML serialized Duration as nanoseconds instead of string form.\nGot:\n%s", yamlStr)
 	}
 }
+
+func TestAutoWorktreeDefaultsFalse(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Launch.AutoWorktree {
+		t.Error("Launch.AutoWorktree = true, want false by default — launching into a surprise worktree must be opt-in")
+	}
+}
+
+func TestAutoWorktreeCanBeEnabled(t *testing.T) {
+	writeConfig(t, "launch:\n  auto_worktree: true\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if !cfg.Launch.AutoWorktree {
+		t.Error("Launch.AutoWorktree = false, want true when set in the file")
+	}
+	// A file naming only launch keys must not zero the summary defaults.
+	if !cfg.Summary.Enabled {
+		t.Error("Summary.Enabled = false — a partial file zeroed an unrelated default")
+	}
+}
+
+func TestAutoWorktreeUnknownKeyUnderLaunchIsFatal(t *testing.T) {
+	writeConfig(t, "launch:\n  auto_worktre: true\n") // typo: missing final e
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("loadConfig() error = nil, want an error — a typo under launch: must fail loudly, not silently behave as unset")
+	}
+}

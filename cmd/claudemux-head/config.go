@@ -44,6 +44,7 @@ func (d Duration) MarshalYAML() (any, error) {
 type Config struct {
 	Summary     SummaryConfig     `yaml:"summary"`
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
+	Launch      LaunchConfig      `yaml:"launch"`
 }
 
 type SummaryConfig struct {
@@ -79,6 +80,16 @@ type SummaryConfig struct {
 type OnePasswordConfig struct {
 	DefaultAccount string            `yaml:"default_account"`
 	Accounts       map[string]string `yaml:"accounts"`
+}
+
+// LaunchConfig is consumed by bin/claudemux via `claudemux-head config get`,
+// not by the TUI. AutoWorktree makes the launcher pass `--worktree` to claude
+// when the launch directory is a repo's main checkout sitting on its default
+// branch (the launcher owns that heuristic and its overrides — see
+// bin/claudemux worktree_requested). Default false: launching into a surprise
+// worktree must be something the user asked for.
+type LaunchConfig struct {
+	AutoWorktree bool `yaml:"auto_worktree"`
 }
 
 func defaultConfig() Config {

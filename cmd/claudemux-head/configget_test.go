@@ -146,3 +146,29 @@ func TestRunConfigGetMalformedConfigExitsThree(t *testing.T) {
 		t.Error("stderr empty, want the parse error reported")
 	}
 }
+
+func TestConfigGetLaunchAutoWorktree(t *testing.T) {
+	writeConfig(t, "launch:\n  auto_worktree: true\n")
+
+	var stdout, stderr bytes.Buffer
+	code := runConfigGet([]string{"launch.auto_worktree"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "true" {
+		t.Errorf("config get launch.auto_worktree = %q, want %q", got, "true")
+	}
+}
+
+func TestConfigGetLaunchAutoWorktreeDefault(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	var stdout, stderr bytes.Buffer
+	code := runConfigGet([]string{"launch.auto_worktree"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "false" {
+		t.Errorf("config get launch.auto_worktree = %q, want %q — the key must resolve (exit 0) even when unset, so the launcher reads a definite false rather than an absent key", got, "false")
+	}
+}
