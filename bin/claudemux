@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claudemux [-n] [dir|query ...]
+# Usage: claudemux [-n] [-w|-W] [dir|query ...]
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
@@ -13,17 +13,32 @@
 # Options:
 #   -n   Create a new session even if one with the same name exists
 #        (appends -2, -3, ... to the session name).
+#   -w   Launch claude with --worktree regardless of config or repo state.
+#   -W   Never pass --worktree for this launch, whatever the config says.
 #
-# Isolation/worktrees are intentionally NOT handled here — Claude Code's own
-# `--worktree` manages that. This script just launches and attaches.
+# Worktree creation itself is Claude Code's job (`claude --worktree`); this
+# script only decides whether to pass the flag. With launch.auto_worktree
+# enabled in config.yml (or `worktree: true` in .project.yml), a launch on a
+# repo's default branch gets --worktree automatically; feature branches,
+# detached HEADs, linked worktrees, and non-repos are left alone.
 
 set -euo pipefail
 
 FORCE_NEW=false
-while getopts "n" opt; do
+WORKTREE_MODE=""   # "" = decide from config; "force"/"skip" from -w/-W
+worktree_mode_set() {
+  if [ -n "$WORKTREE_MODE" ] && [ "$WORKTREE_MODE" != "$1" ]; then
+    echo "claudemux: -w and -W are mutually exclusive" >&2
+    exit 1
+  fi
+  WORKTREE_MODE="$1"
+}
+while getopts "nwW" opt; do
   case "$opt" in
     n) FORCE_NEW=true ;;
-    *) echo "Usage: claudemux [-n] [dir|query ...]" >&2; exit 1 ;;
+    w) worktree_mode_set force ;;
+    W) worktree_mode_set skip ;;
+    *) echo "Usage: claudemux [-n] [-w|-W] [dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -199,6 +214,53 @@ ch_config_get() {
   return 0
 }
 
+# auto_worktree_wanted DIR — success when an automatic `claude --worktree` is
+# appropriate for DIR: a git repo's MAIN checkout sitting on its default
+# branch. Feature branches, detached HEADs, linked worktrees, and non-repos
+# all say no — those are states the user chose, and a surprise worktree would
+# fight them. Each check is one fast git subprocess; keep it that way, this
+# runs on the launch path.
+auto_worktree_wanted() {
+  local dir="$1" branch default
+  command -v git >/dev/null 2>&1 || return 1
+  [ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || return 1
+  # A linked worktree's --git-dir sits under the main checkout's
+  # .git/worktrees/<name>; only in the main checkout do the two coincide.
+  [ "$(git -C "$dir" rev-parse --git-dir 2>/dev/null)" = \
+    "$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" ] || return 1
+  branch="$(git -C "$dir" symbolic-ref --short -q HEAD)" || return 1 # detached
+  default="$(git -C "$dir" symbolic-ref --short -q refs/remotes/origin/HEAD || true)"
+  default="${default#origin/}"
+  if [ -n "$default" ]; then
+    [ "$branch" = "$default" ]
+  else
+    # No origin/HEAD (no remote, or never fetched): fall back to convention.
+    [ "$branch" = "main" ] || [ "$branch" = "master" ]
+  fi
+}
+
+# worktree_requested DIR — success when this launch should pass --worktree.
+# Precedence, highest first: -w/-W, `worktree:` in DIR/.project.yml,
+# launch.auto_worktree in config.yml. An explicit -w skips the
+# appropriateness heuristic entirely — the user asked, and if DIR turns out
+# not to be a repo, claude reports that itself. Both config sources are
+# auto mode and go through auto_worktree_wanted.
+worktree_requested() {
+  local dir="$1" proj
+  case "$WORKTREE_MODE" in
+    force) return 0 ;;
+    skip)  return 1 ;;
+  esac
+  proj="$(project_field "$dir/.project.yml" worktree)"
+  case "$proj" in
+    true)  auto_worktree_wanted "$dir"; return ;;
+    false) return 1 ;;
+  esac
+  ch_config_get launch.auto_worktree
+  [ "$CH_CONFIG_VALUE" = "true" ] || return 1
+  auto_worktree_wanted "$dir"
+}
+
 # op_account_for DIR — the 1Password account for DIR's repo. Precedence:
 #   1. explicit `op_account` in DIR/.project.yml
 #   2. onepassword.accounts.<github-org> from claudemux-head's config.yml
@@ -324,6 +386,9 @@ create_session() {
   proj_color="$(project_field "$work_dir/.project.yml" color)"
   proj_name="$(project_field "$work_dir/.project.yml" name)"
   claude_cmd="claude --permission-mode auto"
+  if worktree_requested "$work_dir"; then
+    claude_cmd+=" --worktree"
+  fi
   [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
   [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
 
