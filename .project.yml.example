@@ -9,6 +9,11 @@ color: blue
 # Passed to `claude -n`, naming the session in Claude Code.
 name: my-project
 
+# Auto-worktree override for this project. `true` opts in even when
+# launch.auto_worktree is off globally (the default-branch heuristic still
+# applies); `false` exempts this project. Omit to follow the global setting.
+# worktree: true
+
 # 1Password Environment ID. When set, claudemux reads that Environment once at
 # launch and injects its variables into the tmux session environment, so every
 # pane inherits them and Claude never calls `op` itself. Omit to launch without

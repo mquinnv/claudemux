@@ -120,6 +120,9 @@ summary:
 onepassword:
   default_account: ""
   accounts: {}
+
+launch:
+  auto_worktree: false
 ```
 
 - `summary.enabled` — turn the LLM summary off entirely (see **Billing** below).
@@ -139,6 +142,12 @@ onepassword:
 - `onepassword.default_account` / `onepassword.accounts` — consumed by `claudemux`, not
   by the TUI itself, to pick a 1Password account when injecting an `op_env`. Ships empty;
   see `.project.yml` below.
+- `launch.auto_worktree` — consumed by `claudemux`, not the TUI. When `true`, a launch
+  in a git repo's main checkout **on its default branch** passes `--worktree` to
+  `claude`, so the session works in an isolated worktree and the checkout stays
+  pristine. Feature branches, detached HEADs, existing worktrees, and non-repos are
+  left alone. Override per launch with `claudemux -w` (force) / `-W` (skip), or per
+  project with `worktree: true|false` in `.project.yml`. Default `false`.
 
 **An unknown key in `config.yml` is a startup error, not a silent no-op.** A typo like
 `sumary:` fails loudly at launch instead of quietly behaving as if you'd written nothing.
@@ -152,6 +161,7 @@ launch it in. See [`.project.yml.example`](.project.yml.example) for the full fo
 ```yaml
 color: blue          # tmux status-bar / iTerm2 tab color
 name: my-project      # passed to `claude -n`
+worktree: true        # opt this project in/out of auto --worktree (optional)
 op_env: abcdefghijklmnopqrstuvwxyz  # 1Password Environment ID (optional)
 op_account: my.1password.com        # 1Password account for op_env (optional)
 ```
