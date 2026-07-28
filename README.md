@@ -147,7 +147,11 @@ launch:
   `claude`, so the session works in an isolated worktree and the checkout stays
   pristine. Feature branches, detached HEADs, existing worktrees, and non-repos are
   left alone. Override per launch with `claudemux -w` (force) / `-W` (skip), or per
-  project with `worktree: true|false` in `.project.yml`. Default `false`.
+  project with `worktree: true|false` in `.project.yml`. Default `false`. `-w`/`-W`
+  (and the config/`.project.yml` toggles) only take effect on newly created sessions —
+  `claudemux -w <existing-session>` attaches without a worktree, silently ignoring
+  `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
+  new session if you need `-w`/`-W` to take effect.
 
 **An unknown key in `config.yml` is a startup error, not a silent no-op.** A typo like
 `sumary:` fails loudly at launch instead of quietly behaving as if you'd written nothing.

@@ -15,6 +15,10 @@
 #        (appends -2, -3, ... to the session name).
 #   -w   Launch claude with --worktree regardless of config or repo state.
 #   -W   Never pass --worktree for this launch, whatever the config says.
+#        -w/-W (and the auto_worktree heuristic below) only affect NEWLY
+#        CREATED sessions — attaching to an existing session reuses whatever
+#        claude command it was launched with, same as name/color. Combine
+#        with -n to force a new session if you need -w/-W to take effect.
 #
 # Worktree creation itself is Claude Code's job (`claude --worktree`); this
 # script only decides whether to pass the flag. With launch.auto_worktree
@@ -221,13 +225,19 @@ ch_config_get() {
 # fight them. Each check is one fast git subprocess; keep it that way, this
 # runs on the launch path.
 auto_worktree_wanted() {
-  local dir="$1" branch default
+  local dir="$1" branch default gitdirs
   command -v git >/dev/null 2>&1 || return 1
   [ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || return 1
   # A linked worktree's --git-dir sits under the main checkout's
-  # .git/worktrees/<name>; only in the main checkout do the two coincide.
-  [ "$(git -C "$dir" rev-parse --git-dir 2>/dev/null)" = \
-    "$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" ] || return 1
+  # .git/worktrees/<name>; only in the main checkout do the two coincide. Must
+  # be a SINGLE call with --path-format=absolute (git >= 2.31, Mar 2021): run
+  # separately, --git-dir prints relative-to-cwd while --git-common-dir prints
+  # absolute, so from any subdirectory the two never textually match even in
+  # the main checkout — the heuristic would wrongly decline there. On git
+  # < 2.31 this call fails outright and the guard below degrades to "no
+  # worktree", which is an acceptable miss (not a wrong `--worktree`).
+  gitdirs="$(git -C "$dir" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null)" || return 1
+  [ "$(head -1 <<< "$gitdirs")" = "$(tail -1 <<< "$gitdirs")" ] || return 1
   branch="$(git -C "$dir" symbolic-ref --short -q HEAD)" || return 1 # detached
   default="$(git -C "$dir" symbolic-ref --short -q refs/remotes/origin/HEAD || true)"
   default="${default#origin/}"
