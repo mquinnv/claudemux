@@ -1409,17 +1409,19 @@ func TestSummaryMsgRetryableErrorMarksRetry(t *testing.T) {
 }
 
 // A placeholder reply means the transcript is too thin to describe; retrying
-// bills another call that can only fail the same way. The next real turn will
-// fire the edge-driven call instead.
+// bills another call that can only fail the same way. A placeholder clears an
+// armed retry flag: a transport failure may have armed it, and the retry that
+// then lands a placeholder proves the transcript is too thin — looping further
+// bills a call every floor interval that can only fail the same way.
 func TestSummaryMsgPlaceholderErrorDoesNotRetry(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	m := model{summarizer: &Summarizer{}, summarizing: true}
+	m := model{summarizer: &Summarizer{}, summarizing: true, summaryRetry: true}
 
 	got, _ := m.Update(summaryMsg{gen: 0, err: errPlaceholderSummary, at: now})
 	next := got.(model)
 
 	if next.summaryRetry {
-		t.Error("summaryRetry = true, want false for a placeholder reply")
+		t.Error("summaryRetry = true, want false for a placeholder reply — it must clear an armed flag")
 	}
 }
 

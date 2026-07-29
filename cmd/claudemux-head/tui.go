@@ -548,8 +548,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A placeholder reply can only recur until new events arrive, and those
 		// bring their own edge; every other failure is worth retrying — but only
 		// when the pane is showing the raw-prompt fallback, where staying broken
-		// is otherwise permanent for an idle session.
-		if m.summary == (Summary{}) && !errors.Is(msg.err, errPlaceholderSummary) {
+		// is otherwise permanent for an idle session. A placeholder CLEARS the
+		// flag rather than merely not setting it: a transport failure may have
+		// armed it, and the retry that then lands a placeholder proves the
+		// transcript is too thin — looping further bills a call every floor
+		// interval that can only fail the same way.
+		if errors.Is(msg.err, errPlaceholderSummary) {
+			m.summaryRetry = false
+		} else if m.summary == (Summary{}) {
 			m.summaryRetry = true
 		}
 	}
