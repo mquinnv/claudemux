@@ -136,19 +136,19 @@ type model struct {
 	rateOK      bool
 
 	// UI
-	lastUpdate         time.Time
-	width              int
-	height             int
-	ready              bool
-	polling            bool
-	summarizer         *Summarizer
+	lastUpdate time.Time
+	width      int
+	height     int
+	ready      bool
+	polling    bool
+	summarizer *Summarizer
 	// summaryCfg is kept so a keyless startup can retry summarizer
 	// construction later (see shouldAcquireSummarizer): the common cause is a
 	// locked 1Password FIFO at launch, which unlocks minutes later.
-	summaryCfg       SummaryConfig
-	acquiringKey     bool
-	keyAttempts      int
-	lastKeyAttemptAt time.Time
+	summaryCfg         SummaryConfig
+	acquiringKey       bool
+	keyAttempts        int
+	lastKeyAttemptAt   time.Time
 	minSummaryInterval time.Duration
 	tabTitle           bool
 	summarizing        bool
