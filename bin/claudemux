@@ -396,11 +396,16 @@ create_session() {
   proj_color="$(project_field "$work_dir/.project.yml" color)"
   proj_name="$(project_field "$work_dir/.project.yml" name)"
   claude_cmd="claude --permission-mode auto"
+  [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
+  [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
+  # LAST, after every positional. `--worktree [name]` takes an optional value,
+  # so whatever token follows it becomes the worktree name: placed before the
+  # "/color X" prompt argument, it swallowed the prompt as a (rejected) name
+  # and the launch died. At the end of the command there is nothing to swallow,
+  # and claude auto-names the worktree. Keep any future appends ABOVE this.
   if worktree_requested "$work_dir"; then
     claude_cmd+=" --worktree"
   fi
-  [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
-  [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
 
   # top-left = claudemux-head (4 rows: first prompt, last prompt, state line, meters),
   # below it = claude, right = shell (full height, 30% wide — the head
