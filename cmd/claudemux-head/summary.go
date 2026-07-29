@@ -118,6 +118,12 @@ changed goals. A stable topic is worth more than a fresh one.`
 // so a hung request must not accumulate indefinitely across retries.
 const summaryRequestTimeout = 10 * time.Second
 
+// errPlaceholderSummary marks a reply that failed because the transcript was
+// too thin to describe, not because the call couldn't be made. Callers use it
+// to decide whether retrying could possibly help: it can't — only new
+// transcript events can, and those arrive with their own busy→idle edge.
+var errPlaceholderSummary = errors.New("summarize returned an empty or placeholder line")
+
 // placeholderLine reports whether a summary line is a non-answer rather than a
 // summary. The tool call is forced, so on a transcript too thin to describe the
 // model cannot decline — it emits "<UNKNOWN>" or "n/a" instead. Rendering that
@@ -274,7 +280,7 @@ func (s *Summarizer) Summarize(ctx context.Context, firstPrompt string, events [
 			return Summary{}, fmt.Errorf("summarize tool input: %w", err)
 		}
 		if placeholderLine(out.Topic) || placeholderLine(out.Now) || placeholderLine(out.Tab) {
-			return Summary{}, errors.New("summarize returned an empty or placeholder line")
+			return Summary{}, errPlaceholderSummary
 		}
 		return out, nil
 	}

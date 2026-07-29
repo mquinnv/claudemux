@@ -135,6 +135,9 @@ launch:
   This is the only thing bounding what an active session costs you, so treat it as a
   spending control. `0` is legal and means *no floor* — every turn may fire a call.
   A negative value is rejected at startup (it would remove the limit, not set one).
+  A summarize call that fails outright (API error, no reply) is retried on its
+  own fixed 30s floor while the pane has no summary yet, independent of this
+  setting.
 - `summary.tab_title` — rename each session's tmux window (and thus the terminal
   tab) to the short Haiku `tab` label, so a row of tabs reads like a list of what
   each session is doing. Default `true`. Set `false` to keep the status-pane

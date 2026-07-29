@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,6 +43,13 @@ type tickMsg time.Time
 // SDK's per-request summaryRequestTimeout plus its one retry, plus request
 // setup — not a second copy of the per-request timeout.
 const summaryCallTimeout = 30 * time.Second
+
+// summaryRetryFloor paces self-initiated retry calls. It is deliberately
+// separate from summary.min_interval: that floor is user-configurable and 0
+// is documented as "edges only guarded by the in-flight flag", which is safe
+// for edge-driven calls (edges are turn-bounded) but would make retries fire
+// every poll — a billable call per second against an API that just failed.
+const summaryRetryFloor = 30 * time.Second
 
 type summaryMsg struct {
 	// gen is the model's summaryGen at the moment the call was issued. The
@@ -124,7 +132,12 @@ type model struct {
 	// bumped on every switchSession, so a reply that lands after a rotation can
 	// be recognized as belonging to the previous session and dropped.
 	summaryGen int
-	err        error
+	// summaryRetry records that a summarize call failed retryably while the
+	// pane had no summary at all — the fallback display, with no edge
+	// guaranteed to ever fire again (an idle session has none). The dataMsg
+	// handler turns it into a fresh call once summaryRetryFloor elapses.
+	summaryRetry bool
+	err          error
 }
 
 func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model {
@@ -242,6 +255,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// here, which is exactly the same no-floor-at-all failure this comment
 	// warns against.
 	m.summary = Summary{}
+	m.summaryRetry = false
 	m.summaryGen++
 
 	m.recomputeFromEvents(now)
@@ -391,6 +405,21 @@ func (m model) shouldSummarize(prevKind StateKind, now time.Time) bool {
 	return prevKind != StateIdle && m.state.Kind == StateIdle
 }
 
+// shouldRetrySummarize reports whether this poll should re-issue a summarize
+// call that previously failed. Only fires while the pane still has no summary
+// (an error landing over a good summary keeps the good one; the next edge
+// refreshes it) and past both canSummarize's guards and the dedicated retry
+// floor above.
+func (m model) shouldRetrySummarize(now time.Time) bool {
+	if !m.summaryRetry || m.summary != (Summary{}) {
+		return false
+	}
+	if !m.canSummarize(now) {
+		return false
+	}
+	return now.Sub(m.lastSummaryAt) >= summaryRetryFloor
+}
+
 // canSummarize reports whether a summarize call may be issued at all: the
 // feature is enabled, no call is in flight, and the rate floor has elapsed.
 // These guards hold for every caller — the busy→idle edge and a session
@@ -485,6 +514,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.summarizing = true
 			return m, m.summarize()
 		}
+		if m.shouldRetrySummarize(msg.time) {
+			m.summarizing = true
+			return m, m.summarize()
+		}
 
 	case summaryMsg:
 		// Clear the in-flight flag FIRST and unconditionally: this message is
@@ -508,8 +541,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err == nil {
+			m.summaryRetry = false
 			m.summary = msg.summary
 			return m, m.tabCmdFor(msg.summary)
+		}
+		// A placeholder reply can only recur until new events arrive, and those
+		// bring their own edge; every other failure is worth retrying — but only
+		// when the pane is showing the raw-prompt fallback, where staying broken
+		// is otherwise permanent for an idle session.
+		if m.summary == (Summary{}) && !errors.Is(msg.err, errPlaceholderSummary) {
+			m.summaryRetry = true
 		}
 	}
 

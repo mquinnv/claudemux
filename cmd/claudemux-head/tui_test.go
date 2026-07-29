@@ -1389,3 +1389,151 @@ func TestSummaryNoRenameWhenTabTitleOff(t *testing.T) {
 		t.Error("expected no rename command when tabTitle is off")
 	}
 }
+
+// A summarize call that fails for a transport-ish reason while the pane has no
+// summary at all must schedule a retry: without one, an idle session sits on
+// the raw-prompt fallback until the next turn edge, which may never come.
+func TestSummaryMsgRetryableErrorMarksRetry(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{summarizer: &Summarizer{}, summarizing: true}
+
+	got, _ := m.Update(summaryMsg{gen: 0, err: errors.New("api: 529 overloaded"), at: now})
+	next := got.(model)
+
+	if !next.summaryRetry {
+		t.Error("summaryRetry = false, want true after a retryable failure with no summary")
+	}
+	if next.summarizing {
+		t.Error("summarizing = true, want false: the in-flight flag must clear on completion")
+	}
+}
+
+// A placeholder reply means the transcript is too thin to describe; retrying
+// bills another call that can only fail the same way. The next real turn will
+// fire the edge-driven call instead.
+func TestSummaryMsgPlaceholderErrorDoesNotRetry(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{summarizer: &Summarizer{}, summarizing: true}
+
+	got, _ := m.Update(summaryMsg{gen: 0, err: errPlaceholderSummary, at: now})
+	next := got.(model)
+
+	if next.summaryRetry {
+		t.Error("summaryRetry = true, want false for a placeholder reply")
+	}
+}
+
+// A stale reply's error describes a session we no longer watch; scheduling a
+// retry from it would bill a call for the new session off the old session's
+// failure.
+func TestSummaryMsgStaleErrorDoesNotRetry(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{summarizer: &Summarizer{}, summarizing: true, summaryGen: 2}
+
+	got, _ := m.Update(summaryMsg{gen: 1, err: errors.New("api: timeout"), at: now})
+	next := got.(model)
+
+	if next.summaryRetry {
+		t.Error("summaryRetry = true, want false for a stale reply")
+	}
+}
+
+// An error that lands while a previous good summary is showing needs no retry:
+// the pane is not on the fallback, and the next edge refreshes it.
+func TestSummaryMsgErrorWithExistingSummaryDoesNotRetry(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{
+		summarizer:  &Summarizer{},
+		summarizing: true,
+		summary:     Summary{Topic: "t", Now: "n", Tab: "tab"},
+	}
+
+	got, _ := m.Update(summaryMsg{gen: 0, err: errors.New("api: timeout"), at: now})
+	next := got.(model)
+
+	if next.summaryRetry {
+		t.Error("summaryRetry = true, want false when a good summary is already showing")
+	}
+}
+
+// The retry itself: a steady-idle poll (no busy→idle edge) past the retry
+// floor must re-issue the call. This is the recovery path for a failed seed
+// call on an idle session.
+func TestDataMsgRetriesAfterRetryableFailure(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	idleEvent := Event{Type: "assistant", Timestamp: now.Add(-10 * time.Minute).Format(time.RFC3339), UserText: "done"}
+	m := model{
+		ready:         true,
+		summarizer:    &Summarizer{},
+		summaryRetry:  true,
+		allEvents:     []Event{idleEvent},
+		state:         State{Kind: StateIdle, Since: now.Add(-10 * time.Minute)},
+		lastSummaryAt: now.Add(-time.Hour),
+	}
+
+	got, cmd := m.Update(dataMsg{time: now, rateLimitErr: errors.New("no rate limits in this test")})
+	next := got.(model)
+
+	if next.state.Kind != StateIdle {
+		t.Fatalf("precondition: state = %v, want steady Idle (no edge)", next.state.Kind)
+	}
+	if !next.summarizing {
+		t.Error("summarizing = false, want true: the retry must fire without an edge")
+	}
+	// Deliberately NOT executed — running it would make a network call.
+	if cmd == nil {
+		t.Error("cmd = nil, want the summarize command")
+	}
+}
+
+// Retries have their own floor so a user who set min_interval: 0 (documented
+// as removing the EDGE floor) does not get a self-initiated call every poll.
+func TestDataMsgRetryRespectsRetryFloor(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	idleEvent := Event{Type: "assistant", Timestamp: now.Add(-10 * time.Minute).Format(time.RFC3339), UserText: "done"}
+	m := model{
+		ready:         true,
+		summarizer:    &Summarizer{},
+		summaryRetry:  true,
+		allEvents:     []Event{idleEvent},
+		state:         State{Kind: StateIdle, Since: now.Add(-10 * time.Minute)},
+		lastSummaryAt: now.Add(-summaryRetryFloor / 2), // inside the retry floor
+	}
+
+	got, _ := m.Update(dataMsg{time: now, rateLimitErr: errors.New("no rate limits in this test")})
+	next := got.(model)
+
+	if next.summarizing {
+		t.Error("summarizing = true, want false: retry inside the floor must not fire")
+	}
+}
+
+// A successful summary ends the retry loop.
+func TestSummaryMsgSuccessClearsRetryFlag(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{summarizer: &Summarizer{}, summarizing: true, summaryRetry: true}
+
+	got, _ := m.Update(summaryMsg{gen: 0, summary: Summary{Topic: "t", Now: "n", Tab: "tab"}, at: now})
+	next := got.(model)
+
+	if next.summaryRetry {
+		t.Error("summaryRetry = true, want false after a successful summary")
+	}
+}
+
+// Session rotation resets the retry loop along with the rest of the summary
+// state: the old session's failure says nothing about the new session.
+func TestSwitchSessionClearsRetryFlag(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "sess-b.jsonl")
+	if err := os.WriteFile(file, []byte(`{"type":"assistant","timestamp":"2026-05-15T10:00:00Z","message":{"model":"claude","content":[{"type":"text","text":"hi"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{summaryRetry: true, lastSummaryAt: now} // floor un-elapsed: no call fires
+	m.switchSession(file, now)
+
+	if m.summaryRetry {
+		t.Error("summaryRetry = true, want false after switchSession")
+	}
+}
