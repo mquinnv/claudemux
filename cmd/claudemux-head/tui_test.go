@@ -1539,3 +1539,146 @@ func TestSwitchSessionClearsRetryFlag(t *testing.T) {
 		t.Error("summaryRetry = true, want false after switchSession")
 	}
 }
+
+// A head that started with no key (locked 1Password FIFO) must not disable
+// the summarizer for its whole lifetime: the tick loop periodically re-attempts
+// construction.
+func TestTickFiresSummarizerAcquisition(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{
+		polling:          true, // isolate the acquisition path from pollData
+		summaryCfg:       SummaryConfig{Enabled: true},
+		lastKeyAttemptAt: now.Add(-2 * summarizerAcquireFloor),
+	}
+
+	got, cmd := m.Update(tickMsg(now))
+	next := got.(model)
+
+	if !next.acquiringKey {
+		t.Error("acquiringKey = false, want true: the tick must schedule an acquisition")
+	}
+	if next.keyAttempts != 1 {
+		t.Errorf("keyAttempts = %d, want 1", next.keyAttempts)
+	}
+	if !next.lastKeyAttemptAt.Equal(now) {
+		t.Errorf("lastKeyAttemptAt = %v, want %v", next.lastKeyAttemptAt, now)
+	}
+	// Deliberately NOT executed — acquisition reads the key source for real.
+	if cmd == nil {
+		t.Error("cmd = nil, want a batch containing the acquire command")
+	}
+}
+
+// Acquisition is paced and capped: each timed-out FIFO read parks goroutines
+// for the life of the process (see env.go), so attempts must be bounded.
+func TestTickAcquisitionGuards(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		m    model
+	}{
+		{"inside floor", model{polling: true, summaryCfg: SummaryConfig{Enabled: true},
+			lastKeyAttemptAt: now.Add(-summarizerAcquireFloor / 2)}},
+		{"at attempt cap", model{polling: true, summaryCfg: SummaryConfig{Enabled: true},
+			keyAttempts: summarizerAcquireMax, lastKeyAttemptAt: now.Add(-2 * summarizerAcquireFloor)}},
+		{"already in flight", model{polling: true, summaryCfg: SummaryConfig{Enabled: true},
+			acquiringKey: true, lastKeyAttemptAt: now.Add(-2 * summarizerAcquireFloor)}},
+		{"summary disabled", model{polling: true,
+			lastKeyAttemptAt: now.Add(-2 * summarizerAcquireFloor)}},
+		{"summarizer already present", model{polling: true, summaryCfg: SummaryConfig{Enabled: true},
+			summarizer: &Summarizer{}, lastKeyAttemptAt: now.Add(-2 * summarizerAcquireFloor)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := tc.m.keyAttempts
+			got, _ := tc.m.Update(tickMsg(now))
+			next := got.(model)
+			if next.acquiringKey && !tc.m.acquiringKey {
+				t.Error("acquiringKey newly set, want no acquisition scheduled")
+			}
+			if next.keyAttempts != before {
+				t.Errorf("keyAttempts = %d, want unchanged %d", next.keyAttempts, before)
+			}
+		})
+	}
+}
+
+// A successful late acquisition installs the summarizer and immediately seeds
+// the status lines, mirroring what Init does when the key was there at startup.
+func TestSummarizerMsgInstallsAndSeeds(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{acquiringKey: true, lastSummaryAt: now.Add(-time.Hour)}
+
+	got, cmd := m.Update(summarizerMsg{s: &Summarizer{}, at: now})
+	next := got.(model)
+
+	if next.acquiringKey {
+		t.Error("acquiringKey = true, want false on completion")
+	}
+	if next.summarizer == nil {
+		t.Fatal("summarizer = nil, want installed")
+	}
+	if !next.summarizing {
+		t.Error("summarizing = false, want true: the late seed call must fire")
+	}
+	// Deliberately NOT executed — running it would make a network call.
+	if cmd == nil {
+		t.Error("cmd = nil, want the seed summarize command")
+	}
+}
+
+// A failed attempt (still no key) just clears the in-flight flag; the next
+// tick past the floor tries again, until the cap.
+func TestSummarizerMsgNilClearsInFlight(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	m := model{acquiringKey: true}
+
+	got, cmd := m.Update(summarizerMsg{s: nil, at: now})
+	next := got.(model)
+
+	if next.acquiringKey {
+		t.Error("acquiringKey = true, want false on completion")
+	}
+	if next.summarizer != nil {
+		t.Error("summarizer installed from a nil result")
+	}
+	if next.summarizing {
+		t.Error("summarizing = true, want false: nothing to seed")
+	}
+	if cmd != nil {
+		t.Error("cmd != nil, want nil")
+	}
+}
+
+// newModel must arm the lazy-acquisition clock when startup found no key, so
+// the first re-attempt waits a full floor instead of firing on the next tick
+// (startup itself was an attempt).
+func TestNewModelArmsAcquisitionClock(t *testing.T) {
+	// A plain env file with no ANTHROPIC_API_KEY: newSummarizer completes
+	// fast (no FIFO) and returns nil.
+	env := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(env, []byte("OTHER=x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDEMUX_ENV", env)
+
+	jsonl := filepath.Join(t.TempDir(), "sess.jsonl")
+	if err := os.WriteFile(jsonl, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig()
+	cfg.Summary.Enabled = true
+	m := newModel(cfg, jsonl, "sess", false)
+
+	if m.summarizer != nil {
+		t.Fatal("precondition: summarizer non-nil, want nil with a keyless env file")
+	}
+	if !m.summaryCfg.Enabled {
+		t.Error("summaryCfg not stored: lazy acquisition has no config to retry with")
+	}
+	if m.lastKeyAttemptAt.IsZero() {
+		t.Error("lastKeyAttemptAt zero: first lazy attempt would fire immediately instead of after the floor")
+	}
+}

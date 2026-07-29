@@ -51,6 +51,17 @@ const summaryCallTimeout = 30 * time.Second
 // every poll — a billable call per second against an API that just failed.
 const summaryRetryFloor = 30 * time.Second
 
+// summarizerAcquireFloor / summarizerAcquireMax pace and cap re-attempts at
+// constructing the summarizer after a keyless startup. Each attempt against a
+// writerless FIFO parks up to 2 goroutines for the life of the process (see
+// readEnvFileValue), so attempts cannot be unbounded: 120 attempts a minute
+// apart covers a two-hour lock at a worst case of ~240 parked goroutines,
+// after which the feature stays off until the head restarts.
+const (
+	summarizerAcquireFloor = time.Minute
+	summarizerAcquireMax   = 120
+)
+
 type summaryMsg struct {
 	// gen is the model's summaryGen at the moment the call was issued. The
 	// session can rotate while a call is in flight, and a summary computed
@@ -60,6 +71,13 @@ type summaryMsg struct {
 	summary Summary
 	err     error
 	at      time.Time
+}
+
+// summarizerMsg is the completion of one lazy acquisition attempt. s is nil
+// when the key still could not be read.
+type summarizerMsg struct {
+	s  *Summarizer
+	at time.Time
 }
 
 type model struct {
@@ -124,6 +142,13 @@ type model struct {
 	ready              bool
 	polling            bool
 	summarizer         *Summarizer
+	// summaryCfg is kept so a keyless startup can retry summarizer
+	// construction later (see shouldAcquireSummarizer): the common cause is a
+	// locked 1Password FIFO at launch, which unlocks minutes later.
+	summaryCfg       SummaryConfig
+	acquiringKey     bool
+	keyAttempts      int
+	lastKeyAttemptAt time.Time
 	minSummaryInterval time.Duration
 	tabTitle           bool
 	summarizing        bool
@@ -162,6 +187,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		// concurrent poll that races on EventReader.offset.
 		polling:            true,
 		summarizer:         summarizer,
+		summaryCfg:         cfg.Summary,
 		minSummaryInterval: cfg.Summary.MinInterval.Duration,
 		tabTitle:           cfg.Summary.TabTitle,
 		// Init unconditionally fires the seed summarize call when summarizer
@@ -171,6 +197,11 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		// on the very first poll would otherwise race a second concurrent
 		// call against the seed call.
 		summarizing: summarizer != nil,
+	}
+	if summarizer == nil {
+		// Startup itself was an acquisition attempt; stamp it so the lazy
+		// loop's first re-attempt waits a full floor rather than one tick.
+		m.lastKeyAttemptAt = time.Now()
 	}
 	m.recomputeFromEvents(time.Now())
 	return m
@@ -454,6 +485,30 @@ func (m model) summarize() tea.Cmd {
 	}
 }
 
+// shouldAcquireSummarizer reports whether this tick should re-attempt
+// summarizer construction: the feature is enabled but keyless (startup or a
+// prior attempt found nothing), no attempt is in flight, and both the floor
+// and the lifetime cap allow another one.
+func (m model) shouldAcquireSummarizer(now time.Time) bool {
+	if m.summarizer != nil || m.acquiringKey || !m.summaryCfg.Enabled {
+		return false
+	}
+	if m.keyAttempts >= summarizerAcquireMax {
+		return false
+	}
+	return now.Sub(m.lastKeyAttemptAt) >= summarizerAcquireFloor
+}
+
+// acquireSummarizer re-runs newSummarizer off the Update loop: reading the
+// key can block up to ~2s on a FIFO (envFileTimeout), which must never stall
+// rendering.
+func (m model) acquireSummarizer() tea.Cmd {
+	cfg := m.summaryCfg
+	return func() tea.Msg {
+		return summarizerMsg{s: newSummarizer(cfg), at: time.Now()}
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -468,11 +523,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 
 	case tickMsg:
-		if m.polling {
-			return m, m.tick()
+		cmds := []tea.Cmd{m.tick()}
+		if m.shouldAcquireSummarizer(time.Time(msg)) {
+			m.acquiringKey = true
+			m.keyAttempts++
+			m.lastKeyAttemptAt = time.Time(msg)
+			cmds = append(cmds, m.acquireSummarizer())
 		}
-		m.polling = true
-		return m, tea.Batch(m.pollData(), m.tick())
+		if !m.polling {
+			m.polling = true
+			cmds = append(cmds, m.pollData())
+		}
+		return m, tea.Batch(cmds...)
 
 	case dataMsg:
 		m.polling = false
@@ -518,6 +580,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.summarizing = true
 			return m, m.summarize()
 		}
+
+	case summarizerMsg:
+		m.acquiringKey = false
+		if msg.s == nil || m.summarizer != nil {
+			return m, nil
+		}
+		m.summarizer = msg.s
+		// Seed the status lines now, mirroring Init and switchSession: the
+		// session may sit idle indefinitely, so waiting for an edge could mean
+		// waiting forever — the exact failure lazy acquisition exists to fix.
+		if !m.canSummarize(msg.at) {
+			return m, nil
+		}
+		m.summarizing = true
+		return m, m.summarize()
 
 	case summaryMsg:
 		// Clear the in-flight flag FIRST and unconditionally: this message is

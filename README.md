@@ -131,6 +131,9 @@ launch:
   the key itself: the file is read as a stream, so it can be a FIFO your secret manager
   mounts and the key never touches disk (see **Secrets** below). Point it anywhere;
   `~` expands.
+  If the key can't be read at startup (a locked 1Password FIFO, say), the head
+  keeps re-trying about once a minute for two hours and enables summaries as
+  soon as a read succeeds.
 - `summary.min_interval` — minimum time between summary calls for an *active* session.
   This is the only thing bounding what an active session costs you, so treat it as a
   spending control. `0` is legal and means *no floor* — every turn may fire a call.
