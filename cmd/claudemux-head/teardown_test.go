@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestWorktreeListed(t *testing.T) {
@@ -96,5 +97,79 @@ func TestWorktreeIsGoneLiveWorktree(t *testing.T) {
 	}
 	if !worktreeIsGone(context.Background(), wt, repo) {
 		t.Error("removed worktree reported as present")
+	}
+}
+
+func TestTeardownTurnEnded(t *testing.T) {
+	tests := []struct {
+		kind StateKind
+		want bool
+	}{
+		{StateIdle, true},
+		{StateAwaiting, true}, // a wrap-up asking its confirmation is a real pause
+		{StateError, true},
+		{StateThinking, false},
+		{StateTool, false},
+		{StateCompacting, false},
+	}
+	for _, tt := range tests {
+		if got := teardownTurnEnded(tt.kind); got != tt.want {
+			t.Errorf("teardownTurnEnded(%v) = %v, want %v", tt.kind, got, tt.want)
+		}
+	}
+}
+
+func TestTeardownGateOpen(t *testing.T) {
+	tests := []struct {
+		name         string
+		kind         StateKind
+		inWorktree   bool
+		worktreeGone bool
+		want         bool
+	}{
+		{"worktree gone, turn ended", StateIdle, true, true, true},
+		{"worktree gone but still working", StateTool, true, true, false},
+		{"turn ended, worktree survives", StateIdle, true, false, false},
+		{"awaiting confirmation, worktree survives", StateAwaiting, true, false, false},
+		{"not a worktree, turn ended", StateIdle, false, false, true},
+		{"not a worktree, still working", StateThinking, false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := teardownGateOpen(tt.kind, tt.inWorktree, tt.worktreeGone)
+			if got != tt.want {
+				t.Errorf("teardownGateOpen(%v, %v, %v) = %v, want %v",
+					tt.kind, tt.inWorktree, tt.worktreeGone, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTeardownChip(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		phase   teardownPhase
+		blocked bool
+		note    string
+		noteAt  time.Time
+		want    string
+	}{
+		{"idle, nothing to say", teardownIdle, false, "", time.Time{}, ""},
+		{"sent", teardownSent, false, "", time.Time{}, "⏻ wrapping up…"},
+		{"sent but blocked", teardownSent, true, "", time.Time{}, "⏻ worktree still present"},
+		{"ready", teardownReady, false, "", time.Time{}, "⏻ press x to tear down"},
+		{"exiting", teardownExiting, false, "", time.Time{}, "⏻ exiting claude…"},
+		{"fresh abort note", teardownIdle, false, "claude didn't exit", now.Add(-2 * time.Second), "⏻ claude didn't exit"},
+		{"expired abort note", teardownIdle, false, "claude didn't exit", now.Add(-6 * time.Second), ""},
+		{"note is ignored mid-teardown", teardownSent, false, "stale", now, "⏻ wrapping up…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := teardownChip(tt.phase, tt.blocked, tt.note, tt.noteAt, now)
+			if got != tt.want {
+				t.Errorf("teardownChip() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
