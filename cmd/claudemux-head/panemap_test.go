@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -214,5 +215,20 @@ func TestReadPaneSessionRejectsMissingOrEmpty(t *testing.T) {
 	}
 	if _, ok := readPaneSession(dir, "%404"); ok {
 		t.Error("expected not-ok for absent map file")
+	}
+}
+
+// The pane whose transcript is followed must be reported, so a teardown types
+// into that exact pane rather than re-deriving a possibly different one.
+func TestMappedTranscriptReportsPane(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	// Outside tmux there is no self pane, so the lookup can't run at all.
+	// This asserts the shape of that path: four values, all zero.
+	transcript, cwd, pane, ok := mappedTranscript("", t.TempDir())
+	if ok || transcript != "" || cwd != "" || pane != "" {
+		t.Errorf("mappedTranscript(\"\", _) = (%q, %q, %q, %v), want all zero",
+			transcript, cwd, pane, ok)
 	}
 }

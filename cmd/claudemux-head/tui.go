@@ -405,7 +405,7 @@ func (m model) pollData() tea.Cmd {
 		// following or nothing newer exists.
 		activeJSONL := ""
 		if follow {
-			if mapped, _, ok := mappedTranscript(selfPane, paneDir); ok {
+			if mapped, _, _, ok := mappedTranscript(selfPane, paneDir); ok {
 				// mapped is "" when the pane's live cwd is known but its
 				// transcript isn't yet — keep the current binding then rather
 				// than adopting an empty path.

@@ -193,24 +193,29 @@ func readPaneSession(dir, paneID string) (string, bool) {
 //   - transcript is "" when no candidate has a recorded session id yet, or the
 //     session's transcript can't be found on disk — the caller keeps its
 //     current binding in that case.
-func mappedTranscript(selfPane, dir string) (string, string, bool) {
+//   - pane is the tmux pane id of the claude pane selected, or "" when ok is
+//     false. Teardown types into this pane, so it must be the same one whose
+//     transcript is followed.
+func mappedTranscript(selfPane, dir string) (string, string, string, bool) {
 	listing := listPanes(selfPane)
 	if listing == "" {
-		return "", "", false
+		return "", "", "", false
 	}
 	candidates := claudePaneCandidates(listing, selfPane)
 	if len(candidates) == 0 {
-		return "", "", false
+		return "", "", "", false
 	}
 	paths := panePaths(listing)
 	for _, pane := range candidates {
 		if sid, ok := readPaneSession(dir, pane); ok {
 			transcript, _ := transcriptForSession(claudeProjectsPath(), sid)
-			return transcript, paths[pane], true
+			return transcript, paths[pane], pane, true
 		}
 	}
 	// No candidate has a recorded session id yet. Still report the preferred
 	// pane's live cwd so the worktree chip tracks reality; there's no
-	// transcript to follow until the hook writes a map for it.
-	return "", paths[candidates[0]], true
+	// transcript to follow until the hook writes a map for it. The pane id is
+	// reported regardless — a teardown can type into a pane whose transcript
+	// is not yet known.
+	return "", paths[candidates[0]], candidates[0], true
 }
