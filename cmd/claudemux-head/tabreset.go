@@ -99,7 +99,7 @@ func restoreName(declaredName, sessionName, workDir string) string {
 	if sessionName == base {
 		return declaredName
 	}
-	if suffix := strings.TrimPrefix(sessionName, base+"-"); suffix != sessionName && suffix != "" {
+	if suffix := strings.TrimPrefix(sessionName, base+"-"); suffix != sessionName && suffix != "" && allDigits(suffix) {
 		return declaredName + " " + suffix
 	}
 	// The session was renamed to something unrelated to its directory; there is

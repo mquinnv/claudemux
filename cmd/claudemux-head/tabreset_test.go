@@ -188,6 +188,12 @@ func TestRestoreNameUnrelatedSessionName(t *testing.T) {
 	if got := restoreName("Remix", "scratch", "/Users/x/Projects/remix"); got != "scratch" {
 		t.Errorf("name = %q, want %q", got, "scratch")
 	}
+	// A session hand-renamed to <basename>-<word> is not a `claudemux -n` clone:
+	// the suffix is not a clone number, so there is nothing to carry onto the
+	// declared name and the session name stands.
+	if got := restoreName("Remix", "remix-scratch", "/Users/x/Projects/remix"); got != "remix-scratch" {
+		t.Errorf("name = %q, want %q", got, "remix-scratch")
+	}
 }
 
 func TestProjectDeclaredName(t *testing.T) {
