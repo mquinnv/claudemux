@@ -321,15 +321,7 @@ func TestTeardownCommandDefaultsToDone(t *testing.T) {
 // An explicitly empty command is a legal opt-out (press x becomes a gated
 // exit-and-kill), so it must survive decoding rather than being re-defaulted.
 func TestTeardownCommandEmptyStringIsPreserved(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "claudemux"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "claudemux", "config.yml"),
-		[]byte("teardown:\n  command: \"\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	writeConfig(t, "teardown:\n  command: \"\"\n")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -341,15 +333,7 @@ func TestTeardownCommandEmptyStringIsPreserved(t *testing.T) {
 }
 
 func TestTeardownCommandOverride(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "claudemux"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "claudemux", "config.yml"),
-		[]byte("teardown:\n  command: /wrapup\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	writeConfig(t, "teardown:\n  command: /wrapup\n")
 
 	cfg, err := loadConfig()
 	if err != nil {
