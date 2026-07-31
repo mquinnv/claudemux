@@ -277,17 +277,29 @@ func teardownProbeCmd(workDir, mainCheckout string) tea.Cmd {
 	}
 }
 
-// claudeGoneCmd reports whether claude has exited: no pane in the session runs
-// claude any more, which is exactly what mappedTranscript failing to find a
-// candidate means. Outside tmux nothing is observable, so it reports not-gone
-// — the exit wait then times out rather than falling through to a kill.
-func claudeGoneCmd(selfPane, paneDir string) tea.Cmd {
+// claudeGoneCmd reports whether claude has exited.
+//
+// This goes through listPanes/claudePaneCandidates directly rather than
+// mappedTranscript, because mappedTranscript's ok=false collapses two very
+// different situations into one value: a genuinely empty pane listing (every
+// candidate exited) and a listPanes call that failed or timed out (a wedged
+// tmux server, a transient error) and so returned "" regardless. A live
+// session always lists at least this pane, so an empty listing here is never
+// evidence of exit — it means the observation itself failed. Only a
+// non-empty listing with zero claude/node candidates is confirmed exit.
+// Outside tmux nothing is observable either, so it reports not-gone in every
+// unobservable case — the exit wait then times out rather than falling
+// through to an irreversible kill-session.
+func claudeGoneCmd(selfPane string) tea.Cmd {
 	return func() tea.Msg {
 		if selfPane == "" {
 			return claudeGoneMsg{}
 		}
-		_, _, pane, ok := mappedTranscript(selfPane, paneDir)
-		return claudeGoneMsg{gone: !ok || pane == ""}
+		listing := listPanes(selfPane)
+		if listing == "" {
+			return claudeGoneMsg{}
+		}
+		return claudeGoneMsg{gone: len(claudePaneCandidates(listing, selfPane)) == 0}
 	}
 }
 

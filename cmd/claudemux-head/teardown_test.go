@@ -263,7 +263,7 @@ func TestTeardownProbeCmdLiveDir(t *testing.T) {
 // Outside tmux nothing can be observed, so "gone" must be false: reporting
 // gone would let the exit wait fall through to a kill-session.
 func TestClaudeGoneCmdOutsideTmux(t *testing.T) {
-	msg := claudeGoneCmd("", t.TempDir())()
+	msg := claudeGoneCmd("")()
 	gone, ok := msg.(claudeGoneMsg)
 	if !ok {
 		t.Fatalf("msg = %T, want claudeGoneMsg", msg)
