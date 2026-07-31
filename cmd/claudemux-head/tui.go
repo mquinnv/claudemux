@@ -928,6 +928,12 @@ func truncateRunes(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
+// teardownChipText renders this model's teardown chip, or "" when there is
+// nothing to show.
+func (m model) teardownChipText(now time.Time) string {
+	return teardownChip(m.teardown, m.teardownBlocked, m.teardownNote, m.teardownNoteAt, now)
+}
+
 // renderStatusbar packs state and budget info onto a single
 // background-filled line at the bottom of the pane. chip, if non-empty, is
 // the worktree name to show (truncated to 24 runes) between the model and
@@ -949,7 +955,13 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	// disappears first as the pane narrows. The pin is the protected one — the
 	// chip should be lost before the pin state does. See
 	// docs/superpowers/specs/2026-07-31-head-tab-reset-design.md line 172.
-	if m.tabPinned {
+	//
+	// The teardown chip takes the pin's slot and wins when both apply: it is
+	// transient and actionable, the pin is ambient. Both sit ahead of the
+	// worktree chip for the clipping reason documented above.
+	if td := m.teardownChipText(now); td != "" {
+		leftParts = append(leftParts, td)
+	} else if m.tabPinned {
 		leftParts = append(leftParts, "⬚ pinned")
 	}
 	if chip != "" {
@@ -1065,7 +1077,9 @@ func renderStateLine(m model, now time.Time) string {
 	if m.modelName != "" {
 		parts = append(parts, shortModel(m.modelName))
 	}
-	if m.tabPinned {
+	if td := m.teardownChipText(now); td != "" {
+		parts = append(parts, td)
+	} else if m.tabPinned {
 		parts = append(parts, "⬚ pinned")
 	}
 	left := strings.Join(parts, " · ")

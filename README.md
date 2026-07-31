@@ -123,6 +123,9 @@ onepassword:
 
 launch:
   auto_worktree: false
+
+teardown:
+  command: /done
 ```
 
 - `summary.enabled` — turn the LLM summary off entirely (see **Billing** below).
@@ -158,6 +161,9 @@ launch:
   `claudemux -w <existing-session>` attaches without a worktree, silently ignoring
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
+- `teardown.command` — the wrap-up command the status pane types into the `claude`
+  pane when you press `x` (see **Tearing down a session** below). Default `/done`.
+  Set it to `""` to skip that step, making `x` a gated exit-and-kill.
 
 **An unknown key in `config.yml` is a startup error, not a silent no-op.** A typo like
 `sumary:` fails loudly at launch instead of quietly behaving as if you'd written nothing.
@@ -223,6 +229,33 @@ but they stop renaming the window — and the status pane shows `⬚ pinned`. Pr
 
 Sessions cloned with `-n` share one `.project.yml`, so `remix-2` restores to
 `Remix 2` rather than colliding with `remix`'s `Remix`.
+
+### Tearing down a session
+
+When the work is finished, click the status pane and press `x`. It runs the whole
+wrap-up in order:
+
+1. The first press types `teardown.command` (`/done` by default) into the `claude`
+   pane and submits it. Answer whatever it asks exactly as you would have by hand.
+   The status pane shows `⏻ wrapping up…`.
+2. Once the turn ends **and** the session's worktree is gone, the pane shows
+   `⏻ press x to tear down`. If the wrap-up bailed — uncommitted work, unpushed
+   commits, you declined — the worktree is still there, so the gate never opens and
+   the pane says `⏻ worktree still present` instead.
+3. The second press sends `/exit`, waits for `claude` to actually be gone, and then
+   kills the tmux session.
+
+`esc` cancels a teardown in progress. **It does not undo anything** — by then the
+wrap-up command has already run; cancelling only stops the status pane from driving
+the rest.
+
+Nothing here is silent. Every abort names its reason on the status line —
+`⏻ wrap-up didn't submit` (the command never reached `claude`),
+`⏻ claude didn't exit` (it was still running after 15 seconds, so the session was
+left alive), `⏻ no claude pane`.
+
+Sessions that aren't in a worktree have no deletion to verify, so the gate opens as
+soon as the wrap-up turn ends.
 
 ## tmux notes
 

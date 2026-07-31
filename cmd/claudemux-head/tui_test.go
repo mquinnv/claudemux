@@ -2198,3 +2198,44 @@ func TestAbortingTickStillReturnsTickCommand(t *testing.T) {
 		t.Fatal("no command returned from an aborting tick; the poll loop would stall")
 	}
 }
+
+func TestTeardownChipInStateLine(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownReady
+	if got := renderStateLine(m, time.Now()); !strings.Contains(got, "⏻ press x to tear down") {
+		t.Errorf("state line missing teardown chip:\n%s", got)
+	}
+}
+
+func TestTeardownChipInStatusbar(t *testing.T) {
+	m := teardownTestModel()
+	m.height = 1
+	m.teardown = teardownSent
+	if got := renderStatusbar(m, time.Now(), ""); !strings.Contains(got, "⏻ wrapping up…") {
+		t.Errorf("statusbar missing teardown chip:\n%s", got)
+	}
+}
+
+// Both chips compete for one slot; the transient, actionable one wins.
+func TestTeardownChipBeatsPinned(t *testing.T) {
+	m := teardownTestModel()
+	m.tabPinned = true
+	m.teardown = teardownReady
+	got := renderStateLine(m, time.Now())
+	if !strings.Contains(got, "⏻ press x to tear down") {
+		t.Errorf("teardown chip missing:\n%s", got)
+	}
+	if strings.Contains(got, "⬚ pinned") {
+		t.Errorf("pin chip should have yielded to the teardown chip:\n%s", got)
+	}
+}
+
+// With no teardown running the pin renders exactly as before.
+func TestPinnedChipUnaffectedWhenIdle(t *testing.T) {
+	m := teardownTestModel()
+	m.tabPinned = true
+	got := renderStateLine(m, time.Now())
+	if !strings.Contains(got, "⬚ pinned") {
+		t.Errorf("pin chip missing when no teardown is armed:\n%s", got)
+	}
+}
