@@ -12,4 +12,3 @@
 # Local agent/process artifacts
 .claude/settings.local.json
 .superpowers/
-docs/superpowers/
