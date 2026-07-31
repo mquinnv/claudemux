@@ -295,3 +295,26 @@ gains `teardown:` with its default.
   that knows the session's state.
 - Any automatic teardown that fires without a keypress.
 - Anything that runs after `kill-session`.
+
+## Known gaps
+
+Findings from review that were judged real but not worth blocking the feature. Each was
+traced; none can cause a wrong `kill-session`.
+
+- **No generation counter on teardown messages.** `tui.go` uses `summaryGen` for exactly
+  this staleness class, and the teardown path does not. Traced safe because both probe
+  answers are monotone: a removed worktree does not come back, and claude having exited
+  stays exited — so a stale reply can only agree with a fresh one. Worst case is one
+  extra read-only subprocess.
+- **A late `teardownSentMsg` can abort a teardown already in `teardownExiting`,** relabelling
+  it `claude didn't exit`. Aborts in the safe direction — `/exit` was delivered, the session
+  survives — but the message is then untrue.
+- **`session rotated` also aborts during `teardownExiting`,** where its rationale does not
+  apply: it exists because `switchSession` recomputes `lastPrompt` and could forge
+  submission evidence, which only matters in `teardownSent`. The kill target is derived
+  from `selfPane` and is unaffected by a transcript rebind.
+- **`model.inWorktree` is write-only** since the gate moved to `captureTeardownTarget`,
+  which recomputes the fallback itself. Dead field, and its comment still describes the
+  old role.
+- **The arm's-length worktree case gets no worktree verification** — see "Determining that
+  the worktree is gone" above. Disclosed in the README rather than papered over.
