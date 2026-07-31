@@ -633,14 +633,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.tabPinned = !m.tabPinned
 			if m.tabPinned {
-				wd, err := os.Getwd()
-				if err != nil {
+				// The startup capture, not os.Getwd(): a wrap-up that removed
+				// the launch directory makes os.Getwd() fail, and `r` would
+				// then pin without ever resetting. workDir is captured for
+				// exactly that failure — see the field.
+				if m.workDir == "" {
 					// Nothing to resolve a color or a name from. The pin still
 					// takes effect: it is a statement about this program's own
 					// future behavior and must not depend on the filesystem.
 					return m, nil
 				}
-				return m, resetTabCmd(m.selfPane, wd)
+				return m, resetTabCmd(m.selfPane, m.workDir)
 			}
 			// Unpinning hands control back immediately rather than leaving the
 			// tab stale until the next summary lands.

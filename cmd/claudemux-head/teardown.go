@@ -214,13 +214,17 @@ func teardownChip(p teardownPhase, blocked bool, note string, noteAt, now time.T
 // names, so a configured command containing "Enter" or "C-c" would be
 // interpreted rather than typed.
 //
+// "--" ends tmux's own option parsing. text is user config (teardown.command),
+// so a value like "-p something" would otherwise be read as flags to send-keys
+// rather than as characters to type.
+//
 // The Enter that submits is a SEPARATE call (sendEnterArgs) with a delay
 // between them — see this file's teardownSendCmd for why.
 func sendLiteralArgs(pane, text string) ([]string, bool) {
 	if pane == "" || text == "" {
 		return nil, false
 	}
-	return []string{"send-keys", "-t", pane, "-l", text}, true
+	return []string{"send-keys", "-t", pane, "-l", "--", text}, true
 }
 
 // sendEnterArgs builds the tmux call that submits whatever is in pane's input.
@@ -232,6 +236,11 @@ func sendEnterArgs(pane string) ([]string, bool) {
 }
 
 // killSessionArgs builds the tmux call that ends the session.
+//
+// session is a session ID ("$3"), not a name: tmux's -t resolves a name by
+// exact match, then by prefix, then by fnmatch pattern, so a name could select
+// a *different* session than the one looked up. An ID is unambiguous by
+// construction, which is what the one irreversible call in this feature wants.
 //
 // An empty session is refused rather than defaulted: `kill-session` with no -t
 // kills the *current* session, so a failed lookup would still destroy
@@ -282,9 +291,16 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 		if !ok {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-		defer cancel()
-		if err := exec.CommandContext(ctx, "tmux", literal...).Run(); err != nil {
+		// Each tmux call gets its OWN deadline, per teardownTmuxTimeout's
+		// contract. A single shared context would have to cover both
+		// subprocesses plus the teardownKeyDelay sleep between them, leaving
+		// the Enter with whatever fraction of the 2s the literal send did not
+		// consume — so a slow-but-successful first call could cancel the
+		// second one and report a failure to submit that never happened.
+		literalCtx, cancelLiteral := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		err := exec.CommandContext(literalCtx, "tmux", literal...).Run()
+		cancelLiteral()
+		if err != nil {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
 
@@ -294,7 +310,9 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 		if !ok {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
-		if err := exec.CommandContext(ctx, "tmux", enter...).Run(); err != nil {
+		enterCtx, cancelEnter := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		defer cancelEnter()
+		if err := exec.CommandContext(enterCtx, "tmux", enter...).Run(); err != nil {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
 		// Success here means the keystrokes were delivered, NOT that claude
@@ -357,7 +375,7 @@ func killSessionCmd(selfPane string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "tmux", "display-message",
-			"-p", "-t", selfPane, "#{session_name}").Output()
+			"-p", "-t", selfPane, "#{session_id}").Output()
 		if err != nil {
 			return nil
 		}

@@ -1724,7 +1724,7 @@ func TestUnpinnedAllowsRename(t *testing.T) {
 
 // r pins, and pinning issues the reset.
 func TestKeyRPins(t *testing.T) {
-	m := model{ready: true, width: 80, height: 4, selfPane: "%3"}
+	m := model{ready: true, width: 80, height: 4, selfPane: "%3", workDir: "/tmp/repo"}
 	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	gm := got.(model)
 	if !gm.tabPinned {

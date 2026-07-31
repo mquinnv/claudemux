@@ -180,7 +180,9 @@ func TestSendLiteralArgs(t *testing.T) {
 	if !ok {
 		t.Fatal("ok = false, want true")
 	}
-	want := []string{"send-keys", "-t", "%3", "-l", "/done"}
+	// "--" ends option parsing: teardown.command is user config, and a value
+	// starting with "-" must be typed, not read as a flag to send-keys.
+	want := []string{"send-keys", "-t", "%3", "-l", "--", "/done"}
 	if !slices.Equal(args, want) {
 		t.Errorf("args = %v, want %v", args, want)
 	}
