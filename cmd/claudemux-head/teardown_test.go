@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -171,5 +172,56 @@ func TestTeardownChip(t *testing.T) {
 				t.Errorf("teardownChip() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSendLiteralArgs(t *testing.T) {
+	args, ok := sendLiteralArgs("%3", "/done")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := []string{"send-keys", "-t", "%3", "-l", "/done"}
+	if !slices.Equal(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+// Nothing to type, or nowhere to type it, must build no command at all —
+// `send-keys -l ""` is a no-op that still costs a subprocess, and a missing
+// pane target would send to whatever tmux considers current.
+func TestSendLiteralArgsRefusesEmpty(t *testing.T) {
+	if _, ok := sendLiteralArgs("", "/done"); ok {
+		t.Error("empty pane accepted")
+	}
+	if _, ok := sendLiteralArgs("%3", ""); ok {
+		t.Error("empty text accepted")
+	}
+}
+
+func TestSendEnterArgs(t *testing.T) {
+	args, ok := sendEnterArgs("%3")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := []string{"send-keys", "-t", "%3", "Enter"}
+	if !slices.Equal(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+	if _, ok := sendEnterArgs(""); ok {
+		t.Error("empty pane accepted")
+	}
+}
+
+func TestKillSessionArgs(t *testing.T) {
+	args, ok := killSessionArgs("claudemux")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := []string{"kill-session", "-t", "claudemux"}
+	if !slices.Equal(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+	if _, ok := killSessionArgs(""); ok {
+		t.Error("empty session accepted — would kill the current session")
 	}
 }

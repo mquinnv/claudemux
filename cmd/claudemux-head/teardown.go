@@ -169,3 +169,38 @@ func teardownChip(p teardownPhase, blocked bool, note string, noteAt, now time.T
 	}
 	return ""
 }
+
+// sendLiteralArgs builds the tmux call that types text into pane verbatim.
+//
+// -l sends the string literally: without it tmux parses the argument as key
+// names, so a configured command containing "Enter" or "C-c" would be
+// interpreted rather than typed.
+//
+// The Enter that submits is a SEPARATE call (sendEnterArgs) with a delay
+// between them — see this file's teardownSendCmd for why.
+func sendLiteralArgs(pane, text string) ([]string, bool) {
+	if pane == "" || text == "" {
+		return nil, false
+	}
+	return []string{"send-keys", "-t", pane, "-l", text}, true
+}
+
+// sendEnterArgs builds the tmux call that submits whatever is in pane's input.
+func sendEnterArgs(pane string) ([]string, bool) {
+	if pane == "" {
+		return nil, false
+	}
+	return []string{"send-keys", "-t", pane, "Enter"}, true
+}
+
+// killSessionArgs builds the tmux call that ends the session.
+//
+// An empty session is refused rather than defaulted: `kill-session` with no -t
+// kills the *current* session, so a failed lookup would still destroy
+// something, just not necessarily the right thing.
+func killSessionArgs(session string) ([]string, bool) {
+	if session == "" {
+		return nil, false
+	}
+	return []string{"kill-session", "-t", session}, true
+}
