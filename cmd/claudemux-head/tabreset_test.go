@@ -298,3 +298,53 @@ func TestItermTabColorBytesRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+// tmux is asked for both values in one call, newline-separated, because a
+// session name may contain spaces and a space-separated format could not be
+// split back apart safely.
+func TestParseSessionAndTTY(t *testing.T) {
+	session, tty := parseSessionAndTTY("claudemux\n/dev/ttys036\n")
+	if session != "claudemux" {
+		t.Errorf("session = %q, want %q", session, "claudemux")
+	}
+	if tty != "/dev/ttys036" {
+		t.Errorf("tty = %q, want %q", tty, "/dev/ttys036")
+	}
+}
+
+// A detached session has no client, so tmux prints an empty second line. The
+// session name is still usable; only the tab color is skipped.
+func TestParseSessionAndTTYDetached(t *testing.T) {
+	session, tty := parseSessionAndTTY("cd-receiver\n\n")
+	if session != "cd-receiver" {
+		t.Errorf("session = %q, want %q", session, "cd-receiver")
+	}
+	if tty != "" {
+		t.Errorf("tty = %q, want empty for a detached session", tty)
+	}
+}
+
+// A session name containing spaces survives the newline-separated format.
+func TestParseSessionAndTTYSessionWithSpaces(t *testing.T) {
+	session, _ := parseSessionAndTTY("my project\n/dev/ttys001\n")
+	if session != "my project" {
+		t.Errorf("session = %q, want %q", session, "my project")
+	}
+}
+
+// Outside tmux the call fails and yields nothing rather than a bogus target.
+func TestParseSessionAndTTYEmpty(t *testing.T) {
+	session, tty := parseSessionAndTTY("")
+	if session != "" || tty != "" {
+		t.Errorf("session/tty = %q/%q, want empty/empty", session, tty)
+	}
+}
+
+// resetTabCmd always returns a runnable command. Even with no pane there is
+// still a session style to repair, and the latch in Task 5 appends it
+// unconditionally.
+func TestResetTabCmdIsNeverNil(t *testing.T) {
+	if resetTabCmd("", t.TempDir()) == nil {
+		t.Error("resetTabCmd = nil, want a runnable command")
+	}
+}

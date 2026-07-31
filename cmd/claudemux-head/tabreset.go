@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"gopkg.in/yaml.v3"
 )
 
@@ -163,4 +166,100 @@ func itermTabColorBytes(hex string) []byte {
 	return []byte(fmt.Sprintf(
 		"\033]6;1;bg;red;brightness;%d\a\033]6;1;bg;green;brightness;%d\a\033]6;1;bg;blue;brightness;%d\a",
 		(v>>16)&0xff, (v>>8)&0xff, v&0xff))
+}
+
+// tabResetTimeout bounds the whole reset — the tmux query, the tmux commands,
+// and the resolver subprocess together. This runs off the poll loop exactly
+// like renameTabCmd and listPanes, so a wedged tmux server must never block or
+// crash the TUI.
+const tabResetTimeout = 2 * time.Second
+
+// sessionAndTTYFormat asks for both values in one tmux call. They are separated
+// by a newline, not a space: a session name may contain spaces, and a
+// space-separated pair could not be split back apart safely.
+const sessionAndTTYFormat = "#{session_name}\n#{client_tty}"
+
+// parseSessionAndTTY splits sessionAndTTYFormat's output. A detached session
+// has no client and yields an empty tty, which is not an error — only the tab
+// color is skipped.
+func parseSessionAndTTY(out string) (session, tty string) {
+	lines := strings.SplitN(strings.TrimRight(out, "\n"), "\n", 2)
+	if len(lines) > 0 {
+		session = lines[0]
+	}
+	if len(lines) > 1 {
+		tty = strings.TrimSpace(lines[1])
+	}
+	return session, tty
+}
+
+// projectStyleFor runs the shared shell resolver against dir and returns its
+// hex and contrast foreground. Empty strings when the resolver cannot be found,
+// fails, or the directory carries no project color — all of which mean the same
+// thing to the caller: reset the title, leave the colors alone.
+//
+// Arguments are passed positionally so neither the path nor the directory ever
+// reaches a shell parser.
+func projectStyleFor(ctx context.Context, dir string) (hex, fg string) {
+	resolver, ok := shippedScriptPath(projectColorResolver)
+	if !ok {
+		return "", ""
+	}
+	out, err := exec.CommandContext(ctx, "bash", "-c",
+		`. "$1"; resolve_project_style "$2"`,
+		"_", resolver, dir).Output()
+	if err != nil {
+		return "", ""
+	}
+	hex, fg, ok = parseProjectStyle(string(out))
+	if !ok {
+		return "", ""
+	}
+	return hex, fg
+}
+
+// resetTabCmd restores the window name and the session's project colors to
+// their launch-time values.
+//
+// Every failure degrades to a partial reset rather than an error: no resolver
+// or no project color means the title is still restored, and a detached session
+// means the tmux styles are still set with only the terminal tab skipped. A
+// reset that half-worked beats a status pane reporting a subprocess failure, so
+// results are discarded throughout — the same discipline as renameTabCmd.
+func resetTabCmd(selfPane, workDir string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), tabResetTimeout)
+		defer cancel()
+
+		var session, tty string
+		if selfPane != "" {
+			out, err := exec.CommandContext(ctx, "tmux", "display-message",
+				"-p", "-t", selfPane, sessionAndTTYFormat).Output()
+			if err == nil {
+				session, tty = parseSessionAndTTY(string(out))
+			}
+		}
+
+		hex, fg := projectStyleFor(ctx, workDir)
+		name := restoreName(
+			projectDeclaredName(filepath.Join(workDir, ".project.yml")),
+			session, workDir)
+
+		for _, args := range tabResetTmuxArgs(selfPane, session, name, hex, fg) {
+			_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		}
+
+		// The iTerm2 sequence goes to the attached client's tty, NOT /dev/tty:
+		// inside a pane /dev/tty is the pane's pty and tmux consumes the
+		// escape. bin/claudemux gets away with /dev/tty only because it writes
+		// before attaching, from outside tmux.
+		if b := itermTabColorBytes(hex); b != nil && tty != "" {
+			if f, err := os.OpenFile(tty, os.O_WRONLY, 0); err == nil {
+				_, _ = f.Write(b)
+				_ = f.Close()
+			}
+		}
+
+		return nil
+	}
 }
