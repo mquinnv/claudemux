@@ -139,7 +139,9 @@ filesystem.
 
 On the second `x` press:
 
-1. `send-keys -l "/exit"` then `Enter`, split the same way and for the same reason.
+1. `send-keys -l "/exit"` then `Enter`, split the same way and for the same reason —
+   the same send helper the wrap-up command uses, with different text, rather than a
+   second near-identical one.
 2. Poll until `claudePaneCandidates` returns no candidates for this session — i.e. no
    pane in it is running `claude` or `node` any more. This reuses the primitive the head
    already runs every second; no new detection mechanism.
