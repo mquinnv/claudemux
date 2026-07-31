@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -1700,6 +1701,103 @@ func TestPaneStylesSetNoBackground(t *testing.T) {
 		if _, ok := s.GetBackground().(lipgloss.NoColor); !ok {
 			t.Errorf("%s sets Background(%v); it must stay unset so the pane inherits the terminal background",
 				name, s.GetBackground())
+		}
+	}
+}
+
+// While pinned, a landed summary must not rename the window. Summaries keep
+// running and the rest of the pane keeps updating; only the rename stops.
+func TestPinnedSuppressesRename(t *testing.T) {
+	m := model{tabTitle: true, selfPane: "%3", summaryGen: 1, tabPinned: true}
+	if m.tabCmdFor(Summary{Topic: "t", Now: "n", Tab: "crm bundling"}) != nil {
+		t.Error("expected no rename command while pinned")
+	}
+}
+
+// Unpinned, the existing behavior stands.
+func TestUnpinnedAllowsRename(t *testing.T) {
+	m := model{tabTitle: true, selfPane: "%3", summaryGen: 1}
+	if m.tabCmdFor(Summary{Topic: "t", Now: "n", Tab: "crm bundling"}) == nil {
+		t.Error("expected a rename command while unpinned")
+	}
+}
+
+// r pins, and pinning issues the reset.
+func TestKeyRPins(t *testing.T) {
+	m := model{ready: true, width: 80, height: 4, selfPane: "%3"}
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	gm := got.(model)
+	if !gm.tabPinned {
+		t.Error("tabPinned = false after r, want true")
+	}
+	if cmd == nil {
+		t.Error("expected a reset command when pinning")
+	}
+}
+
+// A second r unpins and re-applies the current summary label, so the toggle is
+// symmetric instead of leaving the tab stale until the next summary lands.
+func TestKeyRUnpinsAndReapplies(t *testing.T) {
+	m := model{
+		ready: true, width: 80, height: 4, selfPane: "%3",
+		tabTitle: true, tabPinned: true,
+		summary: Summary{Topic: "t", Now: "n", Tab: "crm bundling"},
+	}
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	gm := got.(model)
+	if gm.tabPinned {
+		t.Error("tabPinned = true after second r, want false")
+	}
+	if cmd == nil {
+		t.Error("expected the summary label to be re-applied on unpin")
+	}
+}
+
+// r must not quit. It shares the key switch with q/ctrl+c/esc, and a fallthrough
+// bug there would take the pane down on every reset. Update always returns a
+// model even when quitting, so assert on the command: run it and confirm it does
+// not yield tea.QuitMsg the way "q" does.
+func TestKeyRDoesNotQuit(t *testing.T) {
+	m := model{ready: true, width: 80, height: 4}
+
+	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if quitCmd == nil {
+		t.Fatal("q produced no command; the control for this test is broken")
+	}
+	if _, isQuit := quitCmd().(tea.QuitMsg); !isQuit {
+		t.Fatal("q did not produce tea.QuitMsg; the control for this test is broken")
+	}
+
+	// Do NOT execute r's command — resetTabCmd shells out to bash and tmux, and
+	// a unit test must not spawn subprocesses. Taking the r branch rather than
+	// the quit branch is observable in the model instead: only the r case
+	// touches tabPinned.
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if !got.(model).tabPinned {
+		t.Error("r left tabPinned false; it fell through to another case")
+	}
+}
+
+// The pin is visible in both layouts, and invisible when unpinned.
+func TestPinnedIndicatorRenders(t *testing.T) {
+	now := time.Now()
+	pinned := model{ready: true, width: 120, height: 4, tabPinned: true}
+	unpinned := model{ready: true, width: 120, height: 4}
+
+	for name, line := range map[string]string{
+		"state line": renderStateLine(pinned, now),
+		"statusbar":  renderStatusbar(pinned, now, ""),
+	} {
+		if !strings.Contains(line, "pinned") {
+			t.Errorf("%s = %q, want it to show the pin", name, line)
+		}
+	}
+	for name, line := range map[string]string{
+		"state line": renderStateLine(unpinned, now),
+		"statusbar":  renderStatusbar(unpinned, now, ""),
+	} {
+		if strings.Contains(line, "pinned") {
+			t.Errorf("%s = %q, want no pin indicator when unpinned", name, line)
 		}
 	}
 }

@@ -161,8 +161,14 @@ type model struct {
 	lastKeyAttemptAt   time.Time
 	minSummaryInterval time.Duration
 	tabTitle           bool
-	summarizing        bool
-	lastSummaryAt      time.Time
+	// tabPinned holds the window name and the session's project colors at
+	// their launch-time values, suppressing the summary-driven rename until
+	// it is toggled off. Deliberately not persisted: a head restart already
+	// re-renders the session's identity from scratch, and a pin that outlived
+	// the process would be a setting rather than a gesture.
+	tabPinned     bool
+	summarizing   bool
+	lastSummaryAt time.Time
 	// summaryGen identifies the session a summarize call was issued for. It is
 	// bumped on every switchSession, so a reply that lands after a rotation can
 	// be recognized as belonging to the previous session and dropped.
@@ -473,9 +479,10 @@ func (m model) canSummarize(now time.Time) bool {
 }
 
 // tabCmdFor returns the window-rename command for a freshly landed summary, or
-// nil when the tab title is disabled, we are not in tmux, or the label is empty.
+// nil when the tab title is disabled, the tab is pinned, we are not in tmux, or
+// the label is empty.
 func (m model) tabCmdFor(s Summary) tea.Cmd {
-	if !m.tabTitle {
+	if !m.tabTitle || m.tabPinned {
 		return nil
 	}
 	return renameTabCmd(m.selfPane, s.Tab)
@@ -525,6 +532,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
+		case "r":
+			m.tabPinned = !m.tabPinned
+			if m.tabPinned {
+				wd, err := os.Getwd()
+				if err != nil {
+					// Nothing to resolve a color or a name from. The pin still
+					// takes effect: it is a statement about this program's own
+					// future behavior and must not depend on the filesystem.
+					return m, nil
+				}
+				return m, resetTabCmd(m.selfPane, wd)
+			}
+			// Unpinning hands control back immediately rather than leaving the
+			// tab stale until the next summary lands.
+			return m, m.tabCmdFor(m.summary)
 		}
 
 	case tea.WindowSizeMsg:
@@ -793,6 +815,9 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if chip != "" {
 		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
 	}
+	if m.tabPinned {
+		leftParts = append(leftParts, "⬚ pinned")
+	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
 
 	rightParts := rateGaugeParts(m, now, defaultBarW)
@@ -902,6 +927,9 @@ func renderStateLine(m model, now time.Time) string {
 	parts := []string{fmt.Sprintf("%s %s %s", dot, m.state.Label(), durStr)}
 	if m.modelName != "" {
 		parts = append(parts, shortModel(m.modelName))
+	}
+	if m.tabPinned {
+		parts = append(parts, "⬚ pinned")
 	}
 	left := strings.Join(parts, " · ")
 

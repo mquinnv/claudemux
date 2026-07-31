@@ -214,6 +214,16 @@ This needs no tmux configuration — claudemux sets `set-titles` itself. It appl
 only inside tmux, and only while summaries are on; turn it off with
 `summary.tab_title: false`. Outside tmux there is nothing to rename.
 
+**Pinning the tab.** Click the status pane and press `r` to put the tab back the
+way it launched: the window name returns to the project's `name:` (or the
+session name), and the tmux status bar, active pane border, and iTerm2 tab color
+are repainted from `color:`. The tab then stays put — summaries keep running,
+but they stop renaming the window — and the status pane shows `⬚ pinned`. Press
+`r` again to hand control back; the current label is re-applied straight away.
+
+Sessions cloned with `-n` share one `.project.yml`, so `remix-2` restores to
+`Remix 2` rather than colliding with `remix`'s `Remix`.
+
 ## tmux notes
 
 **claudemux needs no `~/.tmux.conf`.** It sets everything it depends on per session at
