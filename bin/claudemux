@@ -119,16 +119,15 @@ resolve_dir() {
 # persist — set once at launch/attach, no focus hooks needed. Leaves the
 # default style if no color.
 apply_status_color() {
-  local resolver hex r g b luminance fg
+  local resolver style hex fg
   resolver="$(dirname "$(resolve_self "$0")")/project-color-resolve.sh"
   [ -f "$resolver" ] || return 0
   # shellcheck disable=SC1090
   . "$resolver"
-  hex="$(resolve_project_hex "$2" 2>/dev/null || true)"
-  [ -n "$hex" ] || return 0
-  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
-  luminance=$(( (r * 299 + g * 587 + b * 114) / 1000 ))
-  if [ "$luminance" -gt 150 ]; then fg="#000000"; else fg="#ffffff"; fi
+  style="$(resolve_project_style "$2" 2>/dev/null || true)"
+  [ -n "$style" ] || return 0
+  hex="${style%% *}"
+  fg="${style##* }"
   tmux set -t "$1" status-style "bg=#${hex},fg=${fg}"
   # pane-active-border-style is a window option; sessions here are single-window
   tmux set -w -t "$1" pane-active-border-style "fg=#${hex}"

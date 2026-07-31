@@ -50,3 +50,23 @@ resolve_project_hex() {
     [ -n "$raw" ] || return 1
     name_to_hex "$raw"
 }
+
+# resolve_project_style DIR -> "<hex> <fg>", e.g. "b34dff #ffffff".
+#
+# The hex is resolve_project_hex's; the foreground is the black/white pick that
+# keeps text legible on it, by the same luminance rule the tmux status bar has
+# always used. Both callers — claudemux at launch and claudemux-head at reset —
+# come through here, so a change to the palette or the contrast rule lands in
+# both at once. Returns 1 with no output when there is no project color.
+resolve_project_style() {
+    local hex r g b luminance
+    hex="$(resolve_project_hex "$1")" || return 1
+    [ -n "$hex" ] || return 1
+    r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+    luminance=$(( (r * 299 + g * 587 + b * 114) / 1000 ))
+    if [ "$luminance" -gt 150 ]; then
+        echo "$hex #000000"
+    else
+        echo "$hex #ffffff"
+    fi
+}
