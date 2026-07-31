@@ -1934,8 +1934,8 @@ func TestEscQuitsWhenIdle(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("esc did not quit from teardownIdle")
 	}
-	if msg := cmd(); msg == nil {
-		t.Error("esc issued a no-op command instead of quitting")
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("esc issued %T, want tea.QuitMsg", cmd())
 	}
 }
 
@@ -2024,17 +2024,50 @@ func TestTeardownExitTimeoutAborts(t *testing.T) {
 	}
 }
 
-// Evidence that the command reached claude clears the submit deadline.
+// Evidence that the command reached claude clears the submit deadline — but
+// only when the busy state actually postdates the keystrokes. A busy state
+// that predates the press (teardownArmedBusy) proves nothing, so it must not
+// certify a submission, and the submit deadline must still be reachable.
 func TestTeardownSubmitObservedViaBusyState(t *testing.T) {
-	now := time.Now()
-	m := teardownTestModel()
-	m.teardown = teardownSent
-	m.teardownAt = now.Add(-time.Second)
-	m.state = State{Kind: StateTool}
-	next, _ := m.Update(tickMsg(now))
-	if got := next.(model); !got.teardownSubmitted {
-		t.Error("submitted = false despite claude going busy")
-	}
+	t.Run("armed while already busy proves nothing", func(t *testing.T) {
+		now := time.Now()
+		m := teardownTestModel()
+		m.state = State{Kind: StateTool} // busy BEFORE the key is pressed
+		armed, _ := m.teardownKey()
+		if !armed.teardownArmedBusy {
+			t.Fatal("teardownArmedBusy = false, want true when armed mid-turn")
+		}
+		armed.teardownAt = now.Add(-time.Second)
+		next, _ := armed.Update(tickMsg(now))
+		got := next.(model)
+		if got.teardownSubmitted {
+			t.Error("submitted = true from a busy state that predates the keystrokes")
+		}
+
+		// The stale busy reading must not silently satisfy the submit
+		// deadline forever: past the timeout it still aborts.
+		got.teardownAt = now.Add(-teardownSubmitTimeout - time.Second)
+		next2, _ := got.Update(tickMsg(now))
+		got2 := next2.(model)
+		if got2.teardown != teardownIdle {
+			t.Errorf("phase = %v, want teardownIdle; submit timeout must still fire", got2.teardown)
+		}
+	})
+
+	t.Run("busy edge after an idle arm is real evidence", func(t *testing.T) {
+		now := time.Now()
+		m := teardownTestModel() // state: StateIdle
+		armed, _ := m.teardownKey()
+		if armed.teardownArmedBusy {
+			t.Fatal("teardownArmedBusy = true, want false when armed while idle")
+		}
+		armed.teardownAt = now.Add(-time.Second)
+		armed.state = State{Kind: StateTool} // claude goes busy afterward
+		next, _ := armed.Update(tickMsg(now))
+		if got := next.(model); !got.teardownSubmitted {
+			t.Error("submitted = false despite claude going busy after an idle arm")
+		}
+	})
 }
 
 // A new prompt in the transcript is the other piece of evidence.
@@ -2062,5 +2095,106 @@ func TestTeardownSentMsgWithNoteAborts(t *testing.T) {
 	}
 	if got.teardownNote != "no claude pane" {
 		t.Errorf("note = %q, want %q", got.teardownNote, "no claude pane")
+	}
+}
+
+// A send failure during the exit wait (teardownExiting) must report why
+// claude didn't exit, not the wrap-up phase's wording — teardownSendCmd
+// returns the same note string regardless of which command it was sending.
+func TestTeardownSentMsgDuringExitingReportsExitReason(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownExiting
+	next, _ := m.Update(teardownSentMsg{note: "wrap-up didn't submit"})
+	got := next.(model)
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if got.teardownNote != "claude didn't exit" {
+		t.Errorf("note = %q, want %q", got.teardownNote, "claude didn't exit")
+	}
+}
+
+// The one irreversible action in this feature must never fire off a stale
+// signal: a claudeGoneMsg that arrives after the user cancelled back to idle
+// must not kill the session.
+func TestClaudeGoneAfterCancelIssuesNoCommand(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownExiting
+	cancelled, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := cancelled.(model)
+	if got.teardown != teardownIdle {
+		t.Fatalf("phase = %v, want teardownIdle after cancel", got.teardown)
+	}
+	if cmd != nil {
+		t.Fatal("cancel itself issued a command")
+	}
+	next, killCmd := got.Update(claudeGoneMsg{gone: true})
+	if killCmd != nil {
+		t.Error("claudeGoneMsg after cancel issued a command (kill-session?)")
+	}
+	if final := next.(model); final.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle to remain undisturbed", final.teardown)
+	}
+}
+
+// Both abort paths must release the probing flag, or a subsequent arm would
+// see teardownProbing already held and skip issuing its own probe/gone
+// command forever.
+func TestAbortClearsProbingFlag(t *testing.T) {
+	t.Run("submit timeout", func(t *testing.T) {
+		now := time.Now()
+		m := teardownTestModel()
+		m.teardown = teardownSent
+		m.teardownProbing = true
+		m.teardownAt = now.Add(-teardownSubmitTimeout - time.Second)
+		next, _ := m.Update(tickMsg(now))
+		if got := next.(model); got.teardownProbing {
+			t.Error("probing flag still held after submit-timeout abort")
+		}
+	})
+
+	t.Run("exit timeout", func(t *testing.T) {
+		now := time.Now()
+		m := teardownTestModel()
+		m.teardown = teardownExiting
+		m.teardownProbing = true
+		m.teardownAt = now.Add(-teardownExitTimeout - time.Second)
+		next, _ := m.Update(tickMsg(now))
+		if got := next.(model); got.teardownProbing {
+			t.Error("probing flag still held after exit-timeout abort")
+		}
+	})
+}
+
+// The sent→ready transition re-stamps teardownAt, so a gate opened long
+// after the wrap-up was sent still gets a full exit budget rather than one
+// that is instantly (or already) blown.
+func TestTeardownReadyGetsFreshDeadline(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	// The wrap-up was sent long ago — if teardownAt weren't re-stamped, the
+	// exit-timeout check on the very next tick would fire immediately.
+	m.teardownAt = now.Add(-time.Hour)
+	next, _ := m.Update(teardownProbeMsg{worktreeGone: true})
+	got := next.(model)
+	if got.teardown != teardownReady {
+		t.Fatalf("phase = %v, want teardownReady", got.teardown)
+	}
+	if got.teardownAt.Before(now.Add(-time.Second)) {
+		t.Errorf("teardownAt = %v, want re-stamped near %v", got.teardownAt, now)
+	}
+}
+
+// A tick that aborts a teardown must still return the batched tick command —
+// otherwise the poll loop stops scheduling itself and the pane freezes.
+func TestAbortingTickStillReturnsTickCommand(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownAt = now.Add(-teardownSubmitTimeout - time.Second)
+	_, cmd := m.Update(tickMsg(now))
+	if cmd == nil {
+		t.Fatal("no command returned from an aborting tick; the poll loop would stall")
 	}
 }

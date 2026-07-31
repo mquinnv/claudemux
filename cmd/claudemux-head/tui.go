@@ -182,6 +182,11 @@ type model struct {
 	// actually reached claude (the other is the session going busy).
 	teardownPrompt    string
 	teardownSubmitted bool
+	// teardownArmedBusy records that claude was already mid-turn when the
+	// teardown was armed. Without it, "claude is busy" would certify a
+	// submission that never happened — the busy state predates the keystrokes.
+	// Cleared as soon as the turn ends, so a LATER busy edge still counts.
+	teardownArmedBusy bool
 	// teardownBlocked records that the turn ended with the worktree still
 	// standing — a wrap-up that bailed. It drives the status chip; the gate
 	// simply stays shut.
@@ -197,9 +202,10 @@ type model struct {
 	// process: once it is gone os.Getwd() fails, so it cannot be re-derived
 	// at the moment it is needed. mainCheckout is captured for the same
 	// reason — there is no valid cwd left to run git from.
-	workDir       string
-	mainCheckout  string
-	inWorktree    bool
+	workDir      string
+	mainCheckout string
+	inWorktree   bool
+
 	summarizing   bool
 	lastSummaryAt time.Time
 	// summaryGen identifies the session a summarize call was issued for. It is
@@ -578,13 +584,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			// esc cancels an armed teardown rather than quitting: a key that
 			// arms a kill-session needs a way out, and adding a second cancel
-			// key to a four-key TUI would be worse.
+			// key to a four-key TUI would be worse. An empty note is a no-op
+			// for teardownChip's TTL branch, so this doesn't leave a stray
+			// abort reason on the status line.
 			if m.teardown != teardownIdle {
-				m.teardown = teardownIdle
-				m.teardownBlocked = false
-				m.teardownProbing = false
-				m.teardownNote = ""
-				return m, nil
+				return m.abortTeardown("", time.Now()), nil
 			}
 			return m, tea.Quit
 		case "x":
@@ -628,9 +632,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.teardown {
 		case teardownSent:
 			// Evidence the keystrokes landed: claude went busy, or a new
-			// prompt appeared in the transcript.
+			// prompt appeared in the transcript. A busy state that predates
+			// the keystrokes (teardownArmedBusy) proves nothing, so it is
+			// excluded until the turn it was armed during actually ends —
+			// after that, a LATER busy edge is real evidence again.
+			if m.teardownArmedBusy && teardownTurnEnded(m.state.Kind) {
+				m.teardownArmedBusy = false
+			}
 			if !m.teardownSubmitted &&
-				(!teardownTurnEnded(m.state.Kind) || m.lastPrompt != m.teardownPrompt) {
+				(m.lastPrompt != m.teardownPrompt ||
+					(!teardownTurnEnded(m.state.Kind) && !m.teardownArmedBusy)) {
 				m.teardownSubmitted = true
 			}
 			if !m.teardownSubmitted && now.Sub(m.teardownAt) >= teardownSubmitTimeout {
@@ -756,7 +767,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // cancelled while the send was in flight
 		}
 		if msg.note != "" {
-			return m.abortTeardown(msg.note, time.Now()), nil
+			note := msg.note
+			if m.teardown == teardownExiting {
+				// This send was the "/exit", not the wrap-up command — its
+				// failure note ("wrap-up didn't submit") would be a lie here.
+				// Reuse the exit-timeout wording instead of inventing a
+				// fourth abort reason.
+				note = "claude didn't exit"
+			}
+			return m.abortTeardown(note, time.Now()), nil
 		}
 
 	case teardownProbeMsg:
@@ -1280,6 +1299,7 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		m.teardown = teardownSent
 		m.teardownAt = time.Now()
 		m.teardownPrompt = m.lastPrompt
+		m.teardownArmedBusy = !teardownTurnEnded(m.state.Kind)
 		m.teardownBlocked = false
 		m.teardownNote = ""
 		if m.teardownCmdText == "" {
@@ -1307,6 +1327,7 @@ func (m model) abortTeardown(note string, now time.Time) model {
 	m.teardownBlocked = false
 	m.teardownProbing = false
 	m.teardownSubmitted = false
+	m.teardownArmedBusy = false
 	m.teardownNote = note
 	m.teardownNoteAt = now
 	return m

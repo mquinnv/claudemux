@@ -54,12 +54,18 @@ func mainCheckoutFromCommonDir(out string) string {
 //
 // Called once at startup, while dir still exists: by the time a teardown needs
 // it, the wrap-up command may have deleted the working directory out from under
-// the process, leaving nowhere to run git from.
+// the process, leaving nowhere to run git from. That startup call is also why
+// this needs a deadline like every other subprocess in this feature, not
+// fewer: a hung git here (a network filesystem, a stalled credential helper)
+// would block newModel and the head would never render at all. "" is already
+// the safe answer on any failure, so bounding the wait only fixes the hang.
 func mainCheckoutFor(dir string) string {
 	if dir == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", dir, "rev-parse",
+	ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse",
 		"--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return ""
