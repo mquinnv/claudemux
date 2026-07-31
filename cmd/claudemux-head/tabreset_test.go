@@ -147,3 +147,148 @@ func TestSiblingOfExecutable(t *testing.T) {
 		t.Errorf("basename = %q, want the requested name", filepath.Base(got))
 	}
 }
+
+// A declared name is used as-is when the session is the project's only one.
+func TestRestoreNameUsesDeclaredName(t *testing.T) {
+	if got := restoreName("Remix", "remix", "/Users/x/Projects/remix"); got != "Remix" {
+		t.Errorf("name = %q, want %q", got, "Remix")
+	}
+}
+
+// `claudemux -n` clones a session as remix-2, remix-3, ... while the work
+// directory — and therefore .project.yml — stays the same. Verified live on
+// 2026-07-31: four sessions, one .project.yml declaring `name: Remix`, one
+// color. Restoring all four to "Remix" would leave four indistinguishable tabs,
+// which is the confusion this feature exists to end.
+func TestRestoreNameCarriesCloneSuffix(t *testing.T) {
+	for _, tc := range []struct{ session, want string }{
+		{"remix-2", "Remix 2"},
+		{"remix-3", "Remix 3"},
+		{"remix-10", "Remix 10"},
+	} {
+		if got := restoreName("Remix", tc.session, "/Users/x/Projects/remix"); got != tc.want {
+			t.Errorf("restoreName(%q) = %q, want %q", tc.session, got, tc.want)
+		}
+	}
+}
+
+// No declared name: the session name is already unique and needs no help.
+func TestRestoreNameFallsBackToSession(t *testing.T) {
+	if got := restoreName("", "claudemux", "/Users/x/Projects/claudemux"); got != "claudemux" {
+		t.Errorf("name = %q, want %q", got, "claudemux")
+	}
+	if got := restoreName("", "remix-2", "/Users/x/Projects/remix"); got != "remix-2" {
+		t.Errorf("name = %q, want %q", got, "remix-2")
+	}
+}
+
+// A session renamed to something unrelated to the directory cannot have a
+// suffix derived from it; the session name stands rather than guessing.
+func TestRestoreNameUnrelatedSessionName(t *testing.T) {
+	if got := restoreName("Remix", "scratch", "/Users/x/Projects/remix"); got != "scratch" {
+		t.Errorf("name = %q, want %q", got, "scratch")
+	}
+}
+
+func TestProjectDeclaredName(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".project.yml")
+	// Trailing whitespace is real: the live remix/.project.yml has "name: Remix ".
+	if err := os.WriteFile(p, []byte("color: red\nname: Remix \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectDeclaredName(p); got != "Remix" {
+		t.Errorf("name = %q, want %q", got, "Remix")
+	}
+}
+
+// A .project.yml is gitignored, so worktrees and fresh clones simply lack one.
+// That is not an error; it means "no declared name".
+func TestProjectDeclaredNameMissingFileOrKey(t *testing.T) {
+	if got := projectDeclaredName(filepath.Join(t.TempDir(), ".project.yml")); got != "" {
+		t.Errorf("name = %q, want empty for a missing file", got)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".project.yml")
+	if err := os.WriteFile(p, []byte("color: red\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectDeclaredName(p); got != "" {
+		t.Errorf("name = %q, want empty when no name: key", got)
+	}
+}
+
+func TestParseProjectStyle(t *testing.T) {
+	hex, fg, ok := parseProjectStyle("b34dff #ffffff\n")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if hex != "b34dff" || fg != "#ffffff" {
+		t.Errorf("hex/fg = %q/%q, want b34dff/#ffffff", hex, fg)
+	}
+}
+
+func TestParseProjectStyleRejectsGarbage(t *testing.T) {
+	for _, in := range []string{"", "\n", "b34dff", "not a color", "zzzzzz #ffffff"} {
+		if _, _, ok := parseProjectStyle(in); ok {
+			t.Errorf("parseProjectStyle(%q) ok = true, want false", in)
+		}
+	}
+}
+
+func TestTabResetTmuxArgs(t *testing.T) {
+	got := tabResetTmuxArgs("%3", "claudemux", "claudemux", "b34dff", "#ffffff")
+	want := [][]string{
+		{"rename-window", "-t", "%3", "claudemux"},
+		{"set", "-t", "claudemux", "status-style", "bg=#b34dff,fg=#ffffff"},
+		{"set", "-w", "-t", "claudemux", "pane-active-border-style", "fg=#b34dff"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d commands, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if strings.Join(got[i], "\x00") != strings.Join(want[i], "\x00") {
+			t.Errorf("cmd[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// A project with no color still gets its title back.
+func TestTabResetTmuxArgsNoColor(t *testing.T) {
+	got := tabResetTmuxArgs("%3", "sonar", "sonar", "", "")
+	if len(got) != 1 {
+		t.Fatalf("got %d commands, want 1 (rename only): %v", len(got), got)
+	}
+	if got[0][0] != "rename-window" {
+		t.Errorf("cmd[0] = %v, want a rename-window", got[0])
+	}
+}
+
+// Outside tmux there is no pane to rename and no session to style.
+func TestTabResetTmuxArgsNoPaneOrSession(t *testing.T) {
+	if got := tabResetTmuxArgs("", "claudemux", "claudemux", "b34dff", "#ffffff"); len(got) != 2 {
+		t.Errorf("got %d commands with no pane, want 2 style-only: %v", len(got), got)
+	}
+	if got := tabResetTmuxArgs("%3", "", "claudemux", "b34dff", "#ffffff"); len(got) != 1 {
+		t.Errorf("got %d commands with no session, want 1 rename-only: %v", len(got), got)
+	}
+}
+
+// The exact byte sequence bin/claudemux:apply_tab_color writes, for purple.
+func TestItermTabColorBytes(t *testing.T) {
+	got := string(itermTabColorBytes("b34dff"))
+	want := "\033]6;1;bg;red;brightness;179\a" +
+		"\033]6;1;bg;green;brightness;77\a" +
+		"\033]6;1;bg;blue;brightness;255\a"
+	if got != want {
+		t.Errorf("bytes = %q, want %q", got, want)
+	}
+}
+
+func TestItermTabColorBytesRejectsGarbage(t *testing.T) {
+	for _, in := range []string{"", "fff", "zzzzzz", "b34dffff"} {
+		if got := itermTabColorBytes(in); got != nil {
+			t.Errorf("itermTabColorBytes(%q) = %q, want nil", in, got)
+		}
+	}
+}
