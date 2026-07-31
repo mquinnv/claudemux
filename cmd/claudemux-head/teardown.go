@@ -116,6 +116,17 @@ const (
 // persistent state.
 const teardownNoteTTL = 5 * time.Second
 
+// teardownSubmitTimeout bounds the wait for evidence that the wrap-up command
+// actually reached claude. Injecting keystrokes into someone else's TUI is
+// best-effort, so it is checked rather than assumed: a command left typed but
+// unsubmitted aborts loudly instead of hanging in "wrapping up…" forever.
+const teardownSubmitTimeout = 10 * time.Second
+
+// teardownExitTimeout bounds the wait for claude to exit. On expiry the
+// session is left ALIVE — letting claude finish on its own terms is the entire
+// reason the kill comes last.
+const teardownExitTimeout = 15 * time.Second
+
 // teardownTurnEnded reports whether claude has stopped working.
 //
 // StateAwaiting counts as ended on purpose: the wrap-up command asking for its

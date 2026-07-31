@@ -1828,3 +1828,239 @@ func TestPinnedIndicatorRenders(t *testing.T) {
 		}
 	}
 }
+
+// A model with just enough set up to exercise teardown transitions.
+func teardownTestModel() model {
+	return model{
+		ready:           true,
+		width:           120,
+		height:          4,
+		selfPane:        "%1",
+		paneDir:         "/tmp/panemap",
+		workDir:         "/tmp/wt",
+		inWorktree:      true,
+		teardownCmdText: "/done",
+		state:           State{Kind: StateIdle},
+	}
+}
+
+func TestTeardownKeyArmsFromIdle(t *testing.T) {
+	m := teardownTestModel()
+	got, cmd := m.teardownKey()
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent", got.teardown)
+	}
+	if cmd == nil {
+		t.Error("no command issued to send the wrap-up")
+	}
+}
+
+// Outside tmux there is nothing to type into and nothing to kill.
+func TestTeardownKeyInertOutsideTmux(t *testing.T) {
+	m := teardownTestModel()
+	m.selfPane = ""
+	got, cmd := m.teardownKey()
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("command issued outside tmux")
+	}
+}
+
+// An empty teardown.command still arms, but types nothing.
+func TestTeardownKeyEmptyCommandSkipsSend(t *testing.T) {
+	m := teardownTestModel()
+	m.teardownCmdText = ""
+	got, cmd := m.teardownKey()
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("command issued despite empty teardown.command")
+	}
+	if !got.teardownSubmitted {
+		t.Error("submitted = false; nothing was sent, so nothing can be awaited")
+	}
+}
+
+// A press while the gate is still shut must not advance anything.
+func TestTeardownKeyIgnoredWhileSent(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	got, cmd := m.teardownKey()
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("command issued from teardownSent")
+	}
+}
+
+func TestTeardownKeyFromReadyExits(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownReady
+	got, cmd := m.teardownKey()
+	if got.teardown != teardownExiting {
+		t.Errorf("phase = %v, want teardownExiting", got.teardown)
+	}
+	if cmd == nil {
+		t.Error("no command issued to exit claude")
+	}
+}
+
+// esc cancels an armed teardown instead of quitting the head.
+func TestEscCancelsTeardown(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownReady
+	m.teardownBlocked = true
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := next.(model)
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if got.teardownBlocked {
+		t.Error("blocked flag survived cancel")
+	}
+	if cmd != nil {
+		t.Error("esc during teardown issued a command (quit?)")
+	}
+}
+
+// With no teardown armed, esc still quits — the pre-existing binding.
+func TestEscQuitsWhenIdle(t *testing.T) {
+	m := teardownTestModel()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("esc did not quit from teardownIdle")
+	}
+	if msg := cmd(); msg == nil {
+		t.Error("esc issued a no-op command instead of quitting")
+	}
+}
+
+// The probe opening the gate promotes sent → ready.
+func TestTeardownProbeOpensGate(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownProbing = true
+	next, _ := m.Update(teardownProbeMsg{worktreeGone: true})
+	got := next.(model)
+	if got.teardown != teardownReady {
+		t.Errorf("phase = %v, want teardownReady", got.teardown)
+	}
+	if got.teardownProbing {
+		t.Error("probing flag still held")
+	}
+}
+
+// A wrap-up that bailed leaves the worktree standing: the gate stays shut and
+// the pane says why.
+func TestTeardownProbeBlocksWhenWorktreeSurvives(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	next, _ := m.Update(teardownProbeMsg{worktreeGone: false})
+	got := next.(model)
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent", got.teardown)
+	}
+	if !got.teardownBlocked {
+		t.Error("blocked = false, want true")
+	}
+}
+
+// Claude exiting during the wait triggers the kill.
+func TestClaudeGoneTriggersKill(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownExiting
+	_, cmd := m.Update(claudeGoneMsg{gone: true})
+	if cmd == nil {
+		t.Error("no kill command issued once claude exited")
+	}
+}
+
+// Claude still alive keeps waiting.
+func TestClaudeStillAliveKeepsWaiting(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownExiting
+	next, cmd := m.Update(claudeGoneMsg{gone: false})
+	if got := next.(model); got.teardown != teardownExiting {
+		t.Errorf("phase = %v, want teardownExiting", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("kill command issued while claude was still running")
+	}
+}
+
+// A wrap-up that never reaches the transcript aborts rather than hanging.
+func TestTeardownSubmitTimeoutAborts(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownAt = now.Add(-teardownSubmitTimeout - time.Second)
+	next, _ := m.Update(tickMsg(now))
+	got := next.(model)
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if got.teardownNote != "wrap-up didn't submit" {
+		t.Errorf("note = %q, want %q", got.teardownNote, "wrap-up didn't submit")
+	}
+}
+
+// A claude that will not exit aborts, leaving the session alive.
+func TestTeardownExitTimeoutAborts(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownExiting
+	m.teardownAt = now.Add(-teardownExitTimeout - time.Second)
+	next, _ := m.Update(tickMsg(now))
+	got := next.(model)
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if got.teardownNote != "claude didn't exit" {
+		t.Errorf("note = %q, want %q", got.teardownNote, "claude didn't exit")
+	}
+}
+
+// Evidence that the command reached claude clears the submit deadline.
+func TestTeardownSubmitObservedViaBusyState(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownAt = now.Add(-time.Second)
+	m.state = State{Kind: StateTool}
+	next, _ := m.Update(tickMsg(now))
+	if got := next.(model); !got.teardownSubmitted {
+		t.Error("submitted = false despite claude going busy")
+	}
+}
+
+// A new prompt in the transcript is the other piece of evidence.
+func TestTeardownSubmitObservedViaNewPrompt(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownAt = now.Add(-time.Second)
+	m.teardownPrompt = "earlier thing"
+	m.lastPrompt = "/done"
+	next, _ := m.Update(tickMsg(now))
+	if got := next.(model); !got.teardownSubmitted {
+		t.Error("submitted = false despite a new prompt landing")
+	}
+}
+
+// A failed send aborts immediately with the reason the command reported.
+func TestTeardownSentMsgWithNoteAborts(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	next, _ := m.Update(teardownSentMsg{note: "no claude pane"})
+	got := next.(model)
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if got.teardownNote != "no claude pane" {
+		t.Errorf("note = %q, want %q", got.teardownNote, "no claude pane")
+	}
+}

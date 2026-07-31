@@ -166,7 +166,40 @@ type model struct {
 	// it is toggled off. Deliberately not persisted: a head restart already
 	// re-renders the session's identity from scratch, and a pin that outlived
 	// the process would be a setting rather than a gesture.
-	tabPinned     bool
+	tabPinned bool
+	// Teardown state: `x` wraps the session up and kills its tmux session.
+	// See teardown.go. Like tabPinned, this is deliberately not persisted —
+	// an armed kill that survived a head restart would be a trap.
+	teardown teardownPhase
+	// teardownCmdText is teardown.command from config, typed into the claude
+	// pane on the first press. Empty means skip that step entirely.
+	teardownCmdText string
+	// teardownAt stamps the current phase, so the submit and exit deadlines
+	// measure from the transition rather than from process start.
+	teardownAt time.Time
+	// teardownPrompt is lastPrompt as it stood when the wrap-up was sent. A
+	// change in lastPrompt is one of the two signals that the keystrokes
+	// actually reached claude (the other is the session going busy).
+	teardownPrompt    string
+	teardownSubmitted bool
+	// teardownBlocked records that the turn ended with the worktree still
+	// standing — a wrap-up that bailed. It drives the status chip; the gate
+	// simply stays shut.
+	teardownBlocked bool
+	teardownProbing bool
+	// teardownNote is the reason the last teardown aborted, shown for
+	// teardownNoteTTL and then dropped.
+	teardownNote   string
+	teardownNoteAt time.Time
+
+	// workDir is the launch directory with symlinks resolved, captured at
+	// startup because the wrap-up command deletes it out from under this
+	// process: once it is gone os.Getwd() fails, so it cannot be re-derived
+	// at the moment it is needed. mainCheckout is captured for the same
+	// reason — there is no valid cwd left to run git from.
+	workDir       string
+	mainCheckout  string
+	inWorktree    bool
 	summarizing   bool
 	lastSummaryAt time.Time
 	// summaryGen identifies the session a summarize call was issued for. It is
@@ -206,6 +239,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		summaryCfg:         cfg.Summary,
 		minSummaryInterval: cfg.Summary.MinInterval.Duration,
 		tabTitle:           cfg.Summary.TabTitle,
+		teardownCmdText:    cfg.Teardown.Command,
 		// Init unconditionally fires the seed summarize call when summarizer
 		// != nil (see Init below); this flag must already be held at that
 		// point, for the same reason polling starts true above — Init has a
@@ -218,6 +252,15 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		// Startup itself was an acquisition attempt; stamp it so the lazy
 		// loop's first re-attempt waits a full floor rather than one tick.
 		m.lastKeyAttemptAt = time.Now()
+	}
+	// Captured while the directory still exists — see the workDir field.
+	if wd, err := os.Getwd(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(wd); err == nil {
+			wd = resolved
+		}
+		m.workDir = wd
+		m.inWorktree = worktreeNameForCwd(wd) != ""
+		m.mainCheckout = mainCheckoutFor(wd)
 	}
 	m.recomputeFromEvents(time.Now())
 	return m
@@ -530,8 +573,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			// esc cancels an armed teardown rather than quitting: a key that
+			// arms a kill-session needs a way out, and adding a second cancel
+			// key to a four-key TUI would be worse.
+			if m.teardown != teardownIdle {
+				m.teardown = teardownIdle
+				m.teardownBlocked = false
+				m.teardownProbing = false
+				m.teardownNote = ""
+				return m, nil
+			}
+			return m, tea.Quit
+		case "x":
+			return m.teardownKey()
 		case "r":
 			m.tabPinned = !m.tabPinned
 			if m.tabPinned {
@@ -565,6 +622,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.polling {
 			m.polling = true
 			cmds = append(cmds, m.pollData())
+		}
+
+		now := time.Time(msg)
+		switch m.teardown {
+		case teardownSent:
+			// Evidence the keystrokes landed: claude went busy, or a new
+			// prompt appeared in the transcript.
+			if !m.teardownSubmitted &&
+				(!teardownTurnEnded(m.state.Kind) || m.lastPrompt != m.teardownPrompt) {
+				m.teardownSubmitted = true
+			}
+			if !m.teardownSubmitted && now.Sub(m.teardownAt) >= teardownSubmitTimeout {
+				return m.abortTeardown("wrap-up didn't submit", now), tea.Batch(cmds...)
+			}
+			if !m.teardownProbing {
+				m.teardownProbing = true
+				cmds = append(cmds, teardownProbeCmd(m.workDir, m.mainCheckout))
+			}
+		case teardownExiting:
+			if now.Sub(m.teardownAt) >= teardownExitTimeout {
+				return m.abortTeardown("claude didn't exit", now), tea.Batch(cmds...)
+			}
+			if !m.teardownProbing {
+				m.teardownProbing = true
+				cmds = append(cmds, claudeGoneCmd(m.selfPane))
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -667,6 +750,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.summary == (Summary{}) {
 			m.summaryRetry = true
 		}
+
+	case teardownSentMsg:
+		if m.teardown != teardownSent && m.teardown != teardownExiting {
+			return m, nil // cancelled while the send was in flight
+		}
+		if msg.note != "" {
+			return m.abortTeardown(msg.note, time.Now()), nil
+		}
+
+	case teardownProbeMsg:
+		m.teardownProbing = false
+		if m.teardown != teardownSent {
+			return m, nil
+		}
+		if teardownGateOpen(m.state.Kind, m.inWorktree, msg.worktreeGone) {
+			m.teardown = teardownReady
+			m.teardownAt = time.Now()
+			m.teardownBlocked = false
+			return m, nil
+		}
+		// The turn is over and the worktree is still there: the wrap-up
+		// bailed. Say so and keep polling — the user may still be answering.
+		m.teardownBlocked = m.inWorktree && teardownTurnEnded(m.state.Kind)
+
+	case claudeGoneMsg:
+		m.teardownProbing = false
+		if m.teardown != teardownExiting || !msg.gone {
+			return m, nil
+		}
+		return m, killSessionCmd(m.selfPane)
 	}
 
 	return m, nil
@@ -1151,4 +1264,50 @@ func formatDuration(d time.Duration) string {
 	h := int(d.Hours())
 	mins := int(d.Minutes()) - h*60
 	return fmt.Sprintf("%dh%dm", h, mins)
+}
+
+// teardownKey advances the teardown state machine one press of `x`.
+//
+// Only two phases accept a press: idle arms the wrap-up, ready commits to the
+// kill. The two waiting phases ignore it — a key that does nothing beats a key
+// that does something surprising while the pane is mid-sequence.
+func (m model) teardownKey() (model, tea.Cmd) {
+	switch m.teardown {
+	case teardownIdle:
+		if m.selfPane == "" {
+			return m, nil // not in tmux: nothing to type into, nothing to kill
+		}
+		m.teardown = teardownSent
+		m.teardownAt = time.Now()
+		m.teardownPrompt = m.lastPrompt
+		m.teardownBlocked = false
+		m.teardownNote = ""
+		if m.teardownCmdText == "" {
+			// Nothing was typed, so there is no submission to wait for; the
+			// gate is all that stands between here and ready.
+			m.teardownSubmitted = true
+			return m, nil
+		}
+		m.teardownSubmitted = false
+		return m, teardownSendCmd(m.selfPane, m.paneDir, m.teardownCmdText)
+
+	case teardownReady:
+		m.teardown = teardownExiting
+		m.teardownAt = time.Now()
+		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
+	}
+	return m, nil
+}
+
+// abortTeardown returns to idle with a reason on the status line. Nothing that
+// already happened is undone — the wrap-up command has run, and only this
+// program's own sequencing stops.
+func (m model) abortTeardown(note string, now time.Time) model {
+	m.teardown = teardownIdle
+	m.teardownBlocked = false
+	m.teardownProbing = false
+	m.teardownSubmitted = false
+	m.teardownNote = note
+	m.teardownNoteAt = now
+	return m
 }
