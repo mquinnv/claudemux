@@ -159,6 +159,12 @@ const teardownBlockedProbeInterval = 5 * time.Second
 // (the worktree being gone) cannot hold until that question is answered
 // anyway. StateCompacting does NOT count — the session is mid-turn and about
 // to keep going.
+//
+// Note that classifyState no longer emits StateAwaiting at all: the 15s
+// unresolved-tool_use heuristic that produced it was removed as too
+// false-positive-prone (see state.go, "Just report Tool"). The mapping is kept
+// because it is the right answer if the classification ever returns, but today
+// that branch is unreachable in production — only the table test drives it.
 func teardownTurnEnded(kind StateKind) bool {
 	switch kind {
 	case StateThinking, StateTool, StateCompacting:

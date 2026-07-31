@@ -1778,9 +1778,10 @@ func TestKeyRDoesNotQuit(t *testing.T) {
 	}
 }
 
-// Per the design spec (docs/superpowers/specs/2026-07-31-head-tab-reset-design.md
-// line 172), the pin indicator belongs in the group that is never shrunk, so
-// the worktree chip must truncate away before the pin state disappears.
+// The pin indicator belongs in the group that is never shrunk — it reports a
+// mode the user switched on and can only turn off from this pane, so it must
+// not silently disappear, while the worktree chip is descriptive and
+// re-derivable. So the worktree chip must truncate away before the pin does.
 // clipLine only ever truncates from the right (ansi.Truncate), so this
 // requires the pin to sit to the LEFT of the chip in the assembled line —
 // checking that ordering here is equivalent to checking that the chip is

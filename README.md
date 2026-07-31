@@ -238,12 +238,17 @@ wrap-up in order:
 1. The first press types `teardown.command` (`/done` by default) into the `claude`
    pane and submits it. Answer whatever it asks exactly as you would have by hand.
    The status pane shows `⏻ wrapping up…`.
-2. Once the turn ends **and** the session's worktree is gone, the pane shows
-   `⏻ press x to tear down`. If the wrap-up bailed — uncommitted work, unpushed
-   commits, you declined — the worktree is still there, so the gate never opens and
-   the pane says `⏻ worktree still present` instead.
-3. The second press sends `/exit`, waits for `claude` to actually be gone, and then
-   kills the tmux session.
+2. Once the wrap-up has actually reached `claude`, the turn has ended, **and** the
+   session's worktree is gone, the pane shows `⏻ press x to tear down`. If the wrap-up
+   bailed — uncommitted work, unpushed commits, you declined — the worktree is still
+   there, so the gate never opens and the pane says `⏻ worktree still present` instead.
+3. The second press sends `/exit`, shows `⏻ exiting claude…` while it waits for
+   `claude` to actually be gone, and then kills the tmux session.
+
+The worktree the gate watches is the one **the session is working in** — the directory
+from its transcript, which is where `claudemux -w` (or `launch.auto_worktree`, or
+`worktree: true`) put it. That is not where the status pane itself was started, so the
+check holds for auto-worktree sessions, which are the common case.
 
 `esc` cancels a teardown in progress. **It does not undo anything** — by then the
 wrap-up command has already run; cancelling only stops the status pane from driving
@@ -252,10 +257,14 @@ the rest.
 Nothing here is silent. Every abort names its reason on the status line —
 `⏻ wrap-up didn't submit` (the command never reached `claude`),
 `⏻ claude didn't exit` (it was still running after 15 seconds, so the session was
-left alive), `⏻ no claude pane`.
+left alive), `⏻ no claude pane`, `⏻ session rotated` (the pane re-bound to a different
+session mid-teardown, so what was armed no longer applies).
 
 Sessions that aren't in a worktree have no deletion to verify, so the gate opens as
 soon as the wrap-up turn ends.
+
+Outside tmux `x` does nothing at all: there is no pane to type into and no session to
+kill.
 
 ## tmux notes
 

@@ -1006,9 +1006,11 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	}
 	// The pin sits ahead of the chip, not after it: clipLine (below) only ever
 	// truncates from the right, so whichever of the two is closer to the tail
-	// disappears first as the pane narrows. The pin is the protected one — the
-	// chip should be lost before the pin state does. See
-	// docs/superpowers/specs/2026-07-31-head-tab-reset-design.md line 172.
+	// disappears first as the pane narrows. The pin is the protected one,
+	// because it reports a mode the user switched ON and can only turn off from
+	// this pane — losing it would leave the tab frozen with nothing on screen
+	// saying why. The worktree chip is merely descriptive and is re-derivable
+	// from the session itself, so it is the one that should vanish first.
 	//
 	// The teardown chip takes the pin's slot and wins when both apply: it is
 	// transient and actionable, the pin is ambient. Both sit ahead of the

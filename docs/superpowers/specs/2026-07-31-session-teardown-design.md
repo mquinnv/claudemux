@@ -76,10 +76,15 @@ chose, so the teardown targets exactly the pane whose transcript the head is fol
 The command is sent as two tmux calls, not one:
 
 ```
-tmux send-keys -t <claudePane> -l "<command>"
+tmux send-keys -t <claudePane> -l -- "<command>"
 … short delay …
 tmux send-keys -t <claudePane> Enter
 ```
+
+`--` ends tmux's option parsing: `teardown.command` is user config, and a value beginning
+with `-` would otherwise be read as a flag to `send-keys` instead of typed. Each call gets
+its own 2s context, per `teardownTmuxTimeout`'s "bounds *each* subprocess" contract — a
+single shared one would also have to cover the delay between them.
 
 **Why split.** Typing `/done` in Claude Code opens the slash-command completion popup. An
 `Enter` arriving in the same input burst can be consumed by the popup (selecting the
@@ -100,29 +105,62 @@ showing why.
 
 ## The ready gate
 
-Evaluated on each poll tick while in `teardownSent`. Both conditions must hold:
+Evaluated on each poll tick while in `teardownSent`. All three conditions must hold:
 
+0. **The wrap-up was submitted** — the same `teardownSubmitted` evidence the submit
+   timeout watches for. `classifyState`'s reading is only as fresh as the last poll, so
+   without this a probe returning a second after arming could be judged against the
+   `StateIdle` captured *before* the command was typed: the gate would open and invite the
+   irreversible second press while the wrap-up had barely started. It cannot deadlock — an
+   empty `teardown.command` is marked submitted at arm time, and a wrap-up that never
+   submits aborts after 10s.
 1. **The turn has ended** — `classifyState` is not `StateThinking` and not `StateTool`.
    `StateAwaiting` counts as ended: the wrap-up command asking its confirmation question
-   is a legitimate pause, and condition 2 will not hold yet anyway.
+   is a legitimate pause, and condition 2 will not hold yet anyway. (`classifyState` no
+   longer emits `StateAwaiting`; the mapping is kept for if it returns.)
 2. **The worktree is gone** — see below.
 
 For a session that was never in a worktree, condition 2 is vacuous and the gate opens on
-condition 1 alone.
+conditions 0 and 1 alone.
+
+The probe runs on every one-second tick until a **blocked** reading lands (turn over,
+worktree still standing), then backs off to every five seconds for as long as it stays
+blocked. A blocked teardown is a resting state a user can leave on screen indefinitely,
+and re-forking `git worktree list` every second to re-answer a question that only changes
+when the human acts is thousands of subprocesses for nothing.
 
 ### Determining that the worktree is gone
 
-The head's own working directory is the session's launch directory, and `/done` deletes
-it out from under the process. `os.Getwd()` fails once that happens, so the launch
-directory is **captured once at startup** and stored on the model; the teardown path never
-calls `os.Getwd()`.
+**The head's own working directory is not the session's.** `bin/claudemux` creates the
+head pane with `-c "$work_dir"` — the main checkout — and `claude --worktree` chdirs
+*itself* into `.claude/worktrees/<name>`. So for every session started with `-w`,
+`launch.auto_worktree`, or `.project.yml worktree: true`, the head sits in a directory
+that is not a worktree and that the wrap-up will never delete. Arming off it would leave
+`inWorktree` false and quietly reduce the gate to condition 1 alone — never checking the
+evidence that the wrap-up succeeded, which is the whole point of condition 2.
 
-Whether that directory is a linked worktree is also decided at startup, via the existing
-`worktreeNameForCwd`.
+The directory to watch is therefore the **session's** cwd: `m.sessionCwd`, the last
+non-sidechain transcript cwd, which is already the source of truth for the worktree chip
+for exactly this reason (see `panemap.go` on the pane-cwd glob going stale the moment a
+session cd's into a worktree).
+
+It is captured **when `x` first arms a teardown**, not per probe: by the time the gate is
+being evaluated the wrap-up may already have deleted the directory, and once `claude`
+exits `sessionCwd` stops being refreshed. The path is symlink-resolved at capture, because
+`git worktree list` prints resolved paths (on macOS a `/var/...` cwd is really
+`/private/var/...`). The head's own startup-captured launch directory remains the
+**fallback**, for the window before the first main-session event has been read — where it
+is also exactly right for a session that never entered a worktree. Neither path is ever
+re-derived with `os.Getwd()`: that fails as soon as the wrap-up deletes the directory,
+which is why the startup capture exists at all.
+
+The main checkout needs no session equivalent: a linked worktree belongs to the same repo
+as the checkout the head was launched in, so the startup-resolved main checkout is still
+the right place to run `git worktree list` from.
 
 Gone is then true when either holds:
 
-- the launch directory no longer exists (`os.Stat` → `IsNotExist`), or
+- the captured directory no longer exists (`os.Stat` → `IsNotExist`), or
 - it still exists but `git worktree list --porcelain`, run from the repo's main checkout,
   no longer lists it.
 
@@ -145,7 +183,10 @@ On the second `x` press:
 2. Poll until `claudePaneCandidates` returns no candidates for this session — i.e. no
    pane in it is running `claude` or `node` any more. This reuses the primitive the head
    already runs every second; no new detection mechanism.
-3. `tmux kill-session -t <session>`.
+3. `tmux kill-session -t <session-id>`, where the id is `#{session_id}` (`$N`) read back
+   from this pane — not `#{session_name}`. tmux's `-t` resolves a name by exact match,
+   then prefix, then fnmatch pattern, so a name could select a different session; an id
+   cannot be reinterpreted, which is what the one irreversible call in this feature wants.
 
 If step 2 does not succeed within `teardownExitTimeout` (15s), abort to `teardownIdle`
 with `⏻ claude didn't exit`. The session is **not** killed over the top of a running
@@ -184,7 +225,14 @@ in the same slot with the same treatment:
 | abort (transient, 5s) | `⏻ <reason>` |
 
 Abort reasons: `wrap-up didn't submit`, `worktree still present`, `claude didn't exit`,
-`no claude pane`.
+`no claude pane`, `session rotated`.
+
+`⏻ session rotated` fires when the monitored session rotates (new session, `/clear`,
+resume) while a teardown is armed. The teardown was armed against the session that just
+went away — its wrap-up went to that session's pane, and `teardownPrompt` refers to that
+session's transcript, which the rotation replaces. Left running, the next tick would read
+the new session's different `lastPrompt` as proof the wrap-up submitted, removing the only
+bound on how long `teardownSent` can sit armed. Aborting says so instead.
 
 `⏻ worktree still present` is shown while in `teardownSent` once the turn has ended but
 the worktree survives — that is the "your `/done` bailed" signal, and it stays until the
@@ -206,6 +254,7 @@ Every failure degrades to "abort, say why, change nothing further" — the same 
 | Command typed but not submitted | abort after 10s, same message |
 | Wrap-up bailed, worktree survives | gate stays shut, `⏻ worktree still present` |
 | `claude` will not exit | abort after 15s, `⏻ claude didn't exit`, session left alive |
+| Session rotates while armed | abort, `⏻ session rotated` |
 | `git` missing or not a repo | worktree treated as absent; gate rests on turn-end |
 | Wedged tmux server | every subprocess is context-bounded (2s), as elsewhere |
 
