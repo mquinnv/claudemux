@@ -192,16 +192,42 @@ type model struct {
 	// simply stays shut.
 	teardownBlocked bool
 	teardownProbing bool
+	// teardownProbeAt stamps the last ready-gate probe that was issued, so a
+	// blocked teardown can back off to teardownBlockedProbeInterval instead of
+	// forking git every second for as long as it sits on screen.
+	teardownProbeAt time.Time
+	// teardownWorkDir / teardownInWorktree are the ready gate's target,
+	// captured from the SESSION's cwd when `x` first arms a teardown — not
+	// from workDir below. The head process is started by bin/claudemux with
+	// `-c "$work_dir"` (the main checkout) while `claude --worktree` chdirs
+	// itself into .claude/worktrees/<name>, so for every worktree session the
+	// head's own cwd is the wrong directory to watch: it is never deleted, and
+	// worktreeNameForCwd on it is "". sessionCwd is the directory the wrap-up
+	// will actually remove (it is what drives the worktree chip, for the same
+	// reason). Captured at ARM time rather than per probe because by the time
+	// the gate is being evaluated the wrap-up may already have deleted the
+	// directory — and once claude exits, sessionCwd stops being refreshed.
+	teardownWorkDir    string
+	teardownInWorktree bool
 	// teardownNote is the reason the last teardown aborted, shown for
 	// teardownNoteTTL and then dropped.
 	teardownNote   string
 	teardownNoteAt time.Time
 
-	// workDir is the launch directory with symlinks resolved, captured at
-	// startup because the wrap-up command deletes it out from under this
-	// process: once it is gone os.Getwd() fails, so it cannot be re-derived
-	// at the moment it is needed. mainCheckout is captured for the same
-	// reason — there is no valid cwd left to run git from.
+	// workDir is the head process's OWN launch directory with symlinks
+	// resolved — which is NOT necessarily where the session is working (see
+	// teardownWorkDir above). It is captured at startup because the wrap-up
+	// command may delete it out from under this process: once it is gone
+	// os.Getwd() fails, so it cannot be re-derived at the moment it is needed.
+	// It serves as the fallback gate target when no sessionCwd has been
+	// observed yet, and as the directory `r` resets the tab from.
+	//
+	// mainCheckout is captured at startup for the same reason — there is no
+	// valid cwd left to run git from. It needs no session-cwd equivalent: a
+	// linked worktree belongs to the same repo as the checkout the head was
+	// launched in, so this is still the right place to run `git worktree list`.
+	//
+	// inWorktree describes workDir, and is likewise only the gate's fallback.
 	workDir      string
 	mainCheckout string
 	inWorktree   bool
@@ -315,6 +341,17 @@ func lastMainCwd(events []Event, prev string) string {
 // the guards say no); the caller MUST return that command, or the rotated pane
 // sits on the raw-prompt fallback until the next turn boundary.
 func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
+	// An armed teardown does not survive a rotation. It was armed against the
+	// session that just went away: its wrap-up went to that session's pane, and
+	// teardownPrompt refers to that session's transcript. Recomputing below
+	// gives lastPrompt the NEW session's value, which the next tick would read
+	// as "the prompt changed, so the wrap-up must have submitted" — silently
+	// certifying a submission that never happened and removing the only bound
+	// on how long teardownSent can sit there. Aborting says why instead.
+	if m.teardown != teardownIdle {
+		*m = m.abortTeardown("session rotated", now)
+	}
+
 	sessionID := strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
 	r := newEventReader(jsonlPath)
 	r.SeedFromEnd(500)
@@ -647,9 +684,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.teardownSubmitted && now.Sub(m.teardownAt) >= teardownSubmitTimeout {
 				return m.abortTeardown("wrap-up didn't submit", now), tea.Batch(cmds...)
 			}
-			if !m.teardownProbing {
+			if !m.teardownProbing && m.teardownProbeDue(now) {
 				m.teardownProbing = true
-				cmds = append(cmds, teardownProbeCmd(m.workDir, m.mainCheckout))
+				m.teardownProbeAt = now
+				cmds = append(cmds, teardownProbeCmd(m.teardownWorkDir, m.mainCheckout))
 			}
 		case teardownExiting:
 			if now.Sub(m.teardownAt) >= teardownExitTimeout {
@@ -783,7 +821,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.teardown != teardownSent {
 			return m, nil
 		}
-		if teardownGateOpen(m.state.Kind, m.inWorktree, msg.worktreeGone) {
+		// teardownSubmitted is required, not just the gate: m.state.Kind is
+		// only as fresh as the last dataMsg, so a probe returning a second
+		// after arming can be judged against a StateIdle that was captured
+		// before the wrap-up command was even typed. Without this, the gate
+		// would open — and invite the irreversible second press — while the
+		// wrap-up had barely started. It cannot deadlock: an empty
+		// teardown.command sets teardownSubmitted at arm time, and a wrap-up
+		// that never submits aborts at teardownSubmitTimeout.
+		if m.teardownSubmitted && teardownGateOpen(m.state.Kind, m.teardownInWorktree, msg.worktreeGone) {
 			m.teardown = teardownReady
 			m.teardownAt = time.Now()
 			m.teardownBlocked = false
@@ -791,7 +837,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The turn is over and the worktree is still there: the wrap-up
 		// bailed. Say so and keep polling — the user may still be answering.
-		m.teardownBlocked = m.inWorktree && teardownTurnEnded(m.state.Kind)
+		// Same freshness requirement as the gate above, for the same reason
+		// and one more: "worktree still present" would otherwise accuse a
+		// wrap-up that has not started yet, and it also throttles the probe
+		// (teardownProbeDue).
+		m.teardownBlocked = m.teardownSubmitted &&
+			m.teardownInWorktree && teardownTurnEnded(m.state.Kind)
 
 	case claudeGoneMsg:
 		m.teardownProbing = false
@@ -1315,7 +1366,9 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		m.teardownPrompt = m.lastPrompt
 		m.teardownArmedBusy = !teardownTurnEnded(m.state.Kind)
 		m.teardownBlocked = false
+		m.teardownProbeAt = time.Time{}
 		m.teardownNote = ""
+		m.captureTeardownTarget()
 		if m.teardownCmdText == "" {
 			// Nothing was typed, so there is no submission to wait for; the
 			// gate is all that stands between here and ready.
@@ -1331,6 +1384,41 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
 	}
 	return m, nil
+}
+
+// captureTeardownTarget records the directory the ready gate will watch, and
+// whether it is a linked worktree, for the teardown being armed right now.
+//
+// The session's cwd is authoritative and the head's own cwd is only the
+// fallback — see the teardownWorkDir field for why they differ. The fallback
+// matters for the window before the first main-session event has been read
+// (sessionCwd is ""), where the head's launch directory is the best available
+// guess and is exactly right for a non-worktree session.
+//
+// Symlinks are resolved because worktreeListed compares cleaned, resolved
+// paths: git prints resolved paths, and on macOS a transcript cwd under
+// /var/... is really /private/var/..., which would otherwise never match and
+// would leave the gate permanently shut.
+func (m *model) captureTeardownTarget() {
+	wd := m.sessionCwd
+	if wd == "" {
+		wd = m.workDir
+	}
+	if resolved, err := filepath.EvalSymlinks(wd); err == nil {
+		wd = resolved
+	}
+	m.teardownWorkDir = wd
+	m.teardownInWorktree = worktreeNameForCwd(wd) != ""
+}
+
+// teardownProbeDue reports whether the ready gate should be sampled on this
+// tick. See teardownBlockedProbeInterval: every tick until a blocked reading
+// lands, then at a much lower rate for as long as it stays blocked.
+func (m model) teardownProbeDue(now time.Time) bool {
+	if !m.teardownBlocked {
+		return true
+	}
+	return now.Sub(m.teardownProbeAt) >= teardownBlockedProbeInterval
 }
 
 // abortTeardown returns to idle with a reason on the status line. Nothing that

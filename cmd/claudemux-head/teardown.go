@@ -133,6 +133,25 @@ const teardownSubmitTimeout = 10 * time.Second
 // reason the kill comes last.
 const teardownExitTimeout = 15 * time.Second
 
+// teardownBlockedProbeInterval is how often the ready gate is re-sampled once
+// a BLOCKED reading has been seen (turn over, worktree still standing).
+//
+// Before that, the gate is probed on every one-second tick, because the whole
+// point is to offer the second press promptly. But a blocked teardown is a
+// resting state that a user may leave on screen indefinitely — a `/done` that
+// bailed on unpushed work sits there until they cancel or fix it. At 1 Hz that
+// is a `git worktree list` fork every second, ~30k processes overnight, to
+// re-answer a question whose answer only changes when the human does something.
+// Five seconds is still well inside human reaction time for the moment the
+// worktree finally disappears.
+//
+// A rate limit rather than the 10s cache in worktree.go: that cache memoizes a
+// repo's linked-worktree SET keyed by an arbitrary cwd and drops the main
+// worktree from its results, so it answers a different question than
+// worktreeIsGone's "is this exact path still registered" — and its TTL would
+// also blunt the responsive pre-blocked path, which is the one that matters.
+const teardownBlockedProbeInterval = 5 * time.Second
+
 // teardownTurnEnded reports whether claude has stopped working.
 //
 // StateAwaiting counts as ended on purpose: the wrap-up command asking for its
@@ -286,6 +305,10 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 }
 
 // teardownProbeCmd takes one ready-gate reading.
+//
+// workDir is the SESSION's working directory as captured when the teardown was
+// armed (model.teardownWorkDir), not the head process's own cwd — the head is
+// launched in the main checkout even for sessions that work in a worktree.
 func teardownProbeCmd(workDir, mainCheckout string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)

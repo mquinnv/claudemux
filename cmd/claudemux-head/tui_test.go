@@ -1830,17 +1830,25 @@ func TestPinnedIndicatorRenders(t *testing.T) {
 }
 
 // A model with just enough set up to exercise teardown transitions.
+// teardownTestModel is a head watching a worktree session, shaped the way
+// bin/claudemux really launches one: the head's OWN cwd is the main checkout
+// (workDir / inWorktree), while the session chdir'd into a linked worktree
+// (sessionCwd). The teardown* target fields are pre-captured as teardownKey
+// would capture them, so tests that start mid-teardown skip the arming press.
 func teardownTestModel() model {
 	return model{
-		ready:           true,
-		width:           120,
-		height:          4,
-		selfPane:        "%1",
-		paneDir:         "/tmp/panemap",
-		workDir:         "/tmp/wt",
-		inWorktree:      true,
-		teardownCmdText: "/done",
-		state:           State{Kind: StateIdle},
+		ready:              true,
+		width:              120,
+		height:             4,
+		selfPane:           "%1",
+		paneDir:            "/tmp/panemap",
+		workDir:            "/tmp/repo",
+		inWorktree:         false,
+		sessionCwd:         "/tmp/repo/.claude/worktrees/wt",
+		teardownWorkDir:    "/tmp/repo/.claude/worktrees/wt",
+		teardownInWorktree: true,
+		teardownCmdText:    "/done",
+		state:              State{Kind: StateIdle},
 	}
 }
 
@@ -1943,6 +1951,7 @@ func TestEscQuitsWhenIdle(t *testing.T) {
 func TestTeardownProbeOpensGate(t *testing.T) {
 	m := teardownTestModel()
 	m.teardown = teardownSent
+	m.teardownSubmitted = true
 	m.teardownProbing = true
 	next, _ := m.Update(teardownProbeMsg{worktreeGone: true})
 	got := next.(model)
@@ -1959,6 +1968,7 @@ func TestTeardownProbeOpensGate(t *testing.T) {
 func TestTeardownProbeBlocksWhenWorktreeSurvives(t *testing.T) {
 	m := teardownTestModel()
 	m.teardown = teardownSent
+	m.teardownSubmitted = true
 	next, _ := m.Update(teardownProbeMsg{worktreeGone: false})
 	got := next.(model)
 	if got.teardown != teardownSent {
@@ -2173,6 +2183,7 @@ func TestTeardownReadyGetsFreshDeadline(t *testing.T) {
 	now := time.Now()
 	m := teardownTestModel()
 	m.teardown = teardownSent
+	m.teardownSubmitted = true
 	// The wrap-up was sent long ago — if teardownAt weren't re-stamped, the
 	// exit-timeout check on the very next tick would fire immediately.
 	m.teardownAt = now.Add(-time.Hour)
@@ -2237,5 +2248,211 @@ func TestPinnedChipUnaffectedWhenIdle(t *testing.T) {
 	got := renderStateLine(m, time.Now())
 	if !strings.Contains(got, "⬚ pinned") {
 		t.Errorf("pin chip missing when no teardown is armed:\n%s", got)
+	}
+}
+
+// The gate's worktree half must target the SESSION's directory, not the head's.
+//
+// bin/claudemux starts the head pane with `-c "$work_dir"` (the main checkout)
+// and `claude --worktree` chdirs itself into .claude/worktrees/<name>. So for
+// every session launched with -w / launch.auto_worktree / `worktree: true`, the
+// head's own cwd is not a worktree — and arming off it would silently reduce
+// the gate to "the turn looks ended", never checking the evidence that the
+// wrap-up actually succeeded.
+func TestTeardownArmsAgainstSessionCwdNotHeadCwd(t *testing.T) {
+	m := teardownTestModel()
+	m.workDir = "/tmp/repo" // where the head was launched: the main checkout
+	m.inWorktree = false
+	m.sessionCwd = "/tmp/repo/.claude/worktrees/floating-harp" // where claude went
+	m.teardownWorkDir = ""
+	m.teardownInWorktree = false
+
+	got, _ := m.teardownKey()
+
+	if got.teardownWorkDir != "/tmp/repo/.claude/worktrees/floating-harp" {
+		t.Errorf("teardownWorkDir = %q, want the session's cwd", got.teardownWorkDir)
+	}
+	if !got.teardownInWorktree {
+		t.Error("teardownInWorktree = false for a session working in a worktree; " +
+			"the gate would degrade to turn-end alone and never verify the wrap-up")
+	}
+}
+
+// Before the first main-session event is read there is no sessionCwd, so the
+// head's own launch directory is the best available target — and it is exactly
+// right for a session that never entered a worktree.
+func TestTeardownFallsBackToHeadCwd(t *testing.T) {
+	m := teardownTestModel()
+	m.workDir = "/tmp/repo"
+	m.inWorktree = false
+	m.sessionCwd = ""
+	m.teardownWorkDir = ""
+	m.teardownInWorktree = true
+
+	got, _ := m.teardownKey()
+
+	if got.teardownWorkDir != "/tmp/repo" {
+		t.Errorf("teardownWorkDir = %q, want the startup capture %q", got.teardownWorkDir, "/tmp/repo")
+	}
+	if got.teardownInWorktree {
+		t.Error("teardownInWorktree = true for a non-worktree launch directory")
+	}
+}
+
+// The gate must not open against a turn-end reading that predates the wrap-up.
+// m.state.Kind is only as fresh as the last dataMsg, so a probe returning a
+// second after arming can see the StateIdle captured before the command was
+// typed. teardownSubmitted is the evidence that the wrap-up actually reached
+// claude, and the gate waits for it.
+func TestTeardownGateStaysShutUntilSubmitted(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownSubmitted = false
+	m.teardownProbing = true
+	m.state = State{Kind: StateIdle} // stale: captured before /done was typed
+
+	next, _ := m.Update(teardownProbeMsg{worktreeGone: true})
+	got := next.(model)
+
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent; the gate opened on a pre-wrap-up "+
+			"state reading and invited the irreversible second press", got.teardown)
+	}
+	if got.teardownBlocked {
+		t.Error("blocked = true; nothing has failed yet, the wrap-up just hasn't landed")
+	}
+}
+
+// An empty teardown.command is the documented case where nothing is typed:
+// teardownKey marks it submitted at arm time, so requiring submission cannot
+// wedge it.
+func TestTeardownGateOpensWithEmptyCommand(t *testing.T) {
+	m := teardownTestModel()
+	m.teardownCmdText = ""
+	m, _ = m.teardownKey()
+	if !m.teardownSubmitted {
+		t.Fatal("precondition: empty command should arm as already submitted")
+	}
+
+	next, _ := m.Update(teardownProbeMsg{worktreeGone: true})
+	if got := next.(model); got.teardown != teardownReady {
+		t.Errorf("phase = %v, want teardownReady", got.teardown)
+	}
+}
+
+func TestTeardownProbeDue(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name    string
+		blocked bool
+		last    time.Duration // how long ago the last probe was issued
+		want    bool
+	}{
+		{"not blocked: every tick", false, 0, true},
+		{"blocked, just probed", true, 0, false},
+		{"blocked, a second ago", true, time.Second, false},
+		{"blocked, interval elapsed", true, teardownBlockedProbeInterval, true},
+		{"blocked, never probed", true, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := teardownTestModel()
+			m.teardownBlocked = tt.blocked
+			m.teardownProbeAt = now.Add(-tt.last)
+			if got := m.teardownProbeDue(now); got != tt.want {
+				t.Errorf("teardownProbeDue = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A blocked teardown is a resting state a user may leave up all night. Probing
+// it at 1 Hz forks `git worktree list` ~30k times overnight to re-answer a
+// question that only changes when the human does something.
+func TestBlockedTeardownBacksOffProbing(t *testing.T) {
+	now := time.Now()
+
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownSubmitted = true
+	m.teardownBlocked = true
+	m.teardownProbeAt = now.Add(-time.Second)
+
+	next, _ := m.Update(tickMsg(now))
+	if next.(model).teardownProbing {
+		t.Error("a blocked teardown probed again one second later")
+	}
+
+	// It must still recover: once the interval is up the gate is re-sampled,
+	// so a worktree that finally disappears is noticed.
+	m.teardownProbeAt = now.Add(-teardownBlockedProbeInterval - time.Second)
+	next, _ = m.Update(tickMsg(now))
+	if !next.(model).teardownProbing {
+		t.Error("a blocked teardown stopped probing entirely")
+	}
+}
+
+// An unblocked teardown keeps the responsive 1 Hz cadence — the normal path
+// must open the gate promptly.
+func TestUnblockedTeardownProbesEveryTick(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownSubmitted = true
+	m.teardownProbeAt = now.Add(-time.Second)
+
+	next, _ := m.Update(tickMsg(now))
+	if !next.(model).teardownProbing {
+		t.Error("no probe issued on the tick after the previous one")
+	}
+}
+
+// A session rotation must abort an armed teardown rather than let it drift.
+// switchSession recomputes lastPrompt from the NEW session's transcript; the
+// next tick would read that change as proof the wrap-up submitted, removing the
+// only bound on how long teardownSent can sit armed.
+func TestSwitchSessionAbortsArmedTeardown(t *testing.T) {
+	dir := t.TempDir()
+	newp := filepath.Join(dir, "new-sess.jsonl")
+	if err := os.WriteFile(newp, []byte(`{"type":"user","timestamp":"2026-07-31T10:00:00Z","message":{"role":"user","content":"a different prompt"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	m := teardownTestModel()
+	m.jsonlPath = filepath.Join(dir, "old-sess.jsonl")
+	m.teardown = teardownSent
+	m.teardownPrompt = "the prompt the wrap-up was armed against"
+	m.lastPrompt = m.teardownPrompt
+
+	m.switchSession(newp, now)
+
+	if m.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle after a rotation", m.teardown)
+	}
+	if m.teardownNote != "session rotated" {
+		t.Errorf("note = %q, want %q", m.teardownNote, "session rotated")
+	}
+	if m.teardownSubmitted {
+		t.Error("submitted = true; the rotation certified a submission that never happened")
+	}
+}
+
+// The rotation abort only fires when something is armed — an idle head must
+// not start showing a note every time the session rotates.
+func TestSwitchSessionLeavesIdleTeardownAlone(t *testing.T) {
+	dir := t.TempDir()
+	newp := filepath.Join(dir, "new-sess.jsonl")
+	if err := os.WriteFile(newp, []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := teardownTestModel()
+	m.jsonlPath = filepath.Join(dir, "old-sess.jsonl")
+
+	m.switchSession(newp, time.Now())
+
+	if m.teardownNote != "" {
+		t.Errorf("note = %q, want empty", m.teardownNote)
 	}
 }
