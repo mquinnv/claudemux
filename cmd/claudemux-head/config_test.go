@@ -310,3 +310,56 @@ func TestAutoWorktreeUnknownKeyUnderLaunchIsFatal(t *testing.T) {
 		t.Fatal("loadConfig() error = nil, want an error — a typo under launch: must fail loudly, not silently behave as unset")
 	}
 }
+
+func TestTeardownCommandDefaultsToDone(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.Teardown.Command != "/done" {
+		t.Errorf("default teardown.command = %q, want %q", cfg.Teardown.Command, "/done")
+	}
+}
+
+// An explicitly empty command is a legal opt-out (press x becomes a gated
+// exit-and-kill), so it must survive decoding rather than being re-defaulted.
+func TestTeardownCommandEmptyStringIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "claudemux"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claudemux", "config.yml"),
+		[]byte("teardown:\n  command: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Teardown.Command != "" {
+		t.Errorf("teardown.command = %q, want empty", cfg.Teardown.Command)
+	}
+}
+
+func TestTeardownCommandOverride(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "claudemux"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claudemux", "config.yml"),
+		[]byte("teardown:\n  command: /wrapup\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Teardown.Command != "/wrapup" {
+		t.Errorf("teardown.command = %q, want /wrapup", cfg.Teardown.Command)
+	}
+	// Untouched blocks keep their defaults — the partial-decode contract.
+	if cfg.Summary.Model != "claude-haiku-4-5" {
+		t.Errorf("summary.model = %q, want default", cfg.Summary.Model)
+	}
+}

@@ -45,6 +45,7 @@ type Config struct {
 	Summary     SummaryConfig     `yaml:"summary"`
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
 	Launch      LaunchConfig      `yaml:"launch"`
+	Teardown    TeardownConfig    `yaml:"teardown"`
 }
 
 type SummaryConfig struct {
@@ -92,6 +93,20 @@ type LaunchConfig struct {
 	AutoWorktree bool `yaml:"auto_worktree"`
 }
 
+// TeardownConfig configures the `x` key in the status pane, which wraps a
+// session up and kills its tmux session.
+//
+// Command is typed into the claude pane on the first press. It defaults to
+// "/done" because that is the wrap-up slash command this tool was built
+// around, but it is a *command name in someone else's TUI* — a user without
+// that skill points it at their own, and "" opts out of the step entirely,
+// making the key a gated exit-and-kill. Empty is therefore a real value, not
+// "unset": loadConfig decodes into defaults, so an explicit `command: ""`
+// overrides the default rather than being ignored.
+type TeardownConfig struct {
+	Command string `yaml:"command"`
+}
+
 func defaultConfig() Config {
 	return Config{
 		Summary: SummaryConfig{
@@ -99,6 +114,9 @@ func defaultConfig() Config {
 			Model:       "claude-haiku-4-5",
 			MinInterval: Duration{20 * time.Second},
 			TabTitle:    true,
+		},
+		Teardown: TeardownConfig{
+			Command: "/done",
 		},
 	}
 }
