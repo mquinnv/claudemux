@@ -1682,3 +1682,24 @@ func TestNewModelArmsAcquisitionClock(t *testing.T) {
 		t.Error("lastKeyAttemptAt zero: first lazy attempt would fire immediately instead of after the floor")
 	}
 }
+
+// The head pane deliberately sets NO background: it inherits the terminal's
+// own, so it reads correctly under both light and dark themes. A hardcoded
+// background also reintroduces a rendering bug — every nested styled fragment
+// (the state dot, each progress bar, the bold prompt label) ends with a
+// background reset, so an outer background survives only in the gaps between
+// them. The line then renders as stripes (dark label, dark trailing pad, bare
+// terminal everywhere else) instead of a solid bar, which is invisible on a
+// dark terminal and obvious on a light one.
+func TestPaneStylesSetNoBackground(t *testing.T) {
+	for name, s := range map[string]lipgloss.Style{
+		"statusbarStyle":   statusbarStyle,
+		"promptStyle":      promptStyle,
+		"promptLabelStyle": promptLabelStyle,
+	} {
+		if _, ok := s.GetBackground().(lipgloss.NoColor); !ok {
+			t.Errorf("%s sets Background(%v); it must stay unset so the pane inherits the terminal background",
+				name, s.GetBackground())
+		}
+	}
+}

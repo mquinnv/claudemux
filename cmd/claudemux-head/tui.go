@@ -23,17 +23,27 @@ var (
 	dotError    = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("●")
 	dotCompact  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A855F7")).Render("●")
 
-	statusbarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#1a1a1a")).
-			Foreground(lipgloss.Color("#cccccc"))
+	// None of the pane's styles set a Background: the head inherits the
+	// terminal's own, so it reads correctly under both light and dark themes
+	// without having to detect which is in use. A hardcoded background also
+	// can't survive this layout — the state dot, every progress bar, and the
+	// bold label are each rendered as their own styled fragment ending in a
+	// background reset, so an outer Background(...) only paints the gaps
+	// between them and the trailing width pad. That banding was invisible
+	// against a dark terminal and glaring against a light one.
+	//
+	// Foregrounds follow suit: the status line takes the terminal's default
+	// foreground (the most prominent thing in the pane, legible either way),
+	// and the prompt rows use a mid-gray that clears ~4:1 contrast against
+	// both white and near-black. The label keeps its emphasis through weight
+	// rather than a brighter gray, since "brighter" flips meaning with theme.
+	statusbarStyle = lipgloss.NewStyle()
 
 	promptStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#1a1a1a")).
-			Foreground(lipgloss.Color("#7a7a7a"))
+			Foreground(lipgloss.Color("#808080"))
 
 	promptLabelStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("#1a1a1a")).
-				Foreground(lipgloss.Color("#a0a0a0")).
+				Foreground(lipgloss.Color("#808080")).
 				Bold(true)
 )
 
