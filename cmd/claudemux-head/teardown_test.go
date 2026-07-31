@@ -225,3 +225,57 @@ func TestKillSessionArgs(t *testing.T) {
 		t.Error("empty session accepted — would kill the current session")
 	}
 }
+
+// Outside tmux there is no pane to type into; the command must report that
+// rather than shelling out or silently succeeding.
+func TestTeardownSendCmdNoPane(t *testing.T) {
+	msg := teardownSendCmd("", t.TempDir(), "/done")()
+	sent, ok := msg.(teardownSentMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want teardownSentMsg", msg)
+	}
+	if sent.note != "no claude pane" {
+		t.Errorf("note = %q, want %q", sent.note, "no claude pane")
+	}
+}
+
+// The probe reports gone for a work dir that no longer exists — no tmux, no
+// repo, no session required.
+func TestTeardownProbeCmdMissingDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "deleted")
+	msg := teardownProbeCmd(missing, "")()
+	probe, ok := msg.(teardownProbeMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want teardownProbeMsg", msg)
+	}
+	if !probe.worktreeGone {
+		t.Error("worktreeGone = false, want true")
+	}
+}
+
+func TestTeardownProbeCmdLiveDir(t *testing.T) {
+	msg := teardownProbeCmd(t.TempDir(), "")()
+	if probe := msg.(teardownProbeMsg); probe.worktreeGone {
+		t.Error("worktreeGone = true for a directory that still exists")
+	}
+}
+
+// Outside tmux nothing can be observed, so "gone" must be false: reporting
+// gone would let the exit wait fall through to a kill-session.
+func TestClaudeGoneCmdOutsideTmux(t *testing.T) {
+	msg := claudeGoneCmd("", t.TempDir())()
+	gone, ok := msg.(claudeGoneMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want claudeGoneMsg", msg)
+	}
+	if gone.gone {
+		t.Error("gone = true outside tmux")
+	}
+}
+
+// A kill with no pane to resolve a session from must do nothing at all.
+func TestKillSessionCmdNoPane(t *testing.T) {
+	if cmd := killSessionCmd(""); cmd != nil {
+		t.Error("killSessionCmd(\"\") returned a command")
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // worktreeListed reports whether `git worktree list --porcelain` output names
@@ -203,4 +205,115 @@ func killSessionArgs(session string) ([]string, bool) {
 		return nil, false
 	}
 	return []string{"kill-session", "-t", session}, true
+}
+
+// teardownKeyDelay separates the literal text from the Enter that submits it.
+// Claude Code opens a completion popup as a slash command is typed; an Enter
+// arriving in the same burst can be consumed selecting the completion instead
+// of submitting the line. A quarter second is imperceptible to the user and
+// ample for the TUI to settle.
+const teardownKeyDelay = 250 * time.Millisecond
+
+// teardownTmuxTimeout bounds each tmux subprocess, matching the ceiling used
+// everywhere else in this package. A wedged tmux server must never block the
+// TUI.
+const teardownTmuxTimeout = 2 * time.Second
+
+// teardownSentMsg reports the outcome of typing the wrap-up command. note is
+// empty on success and an abort reason otherwise — it is rendered verbatim in
+// the status chip.
+type teardownSentMsg struct{ note string }
+
+// teardownProbeMsg carries one ready-gate observation.
+type teardownProbeMsg struct{ worktreeGone bool }
+
+// claudeGoneMsg reports whether any pane in this session is still running
+// claude.
+type claudeGoneMsg struct{ gone bool }
+
+// teardownSendCmd types text into the session's claude pane and submits it.
+//
+// The pane is resolved here rather than cached on the model so it is always
+// the pane whose transcript the head currently follows, even if the session
+// rotated a moment ago.
+func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
+	return func() tea.Msg {
+		_, _, pane, ok := mappedTranscript(selfPane, paneDir)
+		if !ok || pane == "" {
+			return teardownSentMsg{note: "no claude pane"}
+		}
+		literal, ok := sendLiteralArgs(pane, text)
+		if !ok {
+			return teardownSentMsg{note: "wrap-up didn't submit"}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		defer cancel()
+		if err := exec.CommandContext(ctx, "tmux", literal...).Run(); err != nil {
+			return teardownSentMsg{note: "wrap-up didn't submit"}
+		}
+
+		time.Sleep(teardownKeyDelay) // see teardownKeyDelay; this runs off the Update loop
+
+		enter, ok := sendEnterArgs(pane)
+		if !ok {
+			return teardownSentMsg{note: "wrap-up didn't submit"}
+		}
+		if err := exec.CommandContext(ctx, "tmux", enter...).Run(); err != nil {
+			return teardownSentMsg{note: "wrap-up didn't submit"}
+		}
+		// Success here means the keystrokes were delivered, NOT that claude
+		// accepted them. The model separately watches the transcript for
+		// evidence of a submitted prompt and aborts on teardownSubmitTimeout.
+		return teardownSentMsg{}
+	}
+}
+
+// teardownProbeCmd takes one ready-gate reading.
+func teardownProbeCmd(workDir, mainCheckout string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		defer cancel()
+		return teardownProbeMsg{worktreeGone: worktreeIsGone(ctx, workDir, mainCheckout)}
+	}
+}
+
+// claudeGoneCmd reports whether claude has exited: no pane in the session runs
+// claude any more, which is exactly what mappedTranscript failing to find a
+// candidate means. Outside tmux nothing is observable, so it reports not-gone
+// — the exit wait then times out rather than falling through to a kill.
+func claudeGoneCmd(selfPane, paneDir string) tea.Cmd {
+	return func() tea.Msg {
+		if selfPane == "" {
+			return claudeGoneMsg{}
+		}
+		_, _, pane, ok := mappedTranscript(selfPane, paneDir)
+		return claudeGoneMsg{gone: !ok || pane == ""}
+	}
+}
+
+// killSessionCmd ends the tmux session this pane lives in. It is the last
+// thing the process does: the kill takes the head down with everything else,
+// so there is no message to return and no state to render afterwards.
+//
+// nil when there is no pane to resolve a session from, so callers can append
+// it unconditionally — the same contract as renameTabCmd.
+func killSessionCmd(selfPane string) tea.Cmd {
+	if selfPane == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "tmux", "display-message",
+			"-p", "-t", selfPane, "#{session_name}").Output()
+		if err != nil {
+			return nil
+		}
+		args, ok := killSessionArgs(strings.TrimSpace(string(out)))
+		if !ok {
+			return nil
+		}
+		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		return nil
+	}
 }
