@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -81,44 +80,21 @@ func TestWorktreeIsGoneLiveWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	main := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", main}, args...)...)
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-b", "main")
-	run("commit", "--allow-empty", "-m", "init")
+	repo, wt := initRepoWithWorktree(t, "wt")
 
-	wt := filepath.Join(main, "wt")
-	run("worktree", "add", "-b", "side", wt)
-
-	// EvalSymlinks because t.TempDir() hands back /var/... on macOS while git
-	// reports the resolved /private/var/... — the same normalization the model
-	// does at startup.
-	resolvedWT, err := filepath.EvalSymlinks(wt)
-	if err != nil {
-		t.Fatal(err)
+	if got := mainCheckoutFor(wt); got != repo {
+		t.Errorf("mainCheckoutFor = %q, want %q", got, repo)
 	}
-	resolvedMain, err := filepath.EvalSymlinks(main)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got := mainCheckoutFor(resolvedWT); got != resolvedMain {
-		t.Errorf("mainCheckoutFor = %q, want %q", got, resolvedMain)
-	}
-	if worktreeIsGone(context.Background(), resolvedWT, resolvedMain) {
+	if worktreeIsGone(context.Background(), wt, repo) {
 		t.Error("live worktree reported as gone")
 	}
 
-	run("worktree", "remove", "--force", wt)
-	if !worktreeIsGone(context.Background(), resolvedWT, resolvedMain) {
+	cmd := exec.Command("git", "-C", repo, "worktree", "remove", "--force", wt)
+	cmd.Env = append(cmd.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree remove: %v\n%s", err, out)
+	}
+	if !worktreeIsGone(context.Background(), wt, repo) {
 		t.Error("removed worktree reported as present")
 	}
 }
