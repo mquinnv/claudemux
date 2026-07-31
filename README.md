@@ -245,10 +245,16 @@ wrap-up in order:
 3. The second press sends `/exit`, shows `⏻ exiting claude…` while it waits for
    `claude` to actually be gone, and then kills the tmux session.
 
-The worktree the gate watches is the one **the session is working in** — the directory
-from its transcript, which is where `claudemux -w` (or `launch.auto_worktree`, or
+The worktree the gate watches is the one **the session's working directory is in** — the
+cwd from its transcript, which is where `claudemux -w` (or `launch.auto_worktree`, or
 `worktree: true`) put it. That is not where the status pane itself was started, so the
 check holds for auto-worktree sessions, which are the common case.
+
+It follows the cwd, though, not the work. A session whose cwd stays in the main checkout
+while it drives a worktree by explicit path (`git -C <worktree> …`) gets **no** worktree
+verification — the gate falls back to turn-end alone, even though the status line may
+show a worktree chip for it. The chip tracks where the commands are going; the gate
+tracks where the session is sitting.
 
 `esc` cancels a teardown in progress. **It does not undo anything** — by then the
 wrap-up command has already run; cancelling only stops the status pane from driving
@@ -260,7 +266,7 @@ Nothing here is silent. Every abort names its reason on the status line —
 left alive), `⏻ no claude pane`, `⏻ session rotated` (the pane re-bound to a different
 session mid-teardown, so what was armed no longer applies).
 
-Sessions that aren't in a worktree have no deletion to verify, so the gate opens as
+Sessions whose cwd isn't in a worktree have no deletion to verify, so the gate opens as
 soon as the wrap-up turn ends.
 
 Outside tmux `x` does nothing at all: there is no pane to type into and no session to

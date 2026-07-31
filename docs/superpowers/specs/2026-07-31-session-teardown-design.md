@@ -140,9 +140,18 @@ that is not a worktree and that the wrap-up will never delete. Arming off it wou
 evidence that the wrap-up succeeded, which is the whole point of condition 2.
 
 The directory to watch is therefore the **session's** cwd: `m.sessionCwd`, the last
-non-sidechain transcript cwd, which is already the source of truth for the worktree chip
-for exactly this reason (see `panemap.go` on the pane-cwd glob going stale the moment a
-session cd's into a worktree).
+non-sidechain transcript cwd, which the worktree chip also consults first for exactly
+this reason (see `panemap.go` on the pane-cwd glob going stale the moment a session cd's
+into a worktree).
+
+**The gate follows the cwd, not the work, and that is narrower than the chip.**
+`worktreeChip` falls back to `cmdWorktree` — a dominance heuristic over the recent
+command window — so it can label a session that drives a worktree at arm's length while
+its cwd stays in the main repo. The gate deliberately does not use that fallback: it is a
+heuristic, and a mis-picked directory that someone else deletes would open the gate on
+evidence about the wrong worktree. The cost is that arm's-length sessions get condition 2
+vacuously and rest on condition 1 alone — the *laxer* outcome, not a stricter one, which
+is why the README says so plainly rather than leaving the user to infer it from the chip.
 
 It is captured **when `x` first arms a teardown**, not per probe: by the time the gate is
 being evaluated the wrap-up may already have deleted the directory, and once `claude`
