@@ -22,11 +22,10 @@ const hookScriptName = "claudemux-map.sh"
 // map stale in exactly the cases users notice.
 var hookEvents = []string{"SessionStart", "UserPromptSubmit"}
 
-// hookScriptSource finds the claudemux-map.sh that shipped with this binary:
-// every install channel lays the binary and the scripts down as siblings.
-// Symlinks are resolved first because Homebrew puts the real files in libexec
-// and symlinks only the binaries onto PATH.
-func hookScriptSource() (string, error) {
+// siblingOfExecutable joins name onto the directory holding this binary, with
+// symlinks resolved first because Homebrew puts the real files in libexec and
+// symlinks only the binaries onto PATH.
+func siblingOfExecutable(name string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -35,7 +34,13 @@ func hookScriptSource() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(resolved), hookScriptName), nil
+	return filepath.Join(filepath.Dir(resolved), name), nil
+}
+
+// hookScriptSource finds the claudemux-map.sh that shipped with this binary:
+// every install channel lays the binary and the scripts down as siblings.
+func hookScriptSource() (string, error) {
+	return siblingOfExecutable(hookScriptName)
 }
 
 // runHookEnsure implements `claudemux-head hook ensure`.
