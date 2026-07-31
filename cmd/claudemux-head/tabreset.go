@@ -111,14 +111,15 @@ func restoreName(declaredName, sessionName, workDir string) string {
 }
 
 // parseProjectStyle splits resolve_project_style's "<hex> <fg>" line. Anything
-// that is not exactly a 6-digit hex plus a foreground is rejected, so a
-// resolver that errors or a shell that prints a warning cannot reach tmux.
+// that is not exactly a 6-digit hex plus a "#"-prefixed 6-digit hex
+// foreground is rejected, so a resolver that errors or a shell that prints a
+// warning cannot reach tmux.
 func parseProjectStyle(out string) (hex, fg string, ok bool) {
 	fields := strings.Fields(strings.TrimSpace(out))
 	if len(fields) != 2 {
 		return "", "", false
 	}
-	if !isHex6(fields[0]) || fields[1] == "" {
+	if !isHex6(fields[0]) || !isColorHex(fields[1]) {
 		return "", "", false
 	}
 	return fields[0], fields[1], true
@@ -132,12 +133,25 @@ func isHex6(s string) bool {
 	return err == nil
 }
 
+// isColorHex reports whether s is a "#" followed by a 6-digit hex value —
+// resolve_project_style's contract for the foreground field (e.g. "#ffffff").
+func isColorHex(s string) bool {
+	return strings.HasPrefix(s, "#") && isHex6(s[1:])
+}
+
 // tabResetTmuxArgs builds the tmux command lines a reset runs, in order. Each
 // group is omitted when its inputs are missing rather than emitting a partial
 // command: outside tmux there is no pane to rename, and a project without a
 // color still gets its title back.
+//
+// name is normalized through the same two helpers tabRenameArgs uses
+// (collapseWhitespace, truncateWords) so a quoted .project.yml name: value
+// containing a newline, or an overlong name, cannot land verbatim in the tmux
+// status line — the summary-rename path and the reset-rename path obey one
+// rule.
 func tabResetTmuxArgs(pane, session, name, hex, fg string) [][]string {
 	var cmds [][]string
+	name = truncateWords(collapseWhitespace(name), tabTitleMaxRunes)
 	if pane != "" && name != "" {
 		cmds = append(cmds, []string{"rename-window", "-t", pane, name})
 	}
@@ -174,20 +188,31 @@ func itermTabColorBytes(hex string) []byte {
 // crash the TUI.
 const tabResetTimeout = 2 * time.Second
 
-// sessionAndTTYFormat asks for both values in one tmux call. They are separated
-// by a newline, not a space: a session name may contain spaces, and a
-// space-separated pair could not be split back apart safely.
-const sessionAndTTYFormat = "#{session_name}\n#{client_tty}"
+// sessionAndTTYFormat asks for three values in one tmux call, separated by
+// newlines rather than spaces: a session name may contain spaces, and a
+// space-separated tuple could not be split back apart safely.
+//
+// #{client_tty} alone cannot tell a detached session from an attached one:
+// when the target session has no client of its own, tmux does NOT print an
+// empty string — it falls back to the globally most-recently-active client,
+// which belongs to some unrelated session. Measured live on 2026-07-31 (tmux
+// 3.7b): a detached "cd-receiver" session's #{client_tty} printed the tty of
+// the client attached to a completely different session. #{session_attached}
+// is the only reliable signal — it is "1" precisely when the target session
+// itself has an attached client — so it rides along and gates the tty.
+const sessionAndTTYFormat = "#{session_name}\n#{client_tty}\n#{session_attached}"
 
-// parseSessionAndTTY splits sessionAndTTYFormat's output. A detached session
-// has no client and yields an empty tty, which is not an error — only the tab
-// color is skipped.
+// parseSessionAndTTY splits sessionAndTTYFormat's output. The tty is reported
+// only when session_attached is exactly "1"; otherwise it is treated as
+// absent (not our client's tty) even though tmux may have printed a non-empty
+// value for it — see sessionAndTTYFormat's comment. That is not an error,
+// only the tab color write is skipped.
 func parseSessionAndTTY(out string) (session, tty string) {
-	lines := strings.SplitN(strings.TrimRight(out, "\n"), "\n", 2)
+	lines := strings.SplitN(strings.TrimRight(out, "\n"), "\n", 3)
 	if len(lines) > 0 {
 		session = lines[0]
 	}
-	if len(lines) > 1 {
+	if len(lines) > 2 && strings.TrimSpace(lines[2]) == "1" {
 		tty = strings.TrimSpace(lines[1])
 	}
 	return session, tty

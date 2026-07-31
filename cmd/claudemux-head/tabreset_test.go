@@ -242,6 +242,23 @@ func TestParseProjectStyleRejectsGarbage(t *testing.T) {
 	}
 }
 
+// The resolver's contract is "<hex> <fg>" where fg is itself a color. A
+// garbage second field (no leading '#', wrong length, non-hex digits) must be
+// rejected rather than handed to tmux as a literal fg= value.
+func TestParseProjectStyleRejectsGarbageForeground(t *testing.T) {
+	for _, in := range []string{
+		"b34dff ffffff",   // missing leading #
+		"b34dff #fffff",   // 5 digits
+		"b34dff #fffffff", // 7 digits
+		"b34dff #zzzzzz",  // non-hex digits
+		"b34dff #",        // bare hash
+	} {
+		if _, _, ok := parseProjectStyle(in); ok {
+			t.Errorf("parseProjectStyle(%q) ok = true, want false", in)
+		}
+	}
+}
+
 func TestTabResetTmuxArgs(t *testing.T) {
 	got := tabResetTmuxArgs("%3", "claudemux", "claudemux", "b34dff", "#ffffff")
 	want := [][]string{
@@ -267,6 +284,38 @@ func TestTabResetTmuxArgsNoColor(t *testing.T) {
 	}
 	if got[0][0] != "rename-window" {
 		t.Errorf("cmd[0] = %v, want a rename-window", got[0])
+	}
+}
+
+// The restored name goes through the same normalization as the summary path
+// (tabRenameArgs: collapseWhitespace then truncateWords) — a quoted
+// .project.yml name: value containing a newline, or an overlong name, must
+// not land verbatim in the tmux rename-window argument.
+func TestTabResetTmuxArgsNormalizesName(t *testing.T) {
+	got := tabResetTmuxArgs("%3", "claudemux", "claudemux  \n  project", "", "")
+	if len(got) != 1 {
+		t.Fatalf("got %d commands, want 1: %v", len(got), got)
+	}
+	want := "claudemux project"
+	if got[0][len(got[0])-1] != want {
+		t.Errorf("rename target = %q, want %q", got[0][len(got[0])-1], want)
+	}
+}
+
+// An overlong name is truncated the same way tabRenameArgs truncates a model
+// label: at a word boundary, to tabTitleMaxRunes, with an ellipsis.
+func TestTabResetTmuxArgsTruncatesOverlongName(t *testing.T) {
+	long := strings.Repeat("a", tabTitleMaxRunes+20)
+	got := tabResetTmuxArgs("%3", "claudemux", long, "", "")
+	if len(got) != 1 {
+		t.Fatalf("got %d commands, want 1: %v", len(got), got)
+	}
+	name := got[0][len(got[0])-1]
+	if len([]rune(name)) > tabTitleMaxRunes {
+		t.Errorf("rename target has %d runes, want <= %d: %q", len([]rune(name)), tabTitleMaxRunes, name)
+	}
+	if want := truncateWords(long, tabTitleMaxRunes); name != want {
+		t.Errorf("rename target = %q, want %q (truncateWords' own output)", name, want)
 	}
 }
 
@@ -299,11 +348,11 @@ func TestItermTabColorBytesRejectsGarbage(t *testing.T) {
 	}
 }
 
-// tmux is asked for both values in one call, newline-separated, because a
+// tmux is asked for three values in one call, newline-separated, because a
 // session name may contain spaces and a space-separated format could not be
 // split back apart safely.
 func TestParseSessionAndTTY(t *testing.T) {
-	session, tty := parseSessionAndTTY("claudemux\n/dev/ttys036\n")
+	session, tty := parseSessionAndTTY("claudemux\n/dev/ttys036\n1\n")
 	if session != "claudemux" {
 		t.Errorf("session = %q, want %q", session, "claudemux")
 	}
@@ -312,21 +361,43 @@ func TestParseSessionAndTTY(t *testing.T) {
 	}
 }
 
-// A detached session has no client, so tmux prints an empty second line. The
-// session name is still usable; only the tab color is skipped.
+// A detached session has NO client of its own, but #{client_tty} does not
+// come back empty: tmux falls back to the globally most-recently-active
+// client, which belongs to some unrelated attached session. Measured live on
+// 2026-07-31 (tmux 3.7b): a detached "cd-receiver" session's
+// `display-message -t cd-receiver '#{client_tty}'` printed the tty of the
+// client attached to a completely different session ("beejax-2"). The only
+// reliable signal that the tty is NOT this session's own client is
+// #{session_attached}: it is "1" only when the target session itself has an
+// attached client. So detachedness must be read from session_attached, not
+// from an empty tty field — an empty tty never actually occurs here.
 func TestParseSessionAndTTYDetached(t *testing.T) {
-	session, tty := parseSessionAndTTY("cd-receiver\n\n")
+	session, tty := parseSessionAndTTY("cd-receiver\n/dev/ttys028\n0\n")
 	if session != "cd-receiver" {
 		t.Errorf("session = %q, want %q", session, "cd-receiver")
 	}
 	if tty != "" {
-		t.Errorf("tty = %q, want empty for a detached session", tty)
+		t.Errorf("tty = %q, want empty for a detached session even though tmux reported another client's tty", tty)
+	}
+}
+
+// session_attached can in principle be a count greater than 1 (multiple
+// clients attached to the same session); only exactly "1" is treated as "the
+// tty belongs to us". Anything else means "not trustworthy, skip the tab
+// color write".
+func TestParseSessionAndTTYNotExactlyOneAttached(t *testing.T) {
+	session, tty := parseSessionAndTTY("claudemux\n/dev/ttys036\n2\n")
+	if session != "claudemux" {
+		t.Errorf("session = %q, want %q", session, "claudemux")
+	}
+	if tty != "" {
+		t.Errorf("tty = %q, want empty when session_attached != 1", tty)
 	}
 }
 
 // A session name containing spaces survives the newline-separated format.
 func TestParseSessionAndTTYSessionWithSpaces(t *testing.T) {
-	session, _ := parseSessionAndTTY("my project\n/dev/ttys001\n")
+	session, _ := parseSessionAndTTY("my project\n/dev/ttys001\n1\n")
 	if session != "my project" {
 		t.Errorf("session = %q, want %q", session, "my project")
 	}

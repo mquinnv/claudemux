@@ -22,7 +22,13 @@ name_to_hex() {
         orange) echo ff944d ;;
         pink)   echo ff4dd2 ;;
         cyan)   echo 4dd2d2 ;;
-        \#*)    echo "${1#\#}" ;;
+        \#*)
+            if printf '%s' "${1#\#}" | grep -qiE '^[0-9a-fA-F]{6}$'; then
+                printf '%s' "${1#\#}"
+            else
+                return 1
+            fi
+            ;;
         *)
             if printf '%s' "$1" | grep -qiE '^[0-9a-fA-F]{6}$'; then
                 printf '%s' "$1"

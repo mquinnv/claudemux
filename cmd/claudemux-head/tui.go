@@ -812,11 +812,16 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if m.modelName != "" {
 		leftParts = append(leftParts, shortModel(m.modelName))
 	}
-	if chip != "" {
-		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
-	}
+	// The pin sits ahead of the chip, not after it: clipLine (below) only ever
+	// truncates from the right, so whichever of the two is closer to the tail
+	// disappears first as the pane narrows. The pin is the protected one — the
+	// chip should be lost before the pin state does. See
+	// docs/superpowers/specs/2026-07-31-head-tab-reset-design.md line 172.
 	if m.tabPinned {
 		leftParts = append(leftParts, "⬚ pinned")
+	}
+	if chip != "" {
+		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
 	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
 

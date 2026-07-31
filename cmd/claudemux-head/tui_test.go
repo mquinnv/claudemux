@@ -1778,6 +1778,33 @@ func TestKeyRDoesNotQuit(t *testing.T) {
 	}
 }
 
+// Per the design spec (docs/superpowers/specs/2026-07-31-head-tab-reset-design.md
+// line 172), the pin indicator belongs in the group that is never shrunk, so
+// the worktree chip must truncate away before the pin state disappears.
+// clipLine only ever truncates from the right (ansi.Truncate), so this
+// requires the pin to sit to the LEFT of the chip in the assembled line —
+// checking that ordering here is equivalent to checking that the chip is
+// lost first as the pane narrows.
+func TestRenderStatusbarPinPrecedesChip(t *testing.T) {
+	now := time.Now()
+	m := model{ready: true, width: 500, height: 4, tabPinned: true}
+	line := renderStatusbar(m, now, "some-worktree-branch")
+
+	pinIdx := strings.Index(line, "⬚ pinned")
+	chipIdx := strings.Index(line, "⎇")
+	if pinIdx < 0 {
+		t.Fatalf("pin indicator missing from %q", line)
+	}
+	if chipIdx < 0 {
+		t.Fatalf("worktree chip missing from %q", line)
+	}
+	if pinIdx > chipIdx {
+		t.Errorf("pin (index %d) comes after chip (index %d) in %q; "+
+			"clipLine truncates from the right, so the chip would be lost "+
+			"after the pin, not before it", pinIdx, chipIdx, line)
+	}
+}
+
 // The pin is visible in both layouts, and invisible when unpinned.
 func TestPinnedIndicatorRenders(t *testing.T) {
 	now := time.Now()
