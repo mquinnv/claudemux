@@ -331,42 +331,100 @@ pane_cmd() {
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null || true
 }
 
-# deferred_launch SESSION DIR CLAUDE_PANE SHELL_PANE CLAUDE_CMD — finish an
-# op_env launch off the critical path. `op environment read` costs ~10s of
-# pure CPU per call (measured on op 2.38; no auth prompt involved — the
-# decryption itself is that slow), so create_session backgrounds this and
-# attaches immediately instead of leaving the user at a blank terminal.
+# run_in_pane PANE COMMAND — make PANE run COMMAND instead of a shell.
 #
-# Once the secrets are in the session environment, the claude and shell panes
-# are respawned so their shells inherit them — but only while still sitting on
-# the same foreground command they spawned with. A pane the user has already
-# started something in is left alone; in particular, if they got impatient and
-# launched claude by hand, it is neither killed nor double-launched. The head
-# pane is never respawned: claudemux-head deliberately does not read the
-# monitored project's env (see summarizerEnvOptions).
+# Panes are created as shells and immediately replaced rather than being spawned
+# with their command already attached, for two reasons. remain-on-exit has to be
+# set on a pane that already exists: a command that fails instantly (a binary
+# that is not on PATH) would otherwise take its pane down — and, for pane 0, the
+# whole session — before the next tmux call in create_session runs, turning a
+# missing binary into a cascade of "can't find pane" errors under set -e. And
+# respawn-pane clears the pane's screen, its scrollback, and any alternate-screen
+# state, so the shell that existed for those few milliseconds leaves no trace;
+# nothing is attached yet, so it is never drawn in the first place.
+#
+# remain-on-exit=failed keeps a pane only when its program exits non-zero: a
+# clean exit closes the pane, while a failure leaves the pane and its error
+# message on screen instead of the pane silently vanishing. The `failed` value
+# needs tmux >= 3.2 and an older tmux is not worth an error — it degrades to
+# panes that vanish on failure, which is what they would have done anyway.
+#
+# COMMAND is prefixed with exec because tmux runs a pane command as
+# `default-shell -c COMMAND`. Every shell in play execs a single simple command,
+# so today this is belt and braces — but pane_current_command has to name the
+# real program (the pane map claudemux-head follows, deferred_launch's guard
+# below, and the teardown's exit-wait all read it), and exec makes that a
+# guarantee rather than a shell implementation detail. It also means a COMMAND
+# that ever grows a second statement will NOT report the program: `sh -c 'a; b'`
+# leaves the shell as the process group leader.
+run_in_pane() {
+  tmux set -p -t "$1" remain-on-exit failed 2>/dev/null || true
+  # No -c: respawn-pane keeps the pane's working directory, which is the
+  # work_dir it was created with (verified) — the same assumption the shell
+  # pane's respawn in deferred_launch has always made.
+  tmux respawn-pane -k -t "$1" "exec $2"
+}
+
+# deferred_launch SESSION DIR CLAUDE_PANE SHELL_PANE CLAUDE_CMD HOLDER — finish
+# an op_env launch off the critical path. `op environment read` costs ~25s of
+# WALL TIME per call — 27.4s / 25.4s / 22.4s over three consecutive reads on op
+# 2.38.1, fully authorized, of an Environment holding a SINGLE variable. Only
+# ~38% of that is CPU (7.7s user + 5.3s sys of a 33.3s run); the rest is spent
+# waiting. No auth prompt is involved, and there is no CLI session to warm, so
+# every new session pays it again.
+#
+# It is NOT the cost of decryption, and measuring it that way is what made the
+# previous version of this comment claim "~10s of pure CPU". On the same
+# machine and account, `op item get` decrypts an ENTIRE item, secret fields
+# included, in 0.81s wall / 0.12s CPU, and `op item list` pulls every item in
+# the account in 7.0s wall / 0.25s CPU. Reading one variable out of an
+# Environment burns ~100x the CPU of decrypting a whole item. The `environment`
+# subcommand is simply pathological (reproduced on op 2.38.1-beta.01 and
+# 2.38.2-beta.01); the fix is to stop using Environments for launch-critical
+# secrets, not to shave this code path. create_session
+# backgrounds this and attaches immediately instead of leaving the user at a
+# blank terminal for half a minute.
+#
+# Once the secrets are in the session environment, the shell pane is respawned
+# so its shell inherits them — but only while it is still sitting on the
+# foreground command it spawned with, so a pane the user has already started
+# something in is left alone. The head pane is never respawned: claudemux-head
+# deliberately does not read the monitored project's env (see
+# summarizerEnvOptions).
+#
+# The claude pane is respawned WITH the claude command, which replaces the
+# holding TUI in a single call: no shell, nothing typed, and the new process
+# inherits the injected environment. Its guard cannot sample the pane the way
+# the shell pane's does — tmux spawns a pane command through `default-shell -c`,
+# so for a few milliseconds after run_in_pane the pane still reports the shell
+# rather than the holder, and a sample taken then would never match the reading
+# 25 seconds later; the launch would be silently dropped. It compares against
+# HOLDER, the command create_session put there, instead. The old guarantee,
+# stated rather than inferred: still the holder means the pane is ours to
+# replace; already claude (the holder's own timeout or a keypress got there
+# first) means it is neither killed nor double-launched; anything else is not
+# ours. A holder that CRASHED still reports its command — tmux keeps
+# pane_current_command on a dead pane — so the respawn fires over the corpse and
+# the session still gets its claude.
 #
 # Runs as a background job with stdout/stderr discarded — anything written
 # here would scribble over the attached tmux client — so failure is surfaced
 # via display-message instead, and claude still launches (without secrets),
 # matching the old synchronous behavior.
 deferred_launch() {
-  local session="$1" work_dir="$2" claude_pane="$3" shell_pane="$4" claude_cmd="$5"
-  local claude_cmd0 shell_cmd0
-  claude_cmd0="$(pane_cmd "$claude_pane")"
+  local session="$1" work_dir="$2" claude_pane="$3" shell_pane="$4" claude_cmd="$5" holder="$6"
+  local shell_cmd0
   shell_cmd0="$(pane_cmd "$shell_pane")"
   if inject_op_env "$session" "$work_dir"; then
     if [ -n "$shell_cmd0" ] && [ "$(pane_cmd "$shell_pane")" = "$shell_cmd0" ]; then
       tmux respawn-pane -k -t "$shell_pane"
     fi
-    if [ -n "$claude_cmd0" ] && [ "$(pane_cmd "$claude_pane")" = "$claude_cmd0" ]; then
-      tmux respawn-pane -k -t "$claude_pane"
-    fi
   else
     tmux display-message -t "$claude_pane" \
       'claudemux: 1Password environment failed — starting claude without secrets' || true
   fi
-  if [ -n "$claude_cmd0" ] && [ "$(pane_cmd "$claude_pane")" = "$claude_cmd0" ]; then
-    tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
+  if [ "$(pane_cmd "$claude_pane")" = "$holder" ]; then
+    tmux respawn-pane -k -t "$claude_pane" "exec $claude_cmd"
   fi
   return 0
 }
@@ -391,10 +449,20 @@ create_session() {
   # Project metadata (.project.yml: color + name), passed to claude at launch:
   # name via -n, color as a "/color X" prompt argument. No post-startup
   # send-keys — typing into the pane during boot used to collide with it.
-  local proj_color proj_name claude_cmd
+  local proj_color proj_name claude_cmd claude_bin
   proj_color="$(project_field "$work_dir/.project.yml" color)"
   proj_name="$(project_field "$work_dir/.project.yml" name)"
-  claude_cmd="claude --permission-mode auto"
+  # Absolute path when one can be resolved. The panes below are spawned with a
+  # command, and tmux runs a pane command through a NON-interactive shell: it
+  # never sources the rc file that put ~/.local/bin on PATH, and the environment
+  # it does inherit is the tmux server's, which can predate that PATH entirely.
+  # The launcher's own environment IS the user's interactive one, so resolving
+  # here is better informed than resolving in the pane. Falling back to the bare
+  # name is not merely a safety net: a `claude` that is a shell function or alias
+  # exists only inside the shell, and bash's `command -v` cannot see a fish
+  # function — leaving the name unresolved is what lets that keep working.
+  claude_bin="$(command -v claude || true)"
+  claude_cmd="$(printf '%q' "${claude_bin:-claude}") --permission-mode auto"
   [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
   [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
   # LAST, after every positional. `--worktree [name]` takes an optional value,
@@ -411,23 +479,44 @@ create_session() {
   # statusbar needs the extra width or it drops its right-side gauges).
   # Track panes by ID — the short head pane sits above claude, so positional
   # indices would shift under us.
-  local claude_pane head_pane shell_pane
+  #
+  # The head and claude panes RUN their program (run_in_pane); only the shell
+  # pane is a shell. Typing into a shell with send-keys was visible work: the
+  # pane came up as an interactive shell, the user watched a prompt appear, a
+  # command get typed, and — on the op_env path — an echoed notice scroll past
+  # with a second prompt underneath it, all before anything started. A pane
+  # created with a command never draws a prompt at all, so there is nothing to
+  # hide.
+  local claude_pane head_pane shell_pane head_bin holder_cmd
+  head_bin="$(command -v claudemux-head || true)"
+  head_bin="${head_bin:-claudemux-head}"
   tmux new-session -d -s "$session_name" -c "$work_dir" -x "$(tput cols)" -y "$(tput lines)"
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
   shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
   head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
-  tmux send-keys -t "$head_pane" 'claudemux-head' C-m
+  run_in_pane "$head_pane" "$(printf '%q' "$head_bin")"
 
   # With an op_env, claude's launch is handed to a background injector so the
-  # attach below happens NOW rather than after op's ~10s decryption (see
-  # deferred_launch). The leading space on the notice keeps it out of fish
-  # history; the respawn wipes it from the pane once the secrets land.
+  # attach below happens NOW rather than after op's ~25s decryption (see
+  # deferred_launch). The pane is held by `claudemux-head boot`, a real TUI that
+  # says what is being waited on and keeps a clock running against the typical
+  # duration — a wait this long needs to show it is alive — and deferred_launch
+  # replaces it with claude itself. The holder is handed the very same command
+  # after `--`: it execs it if it is left waiting past its own timeout or the
+  # user presses a key, so this pane ends up running claude however the wait
+  # ends.
   if [ -n "$(project_field "$work_dir/.project.yml" op_env)" ]; then
-    tmux send-keys -t "$claude_pane" \
-      " echo 'claudemux: unlocking 1Password environment — claude will start here…'" C-m
-    deferred_launch "$session_name" "$work_dir" "$claude_pane" "$shell_pane" "$claude_cmd" >/dev/null 2>&1 &
+    holder_cmd="$(printf '%q' "$head_bin") boot"
+    holder_cmd+=" --project $(printf '%q' "$session_name")"
+    holder_cmd+=" --label 'Unlocking 1Password environment'"
+    # LAST, for the same reason --worktree is last in claude_cmd: everything
+    # after -- is the command the holder execs, verbatim.
+    holder_cmd+=" --expected 25s -- $claude_cmd"
+    run_in_pane "$claude_pane" "$holder_cmd"
+    deferred_launch "$session_name" "$work_dir" "$claude_pane" "$shell_pane" \
+      "$claude_cmd" "$(basename "$head_bin")" >/dev/null 2>&1 &
   else
-    tmux send-keys -t "$claude_pane" "$claude_cmd" C-m
+    run_in_pane "$claude_pane" "$claude_cmd"
   fi
   tmux select-pane -t "$claude_pane"
 

@@ -29,6 +29,13 @@ func main() {
 		os.Exit(2)
 	}
 
+	// `boot` holds a pane and then execs its trailing command, so it must be
+	// dispatched before flag.Parse() for the same reason `config` is: the
+	// command after `--` is not this binary's to parse.
+	if len(os.Args) > 1 && os.Args[1] == "boot" {
+		os.Exit(runBoot(os.Args[2:], os.Stderr))
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "hook" {
 		if len(os.Args) > 2 && os.Args[2] == "ensure" {
 			os.Exit(runHookEnsure(os.Args[3:], os.Stdout, os.Stderr))
