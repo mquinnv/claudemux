@@ -196,6 +196,13 @@ type model struct {
 	// blocked teardown can back off to teardownBlockedProbeInterval instead of
 	// forking git every second for as long as it sits on screen.
 	teardownProbeAt time.Time
+	// teardownAuto records that this teardown was armed by the head itself,
+	// off a wrap-up command the user typed into the claude pane, rather than
+	// by an `x` press. It only drives the status chip — every transition out
+	// of teardownSent is identical for both paths — but the chip must say so:
+	// `x` becoming live is otherwise unannounced for a user who never pressed
+	// anything.
+	teardownAuto bool
 	// teardownWorkDir / teardownInWorktree are the ready gate's target,
 	// captured from the SESSION's cwd when `x` first arms a teardown — not
 	// from workDir below. The head process is started by bin/claudemux with
@@ -737,8 +744,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rateOK = false
 		}
 		prevKind := m.state.Kind
+		// Captured before the recompute so the arming check below can see the
+		// EDGE rather than the value — see autoArmTeardown.
+		prevPrompt := m.lastPrompt
 		m.recomputeFromEvents(msg.time)
 		m.lastUpdate = msg.time
+		m.autoArmTeardown(prevPrompt, msg.time)
 		if m.shouldSummarize(prevKind, msg.time) {
 			m.summarizing = true
 			return m, m.summarize()
@@ -985,7 +996,7 @@ func truncateRunes(s string, max int) string {
 // teardownChipText renders this model's teardown chip, or "" when there is
 // nothing to show.
 func (m model) teardownChipText(now time.Time) string {
-	return teardownChip(m.teardown, m.teardownBlocked, m.teardownNote, m.teardownNoteAt, now)
+	return teardownChip(m.teardown, m.teardownBlocked, m.teardownAuto, m.teardownNote, m.teardownNoteAt, now)
 }
 
 // renderStatusbar packs state and budget info onto a single
@@ -1373,6 +1384,7 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		m.teardownBlocked = false
 		m.teardownProbeAt = time.Time{}
 		m.teardownNote = ""
+		m.teardownAuto = false
 		m.captureTeardownTarget()
 		if m.teardownCmdText == "" {
 			// Nothing was typed, so there is no submission to wait for; the
@@ -1389,6 +1401,74 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
 	}
 	return m, nil
+}
+
+// autoArmTeardown arms the teardown watch when the user ran the wrap-up
+// command in the claude pane themselves, without pressing `x`.
+//
+// Typing `/done` by hand is the same act as the first `x` press — the wrap-up
+// runs, the worktree goes away — but with nothing watching, so the session is
+// left sitting in a directory that no longer exists. Pressing `x` afterwards
+// would re-type the command and run the whole wrap-up a second time. Arming
+// from the transcript instead makes the two routes converge on the same state
+// machine.
+//
+// prevPrompt is lastPrompt as it stood before this poll's recompute. The check
+// fires on the EDGE, not the value: lastPrompt keeps a prompt until the next
+// one lands, so matching on the value alone would re-arm on every tick for as
+// long as the wrap-up is the newest prompt — including immediately after `esc`
+// cancelled it, which would make cancelling impossible. The cost is that a
+// second identical wrap-up typed back-to-back (same string, no edge) does not
+// re-arm; `x` remains available for that.
+//
+// Only from teardownIdle: a teardown already in flight — including one the
+// head itself started with `x`, whose command reaches the transcript as this
+// very prompt — has its own submission evidence and must not be restarted.
+//
+// Only for worktree sessions, which is the load-bearing restriction. A wrap-up
+// typed by hand is submitted the moment it is seen, so the ready gate reduces
+// to teardownGateOpen's conditions, and for a non-worktree session that is
+// turn-end alone: the gate would open seconds after `/done` finished and one
+// stray `x` would send `/exit` and kill a session nobody asked to kill. In a
+// worktree the gate additionally requires the worktree to be gone, which is
+// real evidence that the wrap-up succeeded and that the user is done. `x` is
+// unchanged for everything else.
+func (m *model) autoArmTeardown(prevPrompt string, now time.Time) {
+	if m.teardown != teardownIdle {
+		return
+	}
+	if m.selfPane == "" {
+		return // not in tmux: nothing to kill, same as teardownKey
+	}
+	if m.lastPrompt == prevPrompt {
+		return
+	}
+	if !teardownCommandTyped(m.lastPrompt, m.teardownCmdText) {
+		return
+	}
+	m.captureTeardownTarget()
+	if !m.teardownInWorktree {
+		// Leave no half-captured target behind: the fields are only read from
+		// teardownSent, but the next `x` press recaptures them anyway, so
+		// clearing them keeps "captured" and "armed" the same thing.
+		m.teardownWorkDir, m.teardownInWorktree = "", false
+		return
+	}
+	m.teardown = teardownSent
+	m.teardownAt = now
+	m.teardownPrompt = m.lastPrompt
+	// Submitted, not pending: the prompt IS the evidence — it only reached the
+	// transcript because claude accepted it. Leaving this false would start the
+	// 10s submit deadline against a command already running and abort the watch
+	// mid-wrap-up with "wrap-up didn't submit". There is likewise nothing to
+	// send, so no teardownSendCmd: typing it again is the duplicate run this
+	// exists to prevent.
+	m.teardownSubmitted = true
+	m.teardownArmedBusy = false
+	m.teardownBlocked = false
+	m.teardownProbeAt = time.Time{}
+	m.teardownNote = ""
+	m.teardownAuto = true
 }
 
 // captureTeardownTarget records the directory the ready gate will watch, and
@@ -1435,6 +1515,7 @@ func (m model) abortTeardown(note string, now time.Time) model {
 	m.teardownProbing = false
 	m.teardownSubmitted = false
 	m.teardownArmedBusy = false
+	m.teardownAuto = false
 	m.teardownNote = note
 	m.teardownNoteAt = now
 	return m

@@ -146,28 +146,79 @@ func TestTeardownGateOpen(t *testing.T) {
 	}
 }
 
+// The matcher behind auto-arming. It decides whether a prompt in the
+// transcript is the configured wrap-up command, and a false positive here arms
+// a sequence that ends in kill-session — so the negatives matter as much as
+// the positives.
+func TestTeardownCommandTyped(t *testing.T) {
+	tests := []struct {
+		name    string
+		prompt  string
+		command string
+		want    bool
+	}{
+		// Claude Code canonicalizes a typed /done to its plugin-qualified
+		// form, so all three spellings reach the transcript in practice.
+		{"bare command", "/done", "/done", true},
+		{"plugin-qualified", "/ameriglide-core:done", "/done", true},
+		{"some other plugin", "/anyplugin:done", "/done", true},
+		{"with arguments", "/ameriglide-core:done --force", "/done", true},
+		{"surrounding whitespace", "  /done\n", "/done", true},
+		// Different command names that merely start or end the same way.
+		{"longer command name", "/done-something", "/done", false},
+		{"command ending in the name", "/undone", "/done", false},
+		{"prose mentioning it", "please run /done for me", "/done", false},
+		{"a path, not a command", "scripts/done", "/done", false},
+		{"a different command", "/clear", "/done", false},
+		// Nothing configured means nothing to recognize: an empty
+		// teardown.command makes `x` a gated exit, with no wrap-up to watch
+		// for.
+		{"empty command", "/done", "", false},
+		{"empty prompt", "", "/done", false},
+		{"non-slash command config", "done", "/done", false},
+		// A configured command can itself be plugin-qualified.
+		{"qualified config, bare prompt", "/done", "/ameriglide-core:done", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := teardownCommandTyped(tt.prompt, tt.command); got != tt.want {
+				t.Errorf("teardownCommandTyped(%q, %q) = %v, want %v",
+					tt.prompt, tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTeardownChip(t *testing.T) {
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name    string
 		phase   teardownPhase
 		blocked bool
+		auto    bool
 		note    string
 		noteAt  time.Time
 		want    string
 	}{
-		{"idle, nothing to say", teardownIdle, false, "", time.Time{}, ""},
-		{"sent", teardownSent, false, "", time.Time{}, "⏻ wrapping up…"},
-		{"sent but blocked", teardownSent, true, "", time.Time{}, "⏻ worktree still present"},
-		{"ready", teardownReady, false, "", time.Time{}, "⏻ press x to tear down"},
-		{"exiting", teardownExiting, false, "", time.Time{}, "⏻ exiting claude…"},
-		{"fresh abort note", teardownIdle, false, "claude didn't exit", now.Add(-2 * time.Second), "⏻ claude didn't exit"},
-		{"expired abort note", teardownIdle, false, "claude didn't exit", now.Add(-6 * time.Second), ""},
-		{"note is ignored mid-teardown", teardownSent, false, "stale", now, "⏻ wrapping up…"},
+		{"idle, nothing to say", teardownIdle, false, false, "", time.Time{}, ""},
+		{"sent", teardownSent, false, false, "", time.Time{}, "⏻ wrapping up…"},
+		{"sent but blocked", teardownSent, true, false, "", time.Time{}, "⏻ worktree still present"},
+		{"ready", teardownReady, false, false, "", time.Time{}, "⏻ press x to tear down"},
+		{"exiting", teardownExiting, false, false, "", time.Time{}, "⏻ exiting claude…"},
+		{"fresh abort note", teardownIdle, false, false, "claude didn't exit", now.Add(-2 * time.Second), "⏻ claude didn't exit"},
+		{"expired abort note", teardownIdle, false, false, "claude didn't exit", now.Add(-6 * time.Second), ""},
+		{"note is ignored mid-teardown", teardownSent, false, false, "stale", now, "⏻ wrapping up…"},
+		// A teardown the head armed itself says so while it waits: the user
+		// pressed nothing, so the arming must not be invisible.
+		{"auto-armed, waiting", teardownSent, false, true, "", time.Time{}, "⏻ watching your wrap-up…"},
+		// A bailed wrap-up means the same thing however it was armed.
+		{"auto-armed but blocked", teardownSent, true, true, "", time.Time{}, "⏻ worktree still present"},
+		// Past the wait the chip describes the action, not its provenance.
+		{"auto-armed, ready", teardownReady, false, true, "", time.Time{}, "⏻ press x to tear down"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := teardownChip(tt.phase, tt.blocked, tt.note, tt.noteAt, now)
+			got := teardownChip(tt.phase, tt.blocked, tt.auto, tt.note, tt.noteAt, now)
 			if got != tt.want {
 				t.Errorf("teardownChip() = %q, want %q", got, tt.want)
 			}
