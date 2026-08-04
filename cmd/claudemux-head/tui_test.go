@@ -1853,6 +1853,164 @@ func teardownTestModel() model {
 	}
 }
 
+// pollPrompt drives one data poll carrying a user prompt, the way a real poll
+// delivers a hand-typed slash command: parseEvent has already unwrapped
+// <command-name> into clean text by the time it reaches the model, so the
+// prompt arrives as the canonicalized string ("/ameriglide-core:done"), not as
+// raw XML. rateLimitErr is set so the poll does not have to carry a plausible
+// RateLimits payload — nothing in the teardown path reads it.
+func pollPrompt(m model, prompt string, now time.Time) (model, tea.Cmd) {
+	msg := dataMsg{time: now, rateLimitErr: errors.New("no rate limits in this test")}
+	if prompt != "" {
+		msg.newEvents = []Event{{
+			Type:      "user",
+			UserText:  prompt,
+			Timestamp: now.Format(time.RFC3339),
+		}}
+	}
+	next, cmd := m.Update(msg)
+	return next.(model), cmd
+}
+
+// A wrap-up command typed into the claude pane by hand arms the watch by
+// itself. Claude Code canonicalizes slash commands, so the transcript may
+// record any of these spellings for the same `/done`.
+func TestTeardownAutoArmsFromTypedCommand(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{"bare", "/done", true},
+		{"plugin-qualified", "/ameriglide-core:done", true},
+		{"another plugin", "/anyplugin:done", true},
+		{"a different, longer command", "/done-something", false},
+		{"a command ending in the name", "/undone", false},
+		{"ordinary prompt", "fix the flaky test", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now()
+			got, cmd := pollPrompt(teardownTestModel(), tt.prompt, now)
+			if !tt.want {
+				if got.teardown != teardownIdle {
+					t.Fatalf("phase = %v, want teardownIdle for %q", got.teardown, tt.prompt)
+				}
+				return
+			}
+			if got.teardown != teardownSent {
+				t.Fatalf("phase = %v, want teardownSent for %q", got.teardown, tt.prompt)
+			}
+			// The command is already running. Re-sending it is the duplicate
+			// wrap-up this feature exists to prevent.
+			if cmd != nil {
+				t.Error("a command was issued; nothing should be typed into the pane")
+			}
+			// Without this the 10s submit deadline runs against a wrap-up
+			// that has already been submitted and aborts mid-run.
+			if !got.teardownSubmitted {
+				t.Error("submitted = false; the prompt in the transcript IS the submission")
+			}
+			if !got.teardownAuto {
+				t.Error("auto = false; the chip would not say the head armed itself")
+			}
+			if got.teardownWorkDir != "/tmp/repo/.claude/worktrees/wt" {
+				t.Errorf("gate target = %q, want the session's worktree", got.teardownWorkDir)
+			}
+			if !got.teardownInWorktree {
+				t.Error("inWorktree = false; the gate would rest on turn-end alone")
+			}
+		})
+	}
+}
+
+// Worktree sessions only. Without a worktree to watch, teardownGateOpen
+// reduces to turn-end, which lands seconds after the wrap-up finishes — one
+// stray `x` would then send /exit and kill a session nobody armed by hand.
+func TestTeardownAutoArmSkipsNonWorktreeSession(t *testing.T) {
+	m := teardownTestModel()
+	m.sessionCwd = filepath.Join(t.TempDir(), "plain-checkout")
+	got, cmd := pollPrompt(m, "/done", time.Now())
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle outside a worktree", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("a command was issued for a session that must not auto-arm")
+	}
+	if got.teardownWorkDir != "" || got.teardownInWorktree {
+		t.Errorf("half-captured gate target left behind: %q / %v",
+			got.teardownWorkDir, got.teardownInWorktree)
+	}
+}
+
+// The `x` path already works. Seeing its own wrap-up land in the transcript
+// must not restart it — the re-arm would reset teardownAt and drop the
+// evidence the running teardown had already gathered.
+func TestTeardownAutoArmIgnoredWhenAlreadyArmed(t *testing.T) {
+	for _, phase := range []teardownPhase{teardownSent, teardownReady, teardownExiting} {
+		m := teardownTestModel()
+		m.teardown = phase
+		armedAt := time.Now().Add(-3 * time.Second)
+		m.teardownAt = armedAt
+		got, _ := pollPrompt(m, "/ameriglide-core:done", time.Now())
+		if got.teardown != phase {
+			t.Errorf("phase = %v, want %v (unchanged)", got.teardown, phase)
+		}
+		if got.teardownAuto {
+			t.Errorf("phase %v: auto = true; this teardown was armed by a key press", phase)
+		}
+		if !got.teardownAt.Equal(armedAt) {
+			t.Errorf("phase %v: teardownAt moved; the deadline was restarted", phase)
+		}
+	}
+}
+
+// lastPrompt keeps its value across every poll until a newer prompt lands, so
+// arming must fire on the edge. Otherwise a cancelled teardown re-arms on the
+// very next tick and `esc` can never take effect.
+func TestTeardownAutoArmsOncePerSubmission(t *testing.T) {
+	now := time.Now()
+	armed, _ := pollPrompt(teardownTestModel(), "/done", now)
+	if armed.teardown != teardownSent {
+		t.Fatalf("phase = %v, want teardownSent", armed.teardown)
+	}
+	armedAt := armed.teardownAt
+
+	// Further polls with no new prompt must leave the armed teardown alone.
+	still := armed
+	for i := 0; i < 3; i++ {
+		still, _ = pollPrompt(still, "", now.Add(time.Duration(i+1)*time.Second))
+		if !still.teardownAt.Equal(armedAt) {
+			t.Fatalf("poll %d re-armed: teardownAt moved", i+1)
+		}
+	}
+
+	// After esc, the same unchanged lastPrompt must not arm it again.
+	next, _ := still.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	cancelled := next.(model)
+	if cancelled.teardown != teardownIdle {
+		t.Fatalf("esc left phase = %v", cancelled.teardown)
+	}
+	again, _ := pollPrompt(cancelled, "", now.Add(10*time.Second))
+	if again.teardown != teardownIdle {
+		t.Errorf("phase = %v after cancel; a stale lastPrompt re-armed the teardown", again.teardown)
+	}
+	if again.teardownAuto {
+		t.Error("auto = true after cancel")
+	}
+}
+
+// Outside tmux there is no session to kill, so there is nothing to watch for
+// either — the same reason `x` is inert there.
+func TestTeardownAutoArmInertOutsideTmux(t *testing.T) {
+	m := teardownTestModel()
+	m.selfPane = ""
+	got, _ := pollPrompt(m, "/done", time.Now())
+	if got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle outside tmux", got.teardown)
+	}
+}
+
 func TestTeardownKeyArmsFromIdle(t *testing.T) {
 	m := teardownTestModel()
 	got, cmd := m.teardownKey()

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -190,17 +191,76 @@ func teardownGateOpen(kind StateKind, inWorktree, worktreeGone bool) bool {
 	return worktreeGone
 }
 
+// teardownCommandSegment reduces a slash command to the part that identifies
+// it: everything after the last "/" or ":".
+//
+// Claude Code canonicalizes slash commands to their plugin-qualified form, so
+// the `/done` a user types is recorded in the transcript as
+// `/ameriglide-core:done`. Comparing whole strings would miss that, and
+// comparing prefixes would match `/done-something`. The final segment is the
+// command's own name in both spellings.
+func teardownCommandSegment(s string) string {
+	if i := strings.LastIndexAny(s, "/:"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// teardownCommandTyped reports whether prompt is the user invoking command by
+// hand — the signal that a wrap-up is under way that the head did not start.
+//
+// Both sides are reduced to their last segment (see teardownCommandSegment),
+// so `/done`, `/ameriglide-core:done` and `/anyplugin:done` all match a
+// configured `/done`, while `/done-something` and `/undone` do not: their
+// segments are different command names, not different spellings of the same
+// one.
+//
+// Only the prompt's first whitespace-delimited token is considered, because a
+// slash command may carry arguments and `/done --force` is still the wrap-up.
+// Both sides must begin with "/" so that ordinary prose can never match: a
+// sentence mentioning a path like `scripts/done` reduces to the same segment,
+// but it is not a command and must not arm a kill-session.
+func teardownCommandTyped(prompt, command string) bool {
+	command = strings.TrimSpace(command)
+	if !strings.HasPrefix(command, "/") {
+		return false // unset, or not a slash command: nothing to recognize
+	}
+	want := teardownCommandSegment(command)
+	if want == "" {
+		return false
+	}
+	prompt = strings.TrimSpace(prompt)
+	if !strings.HasPrefix(prompt, "/") {
+		return false
+	}
+	if i := strings.IndexFunc(prompt, unicode.IsSpace); i >= 0 {
+		prompt = prompt[:i]
+	}
+	return teardownCommandSegment(prompt) == want
+}
+
 // teardownChip renders the status-line chip for a teardown, or "" when there
 // is nothing to show.
 //
 // An abort note is shown only from teardownIdle: it explains why a teardown
 // stopped, so a note left over from an earlier attempt must never shadow a
 // live phase.
-func teardownChip(p teardownPhase, blocked bool, note string, noteAt, now time.Time) string {
+//
+// auto marks a teardown the head armed itself, off a wrap-up command the user
+// typed into the claude pane. It gets its own wording for the waiting phase so
+// the arming is never invisible: the user did not press `x`, so without it the
+// first thing they would learn about the head watching is `press x to tear
+// down` appearing unbidden. The later phases read the same either way —
+// `press x to tear down` and `exiting claude…` describe the action, not who
+// started it, and a blocked reading means the same thing in both paths.
+func teardownChip(p teardownPhase, blocked, auto bool, note string, noteAt, now time.Time) string {
 	switch p {
 	case teardownSent:
 		if blocked {
 			return "⏻ worktree still present"
+		}
+		if auto {
+			return "⏻ watching your wrap-up…"
 		}
 		return "⏻ wrapping up…"
 	case teardownReady:
