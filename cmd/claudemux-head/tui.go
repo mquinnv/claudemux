@@ -348,6 +348,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// as "the prompt changed, so the wrap-up must have submitted" — silently
 	// certifying a submission that never happened and removing the only bound
 	// on how long teardownSent can sit there. Aborting says why instead.
+	teardownLogf("switchSession phase=%v from=%s to=%s", m.teardown, m.jsonlPath, jsonlPath)
 	if m.teardown != teardownIdle {
 		*m = m.abortTeardown("session rotated", now)
 	}
@@ -491,14 +492,21 @@ func (m model) pollData() tea.Cmd {
 		// following or nothing newer exists.
 		activeJSONL := ""
 		if follow {
-			if mapped, _, _, ok := mappedTranscript(selfPane, paneDir); ok {
+			if mapped, cwd, pane, ok := mappedTranscript(selfPane, paneDir); ok {
 				// mapped is "" when the pane's live cwd is known but its
 				// transcript isn't yet — keep the current binding then rather
 				// than adopting an empty path.
 				if mapped != "" && mapped != jsonlPath {
+					teardownLogf("rotate via=mapped pane=%s cwd=%s from=%s to=%s",
+						pane, cwd, jsonlPath, mapped)
 					activeJSONL = mapped
 				}
 			} else if mra, ok := mostRecentlyActiveSession(filepath.Dir(jsonlPath)); ok && mra != jsonlPath {
+				// mappedTranscript said "no claude pane at all" — a wedged or
+				// slow tmux (listPanes has a 2s deadline) looks identical to a
+				// genuinely absent pane here, and this fallback then adopts
+				// whichever transcript in the dir was touched last.
+				teardownLogf("rotate via=mru-fallback from=%s to=%s", jsonlPath, mra)
 				activeJSONL = mra
 			}
 		}
@@ -1430,6 +1438,8 @@ func (m model) teardownProbeDue(now time.Time) bool {
 // already happened is undone — the wrap-up command has run, and only this
 // program's own sequencing stops.
 func (m model) abortTeardown(note string, now time.Time) model {
+	teardownLogf("abort phase=%v note=%q submitted=%v blocked=%v jsonl=%s",
+		m.teardown, note, m.teardownSubmitted, m.teardownBlocked, m.jsonlPath)
 	m.teardown = teardownIdle
 	m.teardownBlocked = false
 	m.teardownProbing = false
