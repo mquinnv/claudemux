@@ -84,6 +84,14 @@ func claudePaneCandidates(listing, self string) []string {
 // pane per line as "#{pane_id} #{window_id} #{pane_current_command}
 // #{pane_current_path}". pane_current_path is last because it is the only field
 // that can contain spaces. Empty string outside tmux or on error.
+//
+// Dead panes are filtered out by tmux itself. bin/claudemux sets
+// remain-on-exit=failed on the claude pane, so a claude that exited non-zero
+// leaves its pane on screen with the error — and tmux keeps reporting "claude"
+// as that pane's pane_current_command. Without the filter the head would bind
+// to a corpse, and a teardown's wait for claude to be gone would never finish.
+// Excluding dead panes restores exactly the pre-command-pane semantics: a pane
+// that is no longer running claude is not a candidate.
 func listPanes(self string) string {
 	if self == "" {
 		return ""
@@ -94,6 +102,7 @@ func listPanes(self string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-s", "-t", self,
+		"-f", "#{==:#{pane_dead},0}",
 		"-F", "#{pane_id} #{window_id} #{pane_current_command} #{pane_current_path}").Output()
 	if err != nil {
 		return ""

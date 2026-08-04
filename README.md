@@ -29,6 +29,17 @@ You run `claudemux`; `claudemux-head` is what it draws.
 `claudemux-head` gets a fixed 4-row pane at the top left (it re-pins itself to 4 rows on
 every resize), `claude` runs below it, and a shell takes the right 30% of the window.
 
+The head and `claude` panes **run their program directly** — they are not shells with a
+command typed into them, so a new session never shows a prompt or an echoed command. Two
+consequences: exiting `claude` closes its pane instead of dropping you at a prompt (the
+shell pane is there for that), and a pane whose program *fails* is kept on screen with its
+error rather than vanishing.
+
+In a project with an `op_env`, the `claude` pane is held by a waiting screen while
+1Password decrypts the environment — a read takes around 25 seconds — and is then replaced
+by `claude` itself, with the secrets in its environment. Pressing any key skips the wait
+and starts `claude` immediately, *without* those secrets.
+
 ## Install
 
 **Homebrew** (recommended — it installs `tmux`, `jq`, and `git` for you):
@@ -83,7 +94,7 @@ they're your responsibility:
 | Tool | Required by | Without it |
 |---|---|---|
 | `tmux` | `claudemux` | `claudemux` cannot run at all |
-| `claudemux-head` on `PATH` | `claudemux` | the head pane starts but the command isn't found |
+| `claudemux-head` on `PATH` | `claudemux` | the head pane dies at "command not found" and is left on screen saying so; an `op_env` session shows that in place of its waiting screen, then still starts `claude` once the secrets land |
 | `jq` | `hooks/claudemux-map.sh` | the hook exits silently; see below |
 | `git` | `claudemux` (1Password org inference) | `op_account` in `.project.yml` or `onepassword.default_account` still work |
 | `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` only works for literal directories, not `z`-style queries |
