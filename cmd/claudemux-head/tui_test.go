@@ -1924,6 +1924,39 @@ func TestTeardownAutoArmsFromTypedCommand(t *testing.T) {
 	}
 }
 
+// Claude Code writes a `last-prompt` bookkeeping event immediately after a
+// bare slash-command turn, and that event carries the PREVIOUS typed prompt —
+// the command itself never appears in one. Both land in the same poll batch,
+// so a newest-first scan that accepts last-prompt events comes back with the
+// older text and the wrap-up is never seen. Observed verbatim in a real
+// transcript (Claude Code 2.1.220): a `/ameriglide-core:done` user turn
+// followed five lines later by `last-prompt: "ok, so do your cleaner fix"`.
+func TestTeardownAutoArmSurvivesLastPromptShadow(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	msg := dataMsg{time: now, rateLimitErr: errors.New("no rate limits in this test")}
+	msg.newEvents = []Event{
+		{Type: "user", UserText: "/ameriglide-core:done", Timestamp: now.Format(time.RFC3339)},
+		{Type: "last-prompt", UserText: "ok, so do your cleaner fix"},
+	}
+	next, cmd := m.Update(msg)
+	got := next.(model)
+	if got.teardown != teardownSent {
+		t.Fatalf("phase = %v, want teardownSent; the wrap-up was shadowed", got.teardown)
+	}
+	if !got.teardownAuto {
+		t.Error("auto = false; the head armed itself and the chip must say so")
+	}
+	if cmd != nil {
+		t.Error("a command was issued; the wrap-up is already running")
+	}
+	// The status line still wants the shadow: it is what Claude Code considers
+	// the session's live prompt, and a bare command says nothing about it.
+	if got.lastPrompt != "ok, so do your cleaner fix" {
+		t.Errorf("lastPrompt = %q, want the last-prompt event's text", got.lastPrompt)
+	}
+}
+
 // Worktree sessions only. Without a worktree to watch, teardownGateOpen
 // reduces to turn-end, which lands seconds after the wrap-up finishes — one
 // stray `x` would then send /exit and kill a session nobody armed by hand.
@@ -2239,17 +2272,37 @@ func TestTeardownSubmitObservedViaBusyState(t *testing.T) {
 	})
 }
 
-// A new prompt in the transcript is the other piece of evidence.
+// A new prompt in the transcript is the other piece of evidence. It is read
+// off lastTyped, not lastPrompt: the wrap-up is a bare slash command, and
+// lastPrompt is shadowed back to the previous prompt in the same poll batch.
 func TestTeardownSubmitObservedViaNewPrompt(t *testing.T) {
 	now := time.Now()
 	m := teardownTestModel()
 	m.teardown = teardownSent
 	m.teardownAt = now.Add(-time.Second)
 	m.teardownPrompt = "earlier thing"
-	m.lastPrompt = "/done"
+	m.lastTyped = "/done"
+	m.lastPrompt = "earlier thing" // the shadow; must not mask the evidence
 	next, _ := m.Update(tickMsg(now))
 	if got := next.(model); !got.teardownSubmitted {
 		t.Error("submitted = false despite a new prompt landing")
+	}
+}
+
+// The mirror image: nothing new was typed, so nothing is certified. Guards the
+// test above against passing on a zero-valued lastTyped rather than on a real
+// change.
+func TestTeardownSubmitNotObservedWithoutNewPrompt(t *testing.T) {
+	now := time.Now()
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownAt = now.Add(-time.Second)
+	m.teardownPrompt = "earlier thing"
+	m.lastTyped = "earlier thing"
+	m.lastPrompt = "a last-prompt event repeating something else"
+	next, _ := m.Update(tickMsg(now))
+	if got := next.(model); got.teardownSubmitted {
+		t.Error("submitted = true; nothing new was typed")
 	}
 }
 
@@ -2567,7 +2620,7 @@ func TestUnblockedTeardownProbesEveryTick(t *testing.T) {
 }
 
 // A session rotation must abort an armed teardown rather than let it drift.
-// switchSession recomputes lastPrompt from the NEW session's transcript; the
+// switchSession recomputes lastTyped from the NEW session's transcript; the
 // next tick would read that change as proof the wrap-up submitted, removing the
 // only bound on how long teardownSent can sit armed.
 func TestSwitchSessionAbortsArmedTeardown(t *testing.T) {
@@ -2582,7 +2635,7 @@ func TestSwitchSessionAbortsArmedTeardown(t *testing.T) {
 	m.jsonlPath = filepath.Join(dir, "old-sess.jsonl")
 	m.teardown = teardownSent
 	m.teardownPrompt = "the prompt the wrap-up was armed against"
-	m.lastPrompt = m.teardownPrompt
+	m.lastTyped = m.teardownPrompt
 
 	m.switchSession(newp, now)
 

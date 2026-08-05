@@ -141,9 +141,13 @@ type model struct {
 	contextPct  float64
 	firstPrompt string
 	lastPrompt  string
-	summary     Summary
-	rateLimits  RateLimits
-	rateOK      bool
+	// lastTyped is the newest prompt from a real `user` turn — see
+	// lastTypedPrompt. Only the teardown watch reads it; everything
+	// user-facing uses lastPrompt.
+	lastTyped  string
+	summary    Summary
+	rateLimits RateLimits
+	rateOK     bool
 
 	// UI
 	lastUpdate time.Time
@@ -177,9 +181,14 @@ type model struct {
 	// teardownAt stamps the current phase, so the submit and exit deadlines
 	// measure from the transition rather than from process start.
 	teardownAt time.Time
-	// teardownPrompt is lastPrompt as it stood when the wrap-up was sent. A
-	// change in lastPrompt is one of the two signals that the keystrokes
+	// teardownPrompt is lastTyped as it stood when the wrap-up was sent. A
+	// change in lastTyped is one of the two signals that the keystrokes
 	// actually reached claude (the other is the session going busy).
+	//
+	// lastTyped rather than lastPrompt because the wrap-up is a bare slash
+	// command, and those are shadowed out of lastPrompt within the same poll
+	// batch — see lastTypedPrompt. Against lastPrompt this signal could never
+	// fire for a `/done`, leaving the busy edge to carry the whole burden.
 	teardownPrompt    string
 	teardownSubmitted bool
 	// teardownArmedBusy records that claude was already mid-turn when the
@@ -319,6 +328,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 		m.contextPct = contextPercent(m.modelName, *last)
 	}
 	m.lastPrompt = lastUserPrompt(m.allEvents)
+	m.lastTyped = lastTypedPrompt(m.allEvents)
 	if m.reader != nil {
 		m.firstPrompt = m.reader.FirstPrompt()
 	}
@@ -446,6 +456,28 @@ func lastUserPrompt(events []Event) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		if genuinePrompt(events[i]) {
 			return events[i].UserText
+		}
+	}
+	return ""
+}
+
+// lastTypedPrompt returns the text of the most recent thing the user actually
+// typed, considering only real `user` turns.
+//
+// This is deliberately narrower than lastUserPrompt, which also accepts Claude
+// Code's `last-prompt` bookkeeping events. Those are written for the status
+// line's benefit and never carry a bare slash command: invoking `/done` emits
+// a `user` turn holding the command, immediately followed by a `last-prompt`
+// event repeating the PREVIOUS typed prompt. Both arrive in the same poll
+// batch, so a newest-first scan that accepts last-prompt events reports the
+// older text and the command is never observable at all — the bug that made
+// autoArmTeardown dead code. Restricting the scan to `user` turns makes the
+// command visible; the display path keeps the broader scan, which is right for
+// it (a bare command says nothing about what the session is doing).
+func lastTypedPrompt(events []Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if e := events[i]; e.Type == "user" && genuinePrompt(e) {
+			return e.UserText
 		}
 	}
 	return ""
@@ -695,7 +727,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.teardownArmedBusy = false
 			}
 			if !m.teardownSubmitted &&
-				(m.lastPrompt != m.teardownPrompt ||
+				(m.lastTyped != m.teardownPrompt ||
 					(!teardownTurnEnded(m.state.Kind) && !m.teardownArmedBusy)) {
 				m.teardownSubmitted = true
 			}
@@ -754,10 +786,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevKind := m.state.Kind
 		// Captured before the recompute so the arming check below can see the
 		// EDGE rather than the value — see autoArmTeardown.
-		prevPrompt := m.lastPrompt
+		prevTyped := m.lastTyped
 		m.recomputeFromEvents(msg.time)
 		m.lastUpdate = msg.time
-		m.autoArmTeardown(prevPrompt, msg.time)
+		m.autoArmTeardown(prevTyped, msg.time)
 		if m.shouldSummarize(prevKind, msg.time) {
 			m.summarizing = true
 			return m, m.summarize()
@@ -1387,7 +1419,7 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		}
 		m.teardown = teardownSent
 		m.teardownAt = time.Now()
-		m.teardownPrompt = m.lastPrompt
+		m.teardownPrompt = m.lastTyped
 		m.teardownArmedBusy = !teardownTurnEnded(m.state.Kind)
 		m.teardownBlocked = false
 		m.teardownProbeAt = time.Time{}
@@ -1421,8 +1453,14 @@ func (m model) teardownKey() (model, tea.Cmd) {
 // from the transcript instead makes the two routes converge on the same state
 // machine.
 //
-// prevPrompt is lastPrompt as it stood before this poll's recompute. The check
-// fires on the EDGE, not the value: lastPrompt keeps a prompt until the next
+// The signal is lastTyped, NOT lastPrompt. lastPrompt also accepts Claude
+// Code's `last-prompt` bookkeeping events, which are written immediately after
+// a bare slash-command turn and carry the previous typed prompt — see
+// lastTypedPrompt. Reading lastPrompt here meant the wrap-up was shadowed
+// within the same poll batch and this function never fired at all.
+//
+// prevTyped is lastTyped as it stood before this poll's recompute. The check
+// fires on the EDGE, not the value: lastTyped keeps a prompt until the next
 // one lands, so matching on the value alone would re-arm on every tick for as
 // long as the wrap-up is the newest prompt — including immediately after `esc`
 // cancelled it, which would make cancelling impossible. The cost is that a
@@ -1441,30 +1479,34 @@ func (m model) teardownKey() (model, tea.Cmd) {
 // worktree the gate additionally requires the worktree to be gone, which is
 // real evidence that the wrap-up succeeded and that the user is done. `x` is
 // unchanged for everything else.
-func (m *model) autoArmTeardown(prevPrompt string, now time.Time) {
+func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 	if m.teardown != teardownIdle {
 		return
 	}
 	if m.selfPane == "" {
 		return // not in tmux: nothing to kill, same as teardownKey
 	}
-	if m.lastPrompt == prevPrompt {
+	if m.lastTyped == prevTyped {
 		return
 	}
-	if !teardownCommandTyped(m.lastPrompt, m.teardownCmdText) {
+	if !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
 		return
 	}
 	m.captureTeardownTarget()
 	if !m.teardownInWorktree {
+		teardownLogf("auto-arm declined prompt=%q reason=not-a-worktree cwd=%s",
+			m.lastTyped, m.teardownWorkDir)
 		// Leave no half-captured target behind: the fields are only read from
 		// teardownSent, but the next `x` press recaptures them anyway, so
 		// clearing them keeps "captured" and "armed" the same thing.
 		m.teardownWorkDir, m.teardownInWorktree = "", false
 		return
 	}
+	teardownLogf("auto-arm prompt=%q cwd=%s jsonl=%s",
+		m.lastTyped, m.teardownWorkDir, m.jsonlPath)
 	m.teardown = teardownSent
 	m.teardownAt = now
-	m.teardownPrompt = m.lastPrompt
+	m.teardownPrompt = m.lastTyped
 	// Submitted, not pending: the prompt IS the evidence — it only reached the
 	// transcript because claude accepted it. Leaving this false would start the
 	// 10s submit deadline against a command already running and abort the watch
