@@ -1753,6 +1753,42 @@ func TestKeyRUnpinsAndReapplies(t *testing.T) {
 	}
 }
 
+// `R` restarts the head in place. It quits like `q` — main re-execs after the
+// TUI has restored the terminal — so the only thing distinguishing it from a
+// plain quit is the flag main reads afterwards.
+func TestKeyShiftRRequestsRestart(t *testing.T) {
+	m := model{ready: true, width: 80, height: 4}
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	if !got.(model).restart {
+		t.Error("restart = false; main would let the pane close instead of re-execing")
+	}
+	if cmd == nil {
+		t.Fatal("R produced no command; the TUI never exits and the re-exec never happens")
+	}
+	if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
+		t.Errorf("R issued %T, want tea.QuitMsg", cmd())
+	}
+	// Lowercase r is the tab pin and must be untouched by the new binding.
+	if got.(model).tabPinned {
+		t.Error("R pinned the tab; it took the r branch")
+	}
+}
+
+// Every other way out must leave the flag clear, or quitting the head would
+// resurrect it forever and `q` would be impossible.
+func TestQuitKeysDoNotRequestRestart(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'q'}},
+		{Type: tea.KeyCtrlC},
+		{Type: tea.KeyEsc},
+	} {
+		got, _ := model{ready: true, width: 80, height: 4}.Update(key)
+		if got.(model).restart {
+			t.Errorf("%s set restart; the head would never stay closed", key)
+		}
+	}
+}
+
 // r must not quit. It shares the key switch with q/ctrl+c/esc, and a fallthrough
 // bug there would take the pane down on every reset. Update always returns a
 // model even when quitting, so assert on the command: run it and confirm it does

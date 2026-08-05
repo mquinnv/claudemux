@@ -171,6 +171,10 @@ type model struct {
 	// re-renders the session's identity from scratch, and a pin that outlived
 	// the process would be a setting rather than a gesture.
 	tabPinned bool
+	// restart records that the user asked for a re-exec rather than a quit.
+	// The TUI exits either way — main reads this once p.Run() has returned and
+	// restored the terminal, then replaces the process. See restartSelf.
+	restart bool
 	// Teardown state: `x` wraps the session up and kills its tmux session.
 	// See teardown.go. Like tabPinned, this is deliberately not persisted —
 	// an armed kill that survived a head restart would be a trap.
@@ -674,6 +678,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.teardown != teardownIdle {
 				return m.abortTeardown("", time.Now()), nil
 			}
+			return m, tea.Quit
+		case "R":
+			// Restart in place: quit, and let main re-exec the binary from
+			// disk. Without it the only way to pick up a rebuilt head is to
+			// quit — which closes the pane, since remain-on-exit is `failed`
+			// and a clean quit is not a failure — and relaunch the session.
+			//
+			// Deliberately allowed from any teardown phase. Teardown state is
+			// not persisted across a restart by design (see the teardown
+			// fields), so this disarms rather than carries anything over —
+			// the safe direction for a key sequence that ends in kill-session.
+			m.restart = true
 			return m, tea.Quit
 		case "x":
 			return m.teardownKey()

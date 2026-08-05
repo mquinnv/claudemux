@@ -242,6 +242,18 @@ but they stop renaming the window — and the status pane shows `⬚ pinned`. Pr
 Sessions cloned with `-n` share one `.project.yml`, so `remix-2` restores to
 `Remix 2` rather than colliding with `remix`'s `Remix`.
 
+**Restarting the status pane.** Press `R` (capital) to restart it in place. The
+process re-execs the `claudemux-head` binary as it stands on disk right now, so
+this is how you pick up a rebuild or an edited `config.yml` without touching the
+session — the pane keeps its size and position, and `claude` is never disturbed.
+
+`q`, `ctrl+c` and `esc` quit instead, and quitting **closes the pane**: the head
+is the pane's program, and a clean exit is not the failure that
+`remain-on-exit` keeps a pane open for. Nothing else is harmed — `claude` and
+the shell pane carry on — but the only way back is a new session, which is what
+`R` exists to avoid. An armed teardown does not survive a restart; it disarms,
+the same as it does across any other head restart.
+
 ### Tearing down a session
 
 When the work is finished, click the status pane and press `x`. It runs the whole

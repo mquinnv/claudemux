@@ -87,8 +87,19 @@ func main() {
 	m := newModel(cfg, jsonlPath, sessionID, followActive)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// `R` asks for a re-exec. It happens HERE, not in Update, so the terminal
+	// is already restored when the replacement starts — see restartSelf.
+	// restartSelf only returns if the exec failed, and it has already said
+	// why; exiting non-zero then keeps the pane open (remain-on-exit=failed)
+	// so the message is readable instead of vanishing with the pane.
+	if fm, ok := final.(model); ok && fm.restart {
+		restartSelf(os.Stderr)
 		os.Exit(1)
 	}
 }
