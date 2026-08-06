@@ -12,15 +12,32 @@ import (
 	"time"
 )
 
-// hookScriptName is the hook's filename, identical wherever it is installed.
-const hookScriptName = "claudemux-map.sh"
+// hookScript is one script this tool installs and the Claude Code events it
+// registers on.
+type hookScript struct {
+	name   string
+	events []string
+}
 
-// hookEvents are the two Claude Code events the pane map depends on.
-// SessionStart records the mapping when a pane first opens; UserPromptSubmit
-// keeps it current across /clear, resume, and compaction, which rotate the
-// transcript file underneath a live session. Registering only one leaves the
-// map stale in exactly the cases users notice.
-var hookEvents = []string{"SessionStart", "UserPromptSubmit"}
+// hookScripts are every script claudemux installs.
+//
+// claudemux-map.sh records which session lives in which tmux pane. SessionStart
+// records the mapping when a pane first opens; UserPromptSubmit keeps it
+// current across /clear, resume, and compaction, which rotate the transcript
+// file underneath a live session. Registering only one leaves the map stale in
+// exactly the cases users notice.
+//
+// claudemux-worktree.sh asks the model to create a task-named worktree. It is
+// UserPromptSubmit ONLY: at SessionStart there is no prompt yet, so there is
+// nothing to name a worktree after — which is the entire problem it exists to
+// fix.
+var hookScripts = []hookScript{
+	{name: "claudemux-map.sh", events: []string{"SessionStart", "UserPromptSubmit"}},
+	{name: "claudemux-worktree.sh", events: []string{"UserPromptSubmit"}},
+}
+
+// hookScriptName is the pane-map script's filename, which `--script` overrides.
+const hookScriptName = "claudemux-map.sh"
 
 // siblingOfExecutable joins name onto the directory holding this binary, with
 // symlinks resolved first because Homebrew puts the real files in libexec and
@@ -35,12 +52,6 @@ func siblingOfExecutable(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(filepath.Dir(resolved), name), nil
-}
-
-// hookScriptSource finds the claudemux-map.sh that shipped with this binary:
-// every install channel lays the binary and the scripts down as siblings.
-func hookScriptSource() (string, error) {
-	return siblingOfExecutable(hookScriptName)
 }
 
 // runHookEnsure implements `claudemux-head hook ensure`.
@@ -60,13 +71,17 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	src := *scriptFlag
-	if src == "" {
-		var err error
-		if src, err = hookScriptSource(); err != nil {
-			fmt.Fprintf(stderr, "claudemux: locating %s: %v\n", hookScriptName, err)
-			return 4
+	// srcFor returns where to read a shipped script from. --script overrides
+	// only claudemux-map.sh, so existing callers (and tests) that point it at a
+	// stub keep working while the other scripts resolve as siblings.
+	srcFor := func(name string) (string, error) {
+		if name == hookScriptName && *scriptFlag != "" {
+			return *scriptFlag, nil
 		}
+		if *scriptFlag != "" {
+			return filepath.Join(filepath.Dir(*scriptFlag), name), nil
+		}
+		return siblingOfExecutable(name)
 	}
 
 	home, err := os.UserHomeDir()
@@ -77,11 +92,6 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 	claudeDir := filepath.Join(home, ".claude")
 	hooksDir := filepath.Join(claudeDir, "hooks")
 	settingsPath := filepath.Join(claudeDir, "settings.json")
-
-	// The registered command points HERE, not at wherever the package was
-	// installed: a Homebrew libexec path would be baked into settings.json and
-	// break on the next upgrade.
-	dst := filepath.Join(hooksDir, hookScriptName)
 
 	// Read settings BEFORE copying anything, so a malformed file leaves the
 	// whole operation a no-op rather than a half-done one.
@@ -104,13 +114,28 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "claudemux: creating %s: %v\n", hooksDir, err)
 		return 4
 	}
-	if err := copyExecutable(src, dst); err != nil {
-		fmt.Fprintf(stderr, "claudemux: installing hook script: %v\n", err)
-		return 4
-	}
 
-	if !addHookEntries(settings, dst) {
-		return 0 // already registered on both events: no write, stay silent
+	changed := false
+	for _, hs := range hookScripts {
+		src, err := srcFor(hs.name)
+		if err != nil {
+			fmt.Fprintf(stderr, "claudemux: locating %s: %v\n", hs.name, err)
+			return 4
+		}
+		// The registered command points HERE, not at wherever the package was
+		// installed: a Homebrew libexec path would be baked into settings.json
+		// and break on the next upgrade.
+		dst := filepath.Join(hooksDir, hs.name)
+		if err := copyExecutable(src, dst); err != nil {
+			fmt.Fprintf(stderr, "claudemux: installing %s: %v\n", hs.name, err)
+			return 4
+		}
+		if addHookEntries(settings, dst, hs.events) {
+			changed = true
+		}
+	}
+	if !changed {
+		return 0 // every script registered on every event: no write, stay silent
 	}
 
 	if existing != nil {
@@ -132,24 +157,24 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 		return 4
 	}
 
-	fmt.Fprintf(stdout, "claudemux: registered the pane-map hook in %s\n", settingsPath)
+	fmt.Fprintf(stdout, "claudemux: registered claudemux hooks in %s\n", settingsPath)
 	return 0
 }
 
-// addHookEntries adds our command to any hookEvents that lack it, mutating
+// addHookEntries adds our command to any events that lack it, mutating
 // settings in place. Reports whether anything changed.
 //
 // It walks the generic map rather than a typed struct so that every key we do
 // not model — the user's permissions, model, statusLine, other tools' hooks —
 // round-trips untouched.
-func addHookEntries(settings map[string]any, command string) bool {
+func addHookEntries(settings map[string]any, command string, events []string) bool {
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
 
 	changed := false
-	for _, event := range hookEvents {
+	for _, event := range events {
 		groups, _ := hooks[event].([]any)
 		if hasHookCommand(groups, command) {
 			continue

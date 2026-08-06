@@ -25,14 +25,21 @@ func writeSettings(t *testing.T, contents string) string {
 	return p
 }
 
-// stubScript creates a fake claudemux-map.sh for --script to point at.
+// stubScript creates fake shipped scripts in one directory and returns the
+// path to claudemux-map.sh, for --script to point at. Every script in
+// hookScripts is written, because hook ensure resolves the others as siblings
+// of the --script path — a directory holding only the map script is not a
+// layout that occurs in any real install.
 func stubScript(t *testing.T) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "claudemux-map.sh")
-	if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	for _, hs := range hookScripts {
+		p := filepath.Join(dir, hs.name)
+		if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return p
+	return filepath.Join(dir, hookScriptName)
 }
 
 func readSettings(t *testing.T, path string) map[string]any {
@@ -77,14 +84,25 @@ func TestHookEnsureFreshInstall(t *testing.T) {
 	}
 
 	s := readSettings(t, p)
-	for _, ev := range []string{"SessionStart", "UserPromptSubmit"} {
-		cmds := hookCommands(t, s, ev)
-		if len(cmds) != 1 {
-			t.Fatalf("%s: got %d commands, want 1: %v", ev, len(cmds), cmds)
+
+	// SessionStart carries only the pane-map hook: the worktree hook has
+	// nothing to record before a prompt exists.
+	start := hookCommands(t, s, "SessionStart")
+	if len(start) != 1 || filepath.Base(start[0]) != "claudemux-map.sh" {
+		t.Errorf("SessionStart = %v, want exactly claudemux-map.sh", start)
+	}
+
+	// UserPromptSubmit carries both scripts; the pane-map hook must be among
+	// them at a stable installed path.
+	ups := hookCommands(t, s, "UserPromptSubmit")
+	sawMap := false
+	for _, c := range ups {
+		if filepath.Base(c) == "claudemux-map.sh" {
+			sawMap = true
 		}
-		if filepath.Base(cmds[0]) != "claudemux-map.sh" {
-			t.Errorf("%s: command = %q, want it to end in claudemux-map.sh", ev, cmds[0])
-		}
+	}
+	if !sawMap {
+		t.Errorf("UserPromptSubmit = %v, want claudemux-map.sh registered", ups)
 	}
 }
 
@@ -303,5 +321,57 @@ func TestHookEnsureBacksUpBeforeWriting(t *testing.T) {
 	}
 	if string(b) != `{"model": "opus"}` {
 		t.Errorf("backup = %q, want the ORIGINAL contents", string(b))
+	}
+}
+
+func TestHookEnsureRegistersBothScripts(t *testing.T) {
+	settingsPath := writeSettings(t, "")
+	script := stubScript(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+		t.Fatalf("hook ensure = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+
+	settings := readSettings(t, settingsPath)
+	ups := hookCommands(t, settings, "UserPromptSubmit")
+	if len(ups) != 2 {
+		t.Fatalf("UserPromptSubmit commands = %v, want 2 entries", ups)
+	}
+	var sawMap, sawWorktree bool
+	for _, c := range ups {
+		switch filepath.Base(c) {
+		case "claudemux-map.sh":
+			sawMap = true
+		case "claudemux-worktree.sh":
+			sawWorktree = true
+		}
+	}
+	if !sawMap || !sawWorktree {
+		t.Errorf("UserPromptSubmit = %v, want both scripts", ups)
+	}
+
+	// The worktree hook has nothing to record at session start; registering it
+	// on SessionStart would inject its instruction before a prompt exists.
+	start := hookCommands(t, settings, "SessionStart")
+	if len(start) != 1 || filepath.Base(start[0]) != "claudemux-map.sh" {
+		t.Errorf("SessionStart = %v, want only claudemux-map.sh", start)
+	}
+}
+
+func TestHookEnsureDoesNotDuplicateOnSecondRun(t *testing.T) {
+	settingsPath := writeSettings(t, "")
+	script := stubScript(t)
+
+	var stdout, stderr bytes.Buffer
+	for i := 0; i < 2; i++ {
+		if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %d: hook ensure = %d (stderr %s)", i, code, stderr.String())
+		}
+	}
+
+	settings := readSettings(t, settingsPath)
+	if got := hookCommands(t, settings, "UserPromptSubmit"); len(got) != 2 {
+		t.Errorf("UserPromptSubmit after two runs = %v, want 2 entries", got)
 	}
 }
