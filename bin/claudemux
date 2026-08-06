@@ -13,18 +13,24 @@
 # Options:
 #   -n   Create a new session even if one with the same name exists
 #        (appends -2, -3, ... to the session name).
-#   -w   Launch claude with --worktree regardless of config or repo state.
-#   -W   Never pass --worktree for this launch, whatever the config says.
+#   -w   Mark this session as wanting a worktree regardless of config or repo
+#        state.
+#   -W   Never mark this session, whatever the config says.
 #        -w/-W (and the auto_worktree heuristic below) only affect NEWLY
 #        CREATED sessions — attaching to an existing session reuses whatever
 #        claude command it was launched with, same as name/color. Combine
 #        with -n to force a new session if you need -w/-W to take effect.
 #
-# Worktree creation itself is Claude Code's job (`claude --worktree`); this
-# script only decides whether to pass the flag. With launch.auto_worktree
-# enabled in config.yml (or `worktree: true` in .project.yml), a launch on a
-# repo's default branch gets --worktree automatically; feature branches,
-# detached HEADs, linked worktrees, and non-repos are left alone.
+# This script does not create worktrees and no longer passes `claude
+# --worktree`. It decides whether a session SHOULD have one and exports
+# CLAUDEMUX_WORKTREE_PENDING; hooks/claudemux-worktree.sh then asks the model to
+# create one named after the task on its first response. Creating it at launch
+# meant naming it before any prompt existed. With launch.auto_worktree enabled
+# in config.yml (or `worktree: true` in .project.yml), a launch on a repo's
+# default branch is marked automatically; feature branches, detached HEADs,
+# linked worktrees, and non-repos are left alone.
+#
+# A session that is opened and never prompted therefore gets no worktree at all.
 
 set -euo pipefail
 
@@ -449,7 +455,7 @@ create_session() {
   # Project metadata (.project.yml: color + name), passed to claude at launch:
   # name via -n, color as a "/color X" prompt argument. No post-startup
   # send-keys — typing into the pane during boot used to collide with it.
-  local proj_color proj_name claude_cmd claude_bin
+  local proj_color proj_name claude_cmd claude_bin worktree_env
   proj_color="$(project_field "$work_dir/.project.yml" color)"
   proj_name="$(project_field "$work_dir/.project.yml" name)"
   # Absolute path when one can be resolved. The panes below are spawned with a
@@ -465,14 +471,26 @@ create_session() {
   claude_cmd="$(printf '%q' "${claude_bin:-claude}") --permission-mode auto"
   [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
   [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
-  # LAST, after every positional. `--worktree [name]` takes an optional value,
-  # so whatever token follows it becomes the worktree name: placed before the
-  # "/color X" prompt argument, it swallowed the prompt as a (rejected) name
-  # and the launch died. At the end of the command there is nothing to swallow,
-  # and claude auto-names the worktree. Keep any future appends ABOVE this.
+  # A marked session creates its worktree on its FIRST RESPONSE, not at launch:
+  # hooks/claudemux-worktree.sh sees this variable, sees a cwd that is not yet a
+  # worktree, and asks the model to call EnterWorktree with a name derived from
+  # the prompt. `claude --worktree` cannot do that — it names the worktree during
+  # startup, before any prompt exists, which is why every worktree used to be
+  # called something like "lovely-wandering-lovelace".
+  #
+  # The head gets it too, so it can show `⚠ no worktree` if the first turn ends
+  # with the session still in the main checkout.
+  #
+  # This retires the ordering constraint that used to live here: `--worktree
+  # [name]` takes an optional value, so appended anywhere before the "/color X"
+  # prompt argument it swallowed the prompt as a (rejected) worktree name and the
+  # launch died. An env prefix has no such hazard, and appends to claude_cmd are
+  # no longer ordered. Keep the hazard in mind if --worktree is ever reinstated.
+  worktree_env=""
   if worktree_requested "$work_dir"; then
-    claude_cmd+=" --worktree"
+    worktree_env="CLAUDEMUX_WORKTREE_PENDING=1 "
   fi
+  claude_cmd="${worktree_env}${claude_cmd}"
 
   # top-left = claudemux-head (4 rows: first prompt, last prompt, state line, meters),
   # below it = claude, right = shell (full height, 30% wide — the head
@@ -494,7 +512,7 @@ create_session() {
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
   shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
   head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
-  run_in_pane "$head_pane" "$(printf '%q' "$head_bin")"
+  run_in_pane "$head_pane" "${worktree_env}$(printf '%q' "$head_bin")"
 
   # With an op_env, claude's launch is handed to a background injector so the
   # attach below happens NOW rather than after op's ~25s decryption (see
