@@ -84,18 +84,24 @@ resolve_self() {
 # no hook and get wrong pane binding.
 #
 # Never fatal: a missing or unhappy hook costs accurate pane binding, not the
-# session. Exit 3 (a settings.json that does not parse) is the one case worth
-# surfacing, because it means we deliberately touched nothing.
+# session. Exit 3 (a settings.json that does not parse) and exit 4 (an I/O
+# failure) are the two cases worth surfacing, because both mean we
+# deliberately touched nothing: hook.go validates every shipped script's
+# source path before copying any of them, so a single missing sibling (e.g.
+# an incomplete install prefix) fails the whole `hook ensure` with rc=4
+# rather than partially registering — otherwise-silent, since a missing
+# claudemux-worktree.sh would also drop the already-working
+# claudemux-map.sh hook with no visible sign.
 ensure_hook() {
   command -v claudemux-head >/dev/null 2>&1 || return 0
   local err rc=0
   err="$(mktemp)"
   claudemux-head hook ensure >/dev/null 2>"$err" || rc=$?
-  [ "$rc" -eq 3 ] && cat "$err" >&2
+  { [ "$rc" -eq 3 ] || [ "$rc" -eq 4 ]; } && cat "$err" >&2
   rm -f "$err"
-  # Explicit: the `[ ... ] && cat` above is the last command otherwise, and its
-  # status would escape to `set -e` whenever rc is not 3 — killing the launcher
-  # in the *common* case.
+  # Explicit: the `{ ... } && cat` above is the last command otherwise, and its
+  # status would escape to `set -e` whenever rc is neither 3 nor 4 — killing
+  # the launcher in the *common* case.
   return 0
 }
 ensure_hook
