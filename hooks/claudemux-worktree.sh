@@ -35,6 +35,6 @@ This session is configured to work in a git worktree, and is not in one yet.
 Before any other tool call, call EnterWorktree with a `name` derived from the
 user's request above: 2-5 words, lowercase, dash-separated, naming the durable
 goal rather than the first step (e.g. "rename-worktrees-on-topic"). Use only
-letters, digits, dots, underscores and dashes. Then carry on with the request.
+letters, digits, dots, underscores and dashes, up to 64 characters total. Then carry on with the request.
 </claudemux-worktree>
 INSTRUCTION
