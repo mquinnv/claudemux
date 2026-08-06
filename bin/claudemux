@@ -486,9 +486,17 @@ create_session() {
   # prompt argument it swallowed the prompt as a (rejected) worktree name and the
   # launch died. An env prefix has no such hazard, and appends to claude_cmd are
   # no longer ordered. Keep the hazard in mind if --worktree is ever reinstated.
+  #
+  # `env VAR=val`, not a bare `VAR=val`: run_in_pane wraps its argument as
+  # `exec $2`, and a bare assignment sitting right after `exec` is parsed as
+  # the program name, not as an assignment — `exec CLAUDEMUX_WORKTREE_PENDING=1
+  # claude` tries to execute a file literally called `CLAUDEMUX_WORKTREE_PENDING=1`
+  # and fails in every shell tried (bash, zsh, sh, dash, fish). `exec env
+  # VAR=val cmd` is valid everywhere, fish included, because env(1) parses its
+  # own leading VAR=val arguments regardless of how it was invoked.
   worktree_env=""
   if worktree_requested "$work_dir"; then
-    worktree_env="CLAUDEMUX_WORKTREE_PENDING=1 "
+    worktree_env="env CLAUDEMUX_WORKTREE_PENDING=1 "
   fi
   claude_cmd="${worktree_env}${claude_cmd}"
 
