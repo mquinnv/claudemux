@@ -76,9 +76,10 @@ echo "claudemux: checksum OK"
 mkdir -p "$PREFIX"
 tar -xzf "$tmp/$tarball" -C "$tmp"
 
-# All four files stay siblings: claudemux resolves project-color-resolve.sh, and
-# claudemux-head resolves claudemux-map.sh, by looking next to themselves.
-for f in claudemux-head claudemux project-color-resolve.sh claudemux-map.sh; do
+# All five files stay siblings: claudemux resolves project-color-resolve.sh, and
+# claudemux-head resolves claudemux-map.sh and claudemux-worktree.sh, by looking
+# next to themselves.
+for f in claudemux-head claudemux project-color-resolve.sh claudemux-map.sh claudemux-worktree.sh; do
   install -m 0755 "$tmp/$f" "$PREFIX/$f"
 done
 

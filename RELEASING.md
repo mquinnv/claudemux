@@ -15,7 +15,7 @@ git push origin vX.Y.Z
 ```
 
 The `release` workflow cross-compiles `claudemux-head` for darwin/linux ×
-amd64/arm64, packages each with the three bash scripts as **siblings**, and
+amd64/arm64, packages each with the four bash scripts as **siblings**, and
 publishes the tarballs plus `SHA256SUMS`. Wait for it:
 
 ```bash
