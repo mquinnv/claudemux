@@ -2704,3 +2704,76 @@ func TestSwitchSessionLeavesIdleTeardownAlone(t *testing.T) {
 		t.Errorf("note = %q, want empty", m.teardownNote)
 	}
 }
+
+func TestTabLabelPrefersWorktreeUntilHaikuWins(t *testing.T) {
+	tests := []struct {
+		name        string
+		worktreeTab string
+		haikuTab    string
+		haikuWins   bool
+		want        string
+	}{
+		{"worktree name wins before any correction",
+			"rename worktrees on topic", "worktree naming", false, "rename worktrees on topic"},
+		{"haiku wins after a topic change",
+			"rename worktrees on topic", "worktree naming", true, "worktree naming"},
+		{"no worktree observed falls back to haiku",
+			"", "worktree naming", false, "worktree naming"},
+		{"haiku empty falls back to the worktree name",
+			"rename worktrees on topic", "", true, "rename worktrees on topic"},
+		{"neither yields empty",
+			"", "", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tabLabel(tt.worktreeTab, tt.haikuTab, tt.haikuWins); got != tt.want {
+				t.Errorf("tabLabel(%q, %q, %v) = %q, want %q",
+					tt.worktreeTab, tt.haikuTab, tt.haikuWins, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorktreeTabSetOnlyOnTransition(t *testing.T) {
+	// A session that was already in a worktree when the head started must not
+	// adopt its name — it is a random one from before this feature.
+	m := &model{sessionCwd: "/repo/.claude/worktrees/lovely-wandering-lovelace"}
+	m.observeWorktreeTransition()
+	if m.worktreeTab != "" {
+		t.Errorf("adopted a pre-existing worktree name: %q", m.worktreeTab)
+	}
+
+	// A session observed OUTSIDE a worktree and then inside one did the
+	// transition, so its name is task-derived and may be adopted.
+	m2 := &model{sessionCwd: "/repo"}
+	m2.observeWorktreeTransition()
+	m2.sessionCwd = "/repo/.claude/worktrees/rename-worktrees-on-topic"
+	m2.observeWorktreeTransition()
+	if got, want := m2.worktreeTab, "rename worktrees on topic"; got != want {
+		t.Errorf("worktreeTab = %q, want %q", got, want)
+	}
+}
+
+func TestHaikuWinsOnlyOnTopicChange(t *testing.T) {
+	m := &model{}
+	// First summary establishes a topic — not a change.
+	m.noteTopic("naming worktrees after their work")
+	if m.tabHaikuWins {
+		t.Error("first topic counted as a correction")
+	}
+	// Same topic again — still not a change.
+	m.noteTopic("naming worktrees after their work")
+	if m.tabHaikuWins {
+		t.Error("an unchanged topic counted as a correction")
+	}
+	// A genuinely different topic is the correction signal.
+	m.noteTopic("debugging the teardown gate")
+	if !m.tabHaikuWins {
+		t.Error("a changed topic did not hand the tab to haiku")
+	}
+	// The latch is one-way.
+	m.noteTopic("naming worktrees after their work")
+	if !m.tabHaikuWins {
+		t.Error("latch reverted")
+	}
+}

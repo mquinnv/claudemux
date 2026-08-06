@@ -129,6 +129,30 @@ type model struct {
 	// worktree (see worktreeChip).
 	cmdWorktree string
 
+	// worktreeTab is the tab label derived from the worktree this session
+	// created for itself — its name with dashes turned back into spaces. Set
+	// only when the head OBSERVES the session move from outside a worktree into
+	// one, which is the signature of hooks/claudemux-worktree.sh having worked
+	// and therefore of a task-derived name. A session already in a worktree at
+	// startup is left alone: its name predates this feature (or was made by
+	// hand), and rendering "lovely wandering lovelace" as the tab would be
+	// strictly worse than the Haiku label it would replace.
+	//
+	// sawNonWorktreeCwd records that the session was once observed OUTSIDE a
+	// worktree, which is the first half of that transition.
+	worktreeTab       string
+	sawNonWorktreeCwd bool
+
+	// tabHaikuWins latches on the first time the summarizer REPLACES an
+	// established topic, handing the tab to Haiku's label permanently. It
+	// reuses the summary prompt's own stability rule ("KEEP IT VERBATIM unless
+	// the human has genuinely changed goals") as the "materially different"
+	// test, rather than inventing a string-similarity metric. A first summary
+	// establishing a topic is not a change.
+	tabHaikuWins bool
+	// lastTopic is the topic tabHaikuWins compares against.
+	lastTopic string
+
 	// Persistent state
 	reader         *EventReader
 	allEvents      []Event     // bounded ring (cap 1000)
@@ -338,6 +362,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	}
 	m.sessionCwd = lastMainCwd(m.allEvents, m.sessionCwd)
 	m.cmdWorktree = commandWorktree(m.sessionCwd, m.allEvents, now)
+	m.observeWorktreeTransition()
 }
 
 // lastMainCwd returns the cwd of the most recent main-session (non-sidechain)
@@ -410,6 +435,10 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// here, which is exactly the same no-floor-at-all failure this comment
 	// warns against.
 	m.summary = Summary{}
+	m.worktreeTab = ""
+	m.sawNonWorktreeCwd = false
+	m.tabHaikuWins = false
+	m.lastTopic = ""
 	m.summaryRetry = false
 	m.summaryGen++
 
@@ -615,6 +644,48 @@ func (m model) canSummarize(now time.Time) bool {
 	return now.Sub(m.lastSummaryAt) >= m.minSummaryInterval
 }
 
+// tabLabel picks the window label: the name the session gave its own worktree
+// until Haiku has earned the tab, then Haiku's. Either side falls back to the
+// other when empty, so a missing summary or a session that never made a
+// worktree still gets whatever label exists.
+func tabLabel(worktreeTab, haikuTab string, haikuWins bool) string {
+	if haikuWins && haikuTab != "" {
+		return haikuTab
+	}
+	if worktreeTab != "" {
+		return worktreeTab
+	}
+	return haikuTab
+}
+
+// observeWorktreeTransition watches sessionCwd for the session entering a
+// worktree, and adopts that worktree's name as the tab when it does. See the
+// worktreeTab field for why only an observed transition counts.
+func (m *model) observeWorktreeTransition() {
+	name := worktreeNameForCwd(m.sessionCwd)
+	if name == "" {
+		if m.sessionCwd != "" {
+			m.sawNonWorktreeCwd = true
+		}
+		return
+	}
+	if m.sawNonWorktreeCwd && m.worktreeTab == "" {
+		m.worktreeTab = strings.ReplaceAll(name, "-", " ")
+	}
+}
+
+// noteTopic records a landed summary's topic and latches tabHaikuWins when it
+// REPLACES an established one.
+func (m *model) noteTopic(topic string) {
+	if topic == "" {
+		return
+	}
+	if m.lastTopic != "" && topic != m.lastTopic {
+		m.tabHaikuWins = true
+	}
+	m.lastTopic = topic
+}
+
 // tabCmdFor returns the window-rename command for a freshly landed summary, or
 // nil when the tab title is disabled, the tab is pinned, we are not in tmux, or
 // the label is empty.
@@ -622,7 +693,7 @@ func (m model) tabCmdFor(s Summary) tea.Cmd {
 	if !m.tabTitle || m.tabPinned {
 		return nil
 	}
-	return renameTabCmd(m.selfPane, s.Tab)
+	return renameTabCmd(m.selfPane, tabLabel(m.worktreeTab, s.Tab, m.tabHaikuWins))
 }
 
 func (m model) summarize() tea.Cmd {
@@ -852,6 +923,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err == nil {
+			m.noteTopic(msg.summary.Topic)
 			m.summaryRetry = false
 			m.summary = msg.summary
 			return m, m.tabCmdFor(msg.summary)
