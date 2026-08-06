@@ -13,18 +13,24 @@
 # Options:
 #   -n   Create a new session even if one with the same name exists
 #        (appends -2, -3, ... to the session name).
-#   -w   Launch claude with --worktree regardless of config or repo state.
-#   -W   Never pass --worktree for this launch, whatever the config says.
+#   -w   Mark this session as wanting a worktree regardless of config or repo
+#        state.
+#   -W   Never mark this session, whatever the config says.
 #        -w/-W (and the auto_worktree heuristic below) only affect NEWLY
 #        CREATED sessions — attaching to an existing session reuses whatever
 #        claude command it was launched with, same as name/color. Combine
 #        with -n to force a new session if you need -w/-W to take effect.
 #
-# Worktree creation itself is Claude Code's job (`claude --worktree`); this
-# script only decides whether to pass the flag. With launch.auto_worktree
-# enabled in config.yml (or `worktree: true` in .project.yml), a launch on a
-# repo's default branch gets --worktree automatically; feature branches,
-# detached HEADs, linked worktrees, and non-repos are left alone.
+# This script does not create worktrees and no longer passes `claude
+# --worktree`. It decides whether a session SHOULD have one and exports
+# CLAUDEMUX_WORKTREE_PENDING; hooks/claudemux-worktree.sh then asks the model to
+# create one named after the task on its first response. Creating it at launch
+# meant naming it before any prompt existed. With launch.auto_worktree enabled
+# in config.yml (or `worktree: true` in .project.yml), a launch on a repo's
+# default branch is marked automatically; feature branches, detached HEADs,
+# linked worktrees, and non-repos are left alone.
+#
+# A session that is opened and never prompted therefore gets no worktree at all.
 
 set -euo pipefail
 
@@ -78,18 +84,24 @@ resolve_self() {
 # no hook and get wrong pane binding.
 #
 # Never fatal: a missing or unhappy hook costs accurate pane binding, not the
-# session. Exit 3 (a settings.json that does not parse) is the one case worth
-# surfacing, because it means we deliberately touched nothing.
+# session. Exit 3 (a settings.json that does not parse) and exit 4 (an I/O
+# failure) are the two cases worth surfacing, because both mean we
+# deliberately touched nothing: hook.go validates every shipped script's
+# source path before copying any of them, so a single missing sibling (e.g.
+# an incomplete install prefix) fails the whole `hook ensure` with rc=4
+# rather than partially registering — otherwise-silent, since a missing
+# claudemux-worktree.sh would also drop the already-working
+# claudemux-map.sh hook with no visible sign.
 ensure_hook() {
   command -v claudemux-head >/dev/null 2>&1 || return 0
   local err rc=0
   err="$(mktemp)"
   claudemux-head hook ensure >/dev/null 2>"$err" || rc=$?
-  [ "$rc" -eq 3 ] && cat "$err" >&2
+  { [ "$rc" -eq 3 ] || [ "$rc" -eq 4 ]; } && cat "$err" >&2
   rm -f "$err"
-  # Explicit: the `[ ... ] && cat` above is the last command otherwise, and its
-  # status would escape to `set -e` whenever rc is not 3 — killing the launcher
-  # in the *common* case.
+  # Explicit: the `{ ... } && cat` above is the last command otherwise, and its
+  # status would escape to `set -e` whenever rc is neither 3 nor 4 — killing
+  # the launcher in the *common* case.
   return 0
 }
 ensure_hook
@@ -217,12 +229,12 @@ ch_config_get() {
   return 0
 }
 
-# auto_worktree_wanted DIR — success when an automatic `claude --worktree` is
-# appropriate for DIR: a git repo's MAIN checkout sitting on its default
-# branch. Feature branches, detached HEADs, linked worktrees, and non-repos
-# all say no — those are states the user chose, and a surprise worktree would
-# fight them. Each check is one fast git subprocess; keep it that way, this
-# runs on the launch path.
+# auto_worktree_wanted DIR — success when DIR should be automatically marked
+# for a worktree: a git repo's MAIN checkout sitting on its default branch.
+# Feature branches, detached HEADs, linked worktrees, and non-repos all say
+# no — those are states the user chose, and a surprise worktree would fight
+# them. Each check is one fast git subprocess; keep it that way, this runs on
+# the launch path.
 auto_worktree_wanted() {
   local dir="$1" branch default gitdirs
   command -v git >/dev/null 2>&1 || return 1
@@ -234,7 +246,7 @@ auto_worktree_wanted() {
   # absolute, so from any subdirectory the two never textually match even in
   # the main checkout — the heuristic would wrongly decline there. On git
   # < 2.31 this call fails outright and the guard below degrades to "no
-  # worktree", which is an acceptable miss (not a wrong `--worktree`).
+  # worktree", which is an acceptable miss (not a wrongly marked session).
   gitdirs="$(git -C "$dir" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null)" || return 1
   [ "$(head -1 <<< "$gitdirs")" = "$(tail -1 <<< "$gitdirs")" ] || return 1
   branch="$(git -C "$dir" symbolic-ref --short -q HEAD)" || return 1 # detached
@@ -248,12 +260,14 @@ auto_worktree_wanted() {
   fi
 }
 
-# worktree_requested DIR — success when this launch should pass --worktree.
-# Precedence, highest first: -w/-W, `worktree:` in DIR/.project.yml,
-# launch.auto_worktree in config.yml. An explicit -w skips the
-# appropriateness heuristic entirely — the user asked, and if DIR turns out
-# not to be a repo, claude reports that itself. Both config sources are
-# auto mode and go through auto_worktree_wanted.
+# worktree_requested DIR — success when this launch should mark the session
+# for a worktree. Precedence, highest first: -w/-W, `worktree:` in
+# DIR/.project.yml, launch.auto_worktree in config.yml. An explicit -w skips
+# the appropriateness heuristic entirely — the user asked, and if DIR turns
+# out not to be a repo, that surfaces later as a failed EnterWorktree
+# mid-session plus a permanent "no worktree" chip, since `claude --worktree`
+# is never passed here anymore. Both config sources are auto mode and go
+# through auto_worktree_wanted.
 worktree_requested() {
   local dir="$1" proj
   case "$WORKTREE_MODE" in
@@ -449,7 +463,7 @@ create_session() {
   # Project metadata (.project.yml: color + name), passed to claude at launch:
   # name via -n, color as a "/color X" prompt argument. No post-startup
   # send-keys — typing into the pane during boot used to collide with it.
-  local proj_color proj_name claude_cmd claude_bin
+  local proj_color proj_name claude_cmd claude_bin worktree_env
   proj_color="$(project_field "$work_dir/.project.yml" color)"
   proj_name="$(project_field "$work_dir/.project.yml" name)"
   # Absolute path when one can be resolved. The panes below are spawned with a
@@ -465,14 +479,34 @@ create_session() {
   claude_cmd="$(printf '%q' "${claude_bin:-claude}") --permission-mode auto"
   [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
   [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
-  # LAST, after every positional. `--worktree [name]` takes an optional value,
-  # so whatever token follows it becomes the worktree name: placed before the
-  # "/color X" prompt argument, it swallowed the prompt as a (rejected) name
-  # and the launch died. At the end of the command there is nothing to swallow,
-  # and claude auto-names the worktree. Keep any future appends ABOVE this.
+  # A marked session creates its worktree on its FIRST RESPONSE, not at launch:
+  # hooks/claudemux-worktree.sh sees this variable, sees a cwd that is not yet a
+  # worktree, and asks the model to call EnterWorktree with a name derived from
+  # the prompt. `claude --worktree` cannot do that — it names the worktree during
+  # startup, before any prompt exists, which is why every worktree used to be
+  # called something like "lovely-wandering-lovelace".
+  #
+  # The head gets it too, so it can show `⚠ no worktree` if the first turn ends
+  # with the session still in the main checkout.
+  #
+  # This retires the ordering constraint that used to live here: `--worktree
+  # [name]` takes an optional value, so appended anywhere before the "/color X"
+  # prompt argument it swallowed the prompt as a (rejected) worktree name and the
+  # launch died. An env prefix has no such hazard, and appends to claude_cmd are
+  # no longer ordered. Keep the hazard in mind if --worktree is ever reinstated.
+  #
+  # `env VAR=val`, not a bare `VAR=val`: run_in_pane wraps its argument as
+  # `exec $2`, and a bare assignment sitting right after `exec` is parsed as
+  # the program name, not as an assignment — `exec CLAUDEMUX_WORKTREE_PENDING=1
+  # claude` tries to execute a file literally called `CLAUDEMUX_WORKTREE_PENDING=1`
+  # and fails in every shell tried (bash, zsh, sh, dash, fish). `exec env
+  # VAR=val cmd` is valid everywhere, fish included, because env(1) parses its
+  # own leading VAR=val arguments regardless of how it was invoked.
+  worktree_env=""
   if worktree_requested "$work_dir"; then
-    claude_cmd+=" --worktree"
+    worktree_env="env CLAUDEMUX_WORKTREE_PENDING=1 "
   fi
+  claude_cmd="${worktree_env}${claude_cmd}"
 
   # top-left = claudemux-head (4 rows: first prompt, last prompt, state line, meters),
   # below it = claude, right = shell (full height, 30% wide — the head
@@ -494,7 +528,7 @@ create_session() {
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
   shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
   head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
-  run_in_pane "$head_pane" "$(printf '%q' "$head_bin")"
+  run_in_pane "$head_pane" "${worktree_env}$(printf '%q' "$head_bin")"
 
   # With an op_env, claude's launch is handed to a background injector so the
   # attach below happens NOW rather than after op's ~25s decryption (see
@@ -509,8 +543,10 @@ create_session() {
     holder_cmd="$(printf '%q' "$head_bin") boot"
     holder_cmd+=" --project $(printf '%q' "$session_name")"
     holder_cmd+=" --label 'Unlocking 1Password environment'"
-    # LAST, for the same reason --worktree is last in claude_cmd: everything
-    # after -- is the command the holder execs, verbatim.
+    # LAST: parseBootArgs (cmd/claudemux-head/boot.go) splits `boot`'s argument
+    # list at the FIRST "--" it sees, flags before, command after — so
+    # everything from here on is what the holder execs, verbatim, and a flag
+    # placed after this point would be read as part of that command instead.
     holder_cmd+=" --expected 25s -- $claude_cmd"
     run_in_pane "$claude_pane" "$holder_cmd"
     deferred_launch "$session_name" "$work_dir" "$claude_pane" "$shell_pane" \

@@ -34,13 +34,13 @@ jobs:
               -ldflags "-s -w -X main.version=${version}" \
               -o "$stage/claudemux-head" ./cmd/claudemux-head
 
-            # All four files land as SIBLINGS: claudemux finds the colour
-            # resolver, and claudemux-head finds the hook script, by looking
+            # All five files land as SIBLINGS: claudemux finds the colour
+            # resolver, and claudemux-head finds the hook scripts, by looking
             # next to themselves.
             cp bin/claudemux bin/project-color-resolve.sh "$stage/"
-            cp hooks/claudemux-map.sh "$stage/"
+            cp hooks/claudemux-map.sh hooks/claudemux-worktree.sh "$stage/"
             cp LICENSE README.md "$stage/"
-            chmod +x "$stage/claudemux" "$stage/project-color-resolve.sh" "$stage/claudemux-map.sh"
+            chmod +x "$stage/claudemux" "$stage/project-color-resolve.sh" "$stage/claudemux-map.sh" "$stage/claudemux-worktree.sh"
 
             tar -czf "dist/claudemux_${version}_${os}_${arch}.tar.gz" -C "$stage" .
           done

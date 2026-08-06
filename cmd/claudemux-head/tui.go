@@ -129,6 +129,30 @@ type model struct {
 	// worktree (see worktreeChip).
 	cmdWorktree string
 
+	// worktreeTab is the tab label derived from the worktree this session
+	// created for itself — its name with dashes turned back into spaces. Set
+	// only when the head OBSERVES the session move from outside a worktree into
+	// one, which is the signature of hooks/claudemux-worktree.sh having worked
+	// and therefore of a task-derived name. A session already in a worktree at
+	// startup is left alone: its name predates this feature (or was made by
+	// hand), and rendering "lovely wandering lovelace" as the tab would be
+	// strictly worse than the Haiku label it would replace.
+	//
+	// sawNonWorktreeCwd records that the session was once observed OUTSIDE a
+	// worktree, which is the first half of that transition.
+	worktreeTab       string
+	sawNonWorktreeCwd bool
+
+	// tabHaikuWins latches on the first time the summarizer REPLACES an
+	// established topic, handing the tab to Haiku's label permanently. It
+	// reuses the summary prompt's own stability rule ("KEEP IT VERBATIM unless
+	// the human has genuinely changed goals") as the "materially different"
+	// test, rather than inventing a string-similarity metric. A first summary
+	// establishing a topic is not a change.
+	tabHaikuWins bool
+	// lastTopic is the topic tabHaikuWins compares against.
+	lastTopic string
+
 	// Persistent state
 	reader         *EventReader
 	allEvents      []Event     // bounded ring (cap 1000)
@@ -252,6 +276,14 @@ type model struct {
 	mainCheckout string
 	inWorktree   bool
 
+	// worktreePending records that bin/claudemux marked this session as wanting
+	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
+	// one; hooks/claudemux-worktree.sh asks the model to. When the model skips
+	// that call the session works on the default branch in the SHARED checkout,
+	// which is exactly what the marking existed to prevent — so a marked
+	// session whose first turn ended outside a worktree says so in the chip.
+	worktreePending bool
+
 	summarizing   bool
 	lastSummaryAt time.Time
 	// summaryGen identifies the session a summarize call was issued for. It is
@@ -314,6 +346,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.inWorktree = worktreeNameForCwd(wd) != ""
 		m.mainCheckout = mainCheckoutFor(wd)
 	}
+	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
 	m.recomputeFromEvents(time.Now())
 	return m
 }
@@ -338,6 +371,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	}
 	m.sessionCwd = lastMainCwd(m.allEvents, m.sessionCwd)
 	m.cmdWorktree = commandWorktree(m.sessionCwd, m.allEvents, now)
+	m.observeWorktreeTransition()
 }
 
 // lastMainCwd returns the cwd of the most recent main-session (non-sidechain)
@@ -410,6 +444,10 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// here, which is exactly the same no-floor-at-all failure this comment
 	// warns against.
 	m.summary = Summary{}
+	m.worktreeTab = ""
+	m.sawNonWorktreeCwd = false
+	m.tabHaikuWins = false
+	m.lastTopic = ""
 	m.summaryRetry = false
 	m.summaryGen++
 
@@ -615,6 +653,48 @@ func (m model) canSummarize(now time.Time) bool {
 	return now.Sub(m.lastSummaryAt) >= m.minSummaryInterval
 }
 
+// tabLabel picks the window label: the name the session gave its own worktree
+// until Haiku has earned the tab, then Haiku's. Either side falls back to the
+// other when empty, so a missing summary or a session that never made a
+// worktree still gets whatever label exists.
+func tabLabel(worktreeTab, haikuTab string, haikuWins bool) string {
+	if haikuWins && haikuTab != "" {
+		return haikuTab
+	}
+	if worktreeTab != "" {
+		return worktreeTab
+	}
+	return haikuTab
+}
+
+// observeWorktreeTransition watches sessionCwd for the session entering a
+// worktree, and adopts that worktree's name as the tab when it does. See the
+// worktreeTab field for why only an observed transition counts.
+func (m *model) observeWorktreeTransition() {
+	name := worktreeNameForCwd(m.sessionCwd)
+	if name == "" {
+		if m.sessionCwd != "" {
+			m.sawNonWorktreeCwd = true
+		}
+		return
+	}
+	if m.sawNonWorktreeCwd && m.worktreeTab == "" {
+		m.worktreeTab = strings.ReplaceAll(name, "-", " ")
+	}
+}
+
+// noteTopic records a landed summary's topic and latches tabHaikuWins when it
+// REPLACES an established one.
+func (m *model) noteTopic(topic string) {
+	if topic == "" {
+		return
+	}
+	if m.lastTopic != "" && topic != m.lastTopic {
+		m.tabHaikuWins = true
+	}
+	m.lastTopic = topic
+}
+
 // tabCmdFor returns the window-rename command for a freshly landed summary, or
 // nil when the tab title is disabled, the tab is pinned, we are not in tmux, or
 // the label is empty.
@@ -622,7 +702,7 @@ func (m model) tabCmdFor(s Summary) tea.Cmd {
 	if !m.tabTitle || m.tabPinned {
 		return nil
 	}
-	return renameTabCmd(m.selfPane, s.Tab)
+	return renameTabCmd(m.selfPane, tabLabel(m.worktreeTab, s.Tab, m.tabHaikuWins))
 }
 
 func (m model) summarize() tea.Cmd {
@@ -852,6 +932,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err == nil {
+			m.noteTopic(msg.summary.Topic)
 			m.summaryRetry = false
 			m.summary = msg.summary
 			return m, m.tabCmdFor(msg.summary)
@@ -1087,7 +1168,11 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	} else if m.tabPinned {
 		leftParts = append(leftParts, "⬚ pinned")
 	}
-	if chip != "" {
+	if chip == noWorktreeWarning {
+		// No "⎇ " glyph here: that's a branch symbol, and this message is
+		// about having NO branch/worktree.
+		leftParts = append(leftParts, chip)
+	} else if chip != "" {
 		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
 	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
@@ -1205,9 +1290,20 @@ func renderStateLine(m model, now time.Time) string {
 	} else if m.tabPinned {
 		parts = append(parts, "⬚ pinned")
 	}
-	left := strings.Join(parts, " · ")
 
 	chip := m.worktreeChip()
+	if chip == noWorktreeWarning {
+		// Put the warning in with the state/model text, which never shrinks,
+		// rather than the chip slot below, which is the first thing dropped
+		// as the pane narrows. A real worktree name is fine to lose under a
+		// narrow pane — it's re-derivable from the session. This warning is
+		// the entire visible mitigation for a design risk and must not be
+		// the first casualty.
+		parts = append(parts, chip)
+		chip = ""
+	}
+	left := strings.Join(parts, " · ")
+
 	if chip == "" {
 		return statusbarStyle.Width(m.width).Render(clipLine(" "+left+" ", m.width))
 	}
@@ -1370,7 +1466,8 @@ func worktreeNameFromCwd(cwd string) string {
 	return rest
 }
 
-// worktreeChip selects the worktree chip's source of truth, in priority order:
+// observedWorktree selects the worktree chip's source of truth, in priority
+// order:
 //
 //  1. sessionCwd genuinely inside a worktree — the session was launched there
 //     or entered via native EnterWorktree. worktreeNameForCwd sees both
@@ -1383,7 +1480,10 @@ func worktreeNameFromCwd(cwd string) string {
 //     a worktree at arm's length, never chdir'ing into it).
 //  3. The transcript-path fallback (native encoding only), used solely before
 //     the first event is seeded, when no cwd is known yet.
-func (m model) worktreeChip() string {
+//
+// Returns "" for neither — the session is not in, and not driving at arm's
+// length, any worktree.
+func (m model) observedWorktree() string {
 	if m.sessionCwd != "" {
 		if name := worktreeNameForCwd(m.sessionCwd); name != "" {
 			return name
@@ -1391,6 +1491,35 @@ func (m model) worktreeChip() string {
 		return m.cmdWorktree
 	}
 	return worktreeName(m.jsonlPath)
+}
+
+// noWorktreeWarning is the exact text the spec requires the chip slot to
+// show when a marked session's first turn ends without a worktree. Unlike a
+// real worktree name, it is not prefixed with the "⎇ " branch glyph (a
+// branch glyph on a message about having NO worktree reads oddly), and
+// renderStatusbar/renderStateLine give it priority over being clipped —
+// unlike a worktree name, it is not "merely descriptive": it is the entire
+// user-visible mitigation for the risk this design accepts.
+const noWorktreeWarning = "⚠ no worktree"
+
+// worktreeChipText decides what the worktree chip slot shows. A real worktree
+// always wins: the warning is only for a marked session that has not got one.
+//
+// sawPrompt gates the warning so a session sitting at an empty input is not
+// accused of skipping anything — nothing has been asked of it yet.
+func worktreeChipText(chip string, pending, turnEnded, sawPrompt bool) string {
+	if chip != "" {
+		return chip
+	}
+	if pending && turnEnded && sawPrompt {
+		return noWorktreeWarning
+	}
+	return ""
+}
+
+func (m model) worktreeChip() string {
+	return worktreeChipText(m.observedWorktree(), m.worktreePending,
+		teardownTurnEnded(m.state.Kind), m.firstPrompt != "")
 }
 
 func allDigits(s string) bool {

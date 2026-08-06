@@ -370,6 +370,63 @@ func TestRenderStateLineTruncatesChipWhenNarrow(t *testing.T) {
 	}
 }
 
+// The "no worktree" warning is not a worktree name: it must render without
+// the "⎇ " branch glyph (which would read as "here is a branch" on a message
+// that means the opposite), and — unlike a real worktree name, which is
+// merely descriptive and re-derivable from the session — it must survive at
+// a width that would truncate away a same-length worktree chip, since it is
+// the entire user-visible mitigation for the design risk this session
+// carries.
+func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
+	warningModel := func(width int) model {
+		return model{
+			width:           width,
+			state:           State{Kind: StateIdle, Since: time.Now()},
+			modelName:       "claude-opus-4-7",
+			worktreePending: true,
+			firstPrompt:     "do the thing",
+			// jsonlPath deliberately NOT a worktree path, and sessionCwd unset:
+			// observedWorktree() must be "" so worktreeChip() falls through to
+			// the warning.
+			jsonlPath: "/proj/abc.jsonl",
+		}
+	}
+
+	t.Run("renderStateLine", func(t *testing.T) {
+		wide := warningModel(100)
+		got := renderStateLine(wide, time.Now())
+		if !strings.Contains(got, "⚠ no worktree") {
+			t.Fatalf("renderStateLine = %q, want it to contain the warning", got)
+		}
+		if strings.Contains(got, "⎇") {
+			t.Errorf("renderStateLine = %q, want no branch glyph on the warning", got)
+		}
+
+		// Narrow enough that even a short worktree chip would already be the
+		// first thing to shrink (compare TestRenderStateLineTruncatesChipWhenNarrow,
+		// which loses a chip at width 30), but wide enough to hold the
+		// state/model text plus the warning — which is exactly the point:
+		// the warning shares the never-shrunk group with state/model, not
+		// the chip slot that shrinks first.
+		narrow := warningModel(45)
+		got = renderStateLine(narrow, time.Now())
+		if !strings.Contains(got, "⚠ no worktree") {
+			t.Errorf("renderStateLine at width 45 = %q, want the full warning to survive clipping", got)
+		}
+	})
+
+	t.Run("renderStatusbar", func(t *testing.T) {
+		m := warningModel(100)
+		got := renderStatusbar(m, time.Now(), m.worktreeChip())
+		if !strings.Contains(got, "⚠ no worktree") {
+			t.Fatalf("renderStatusbar = %q, want it to contain the warning", got)
+		}
+		if strings.Contains(got, "⎇") {
+			t.Errorf("renderStatusbar = %q, want no branch glyph on the warning", got)
+		}
+	})
+}
+
 // renderMetersLine always keeps the ctx gauge; as width shrinks it drops the
 // right-group gauges from the end in today's order: eta, then wk, then 5h.
 func TestRenderMetersLineDropsRightGroupKeepsCtx(t *testing.T) {
@@ -2702,5 +2759,188 @@ func TestSwitchSessionLeavesIdleTeardownAlone(t *testing.T) {
 
 	if m.teardownNote != "" {
 		t.Errorf("note = %q, want empty", m.teardownNote)
+	}
+}
+
+func TestTabLabelPrefersWorktreeUntilHaikuWins(t *testing.T) {
+	tests := []struct {
+		name        string
+		worktreeTab string
+		haikuTab    string
+		haikuWins   bool
+		want        string
+	}{
+		{"worktree name wins before any correction",
+			"rename worktrees on topic", "worktree naming", false, "rename worktrees on topic"},
+		{"haiku wins after a topic change",
+			"rename worktrees on topic", "worktree naming", true, "worktree naming"},
+		{"no worktree observed falls back to haiku",
+			"", "worktree naming", false, "worktree naming"},
+		{"haiku empty falls back to the worktree name",
+			"rename worktrees on topic", "", true, "rename worktrees on topic"},
+		{"neither yields empty",
+			"", "", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tabLabel(tt.worktreeTab, tt.haikuTab, tt.haikuWins); got != tt.want {
+				t.Errorf("tabLabel(%q, %q, %v) = %q, want %q",
+					tt.worktreeTab, tt.haikuTab, tt.haikuWins, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorktreeTabSetOnlyOnTransition(t *testing.T) {
+	// A session that was already in a worktree when the head started must not
+	// adopt its name — it is a random one from before this feature.
+	m := &model{sessionCwd: "/repo/.claude/worktrees/lovely-wandering-lovelace"}
+	m.observeWorktreeTransition()
+	if m.worktreeTab != "" {
+		t.Errorf("adopted a pre-existing worktree name: %q", m.worktreeTab)
+	}
+
+	// A session observed OUTSIDE a worktree and then inside one did the
+	// transition, so its name is task-derived and may be adopted.
+	m2 := &model{sessionCwd: "/repo"}
+	m2.observeWorktreeTransition()
+	m2.sessionCwd = "/repo/.claude/worktrees/rename-worktrees-on-topic"
+	m2.observeWorktreeTransition()
+	if got, want := m2.worktreeTab, "rename worktrees on topic"; got != want {
+		t.Errorf("worktreeTab = %q, want %q", got, want)
+	}
+}
+
+func TestHaikuWinsOnlyOnTopicChange(t *testing.T) {
+	m := &model{}
+	// First summary establishes a topic — not a change.
+	m.noteTopic("naming worktrees after their work")
+	if m.tabHaikuWins {
+		t.Error("first topic counted as a correction")
+	}
+	// Same topic again — still not a change.
+	m.noteTopic("naming worktrees after their work")
+	if m.tabHaikuWins {
+		t.Error("an unchanged topic counted as a correction")
+	}
+	// A genuinely different topic is the correction signal.
+	m.noteTopic("debugging the teardown gate")
+	if !m.tabHaikuWins {
+		t.Error("a changed topic did not hand the tab to haiku")
+	}
+	// The latch is one-way.
+	m.noteTopic("naming worktrees after their work")
+	if !m.tabHaikuWins {
+		t.Error("latch reverted")
+	}
+}
+
+func TestWorktreeChipTextWarnsWhenNoneAppeared(t *testing.T) {
+	tests := []struct {
+		name                      string
+		chip                      string
+		pending, ended, sawPrompt bool
+		want                      string
+	}{
+		{"warns once the first turn ends with no worktree",
+			"", true, true, true, "⚠ no worktree"},
+		{"silent before a prompt",
+			"", true, true, false, ""},
+		{"silent mid-turn",
+			"", true, false, true, ""},
+		{"silent when the session was never marked",
+			"", false, true, true, ""},
+		{"a worktree that appeared wins over the warning",
+			"rename-worktrees-on-topic", true, true, true, "rename-worktrees-on-topic"},
+		{"unmarked session with a worktree still shows it",
+			"some-worktree", false, true, true, "some-worktree"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := worktreeChipText(tt.chip, tt.pending, tt.ended, tt.sawPrompt)
+			if got != tt.want {
+				t.Errorf("worktreeChipText(%q, %v, %v, %v) = %q, want %q",
+					tt.chip, tt.pending, tt.ended, tt.sawPrompt, got, tt.want)
+			}
+		})
+	}
+}
+
+// worktreeChipText (above) is well tested as a pure function, but the wiring
+// that feeds it — m.worktreePending reading CLAUDEMUX_WORKTREE_PENDING off
+// the real environment in newModel, composed with teardownTurnEnded and
+// m.firstPrompt in worktreeChip — is the entire mitigation for the risk this
+// design accepts: a session marked for a worktree whose first turn ends
+// outside one. Exercise it through newModel, not a hand-built &model{}, so a
+// regression in the env lookup itself (not just in worktreeChipText's logic)
+// would be caught.
+func TestWorktreeChipWiredThroughEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	// A real user prompt followed by an assistant text reply: the last
+	// conversation event is the assistant one with UserText set, which
+	// classifyState reads as StateIdle — i.e. teardownTurnEnded == true, a
+	// turn that has ended. Nothing here puts sessionCwd inside a worktree
+	// (no "cwd" field, and the temp jsonl path itself doesn't carry the
+	// ".claude/worktrees" marker worktreeName looks for), so observedWorktree
+	// stays "" throughout.
+	lines := `{"type":"user","timestamp":"2026-08-06T10:00:00Z","message":{"content":"rename the worktrees"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-08-06T10:00:05Z","message":{"model":"claude","content":[{"type":"text","text":"done"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Avoid newSummarizer touching the real, possibly 1Password-backed
+	// CLAUDEMUX_ENV FIFO — see TestNewModelSeedsSummarizingWithSummarizer.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
+
+	t.Run("marked session whose first turn ended outside a worktree warns", func(t *testing.T) {
+		t.Setenv("CLAUDEMUX_WORKTREE_PENDING", "1")
+		m := newModel(defaultConfig(), path, "sess", false)
+		if !m.worktreePending {
+			t.Fatal("worktreePending = false, want true with CLAUDEMUX_WORKTREE_PENDING set")
+		}
+		if got, want := m.worktreeChip(), "⚠ no worktree"; got != want {
+			t.Errorf("worktreeChip() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unmarked session shows no chip", func(t *testing.T) {
+		t.Setenv("CLAUDEMUX_WORKTREE_PENDING", "")
+		m := newModel(defaultConfig(), path, "sess", false)
+		if m.worktreePending {
+			t.Fatal("worktreePending = true, want false with CLAUDEMUX_WORKTREE_PENDING unset")
+		}
+		if got := m.worktreeChip(); got != "" {
+			t.Errorf("worktreeChip() = %q, want empty when the session was never marked", got)
+		}
+	})
+}
+
+// observeWorktreeTransition (TestWorktreeTabSetOnlyOnTransition) is exercised
+// on a hand-built &model{} there. This covers the same gate through newModel
+// with a seeded event history instead, so the wiring — not just the pure
+// transition logic — is under test: a session already inside a worktree at
+// startup (e.g. the head was restarted mid-session) must not adopt its name,
+// since that name is a leftover from before this feature and not
+// task-derived.
+func TestWorktreeTabNotAdoptedForPreExistingWorktreeThroughNewModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	line := `{"type":"user","timestamp":"2026-08-06T10:00:00Z","cwd":"/repo/.claude/worktrees/lovely-wandering-lovelace","message":{"content":"go"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
+
+	m := newModel(defaultConfig(), path, "sess", false)
+	if m.sessionCwd != "/repo/.claude/worktrees/lovely-wandering-lovelace" {
+		t.Fatalf("sessionCwd = %q, want the seeded cwd — the control for this test is broken", m.sessionCwd)
+	}
+	if m.worktreeTab != "" {
+		t.Errorf("worktreeTab = %q, want empty: a worktree observed on the very first recompute must not be adopted as a transition", m.worktreeTab)
 	}
 }

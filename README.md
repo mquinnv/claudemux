@@ -95,7 +95,7 @@ they're your responsibility:
 |---|---|---|
 | `tmux` | `claudemux` | `claudemux` cannot run at all |
 | `claudemux-head` on `PATH` | `claudemux` | the head pane dies at "command not found" and is left on screen saying so; an `op_env` session shows that in place of its waiting screen, then still starts `claude` once the secrets land |
-| `jq` | `hooks/claudemux-map.sh` | the hook exits silently; see below |
+| `jq` | `hooks/claudemux-map.sh`, `hooks/claudemux-worktree.sh` | the hook exits silently; see below |
 | `git` | `claudemux` (1Password org inference) | `op_account` in `.project.yml` or `onepassword.default_account` still work |
 | `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` only works for literal directories, not `z`-style queries |
 | `op` (1Password CLI) | `claudemux` (`op_env` injection) | sessions launch without injected secrets |
@@ -114,6 +114,10 @@ backup is taken before any change.
 Without the hook, `claudemux-head` falls back to picking whichever transcript in the
 project directory changed most recently. That is wrong as soon as you have two Claude
 Code sessions open on the same project.
+
+A second hook, `hooks/claudemux-worktree.sh`, ships and is registered the same way —
+see `launch.auto_worktree` below for what it does. `claudemux-head hook ensure` installs
+and repairs both scripts together.
 
 ## Configuration
 
@@ -163,13 +167,23 @@ teardown:
   by the TUI itself, to pick a 1Password account when injecting an `op_env`. Ships empty;
   see `.project.yml` below.
 - `launch.auto_worktree` — consumed by `claudemux`, not the TUI. When `true`, a launch
-  in a git repo's main checkout **on its default branch** passes `--worktree` to
-  `claude`, so the session works in an isolated worktree and the checkout stays
-  pristine. Feature branches, detached HEADs, existing worktrees, and non-repos are
-  left alone. Override per launch with `claudemux -w` (force) / `-W` (skip), or per
+  in a git repo's main checkout **on its default branch** marks the session as wanting a
+  worktree rather than creating one at launch: `claudemux` prefixes both the `claude`
+  command and the head pane's command with `env CLAUDEMUX_WORKTREE_PENDING=1`. The
+  worktree itself doesn't exist yet at that point — `hooks/claudemux-worktree.sh` (a
+  `UserPromptSubmit` hook) asks the model, on the session's first prompt, to call
+  `EnterWorktree` with a name derived from the task: 2-5 words, lowercase,
+  dash-separated. That's why worktrees are now named things like
+  `rename-worktrees-on-topic` instead of `lovely-wandering-lovelace` — the model, not
+  claudemux, is naming them, and it has the task in front of it. The worktree therefore
+  appears during the session's first response, not at launch: a session that's opened
+  and never prompted gets none. If the model skips the call, the status pane shows
+  `⚠ no worktree` once the first turn ends. Feature branches, detached HEADs, existing
+  worktrees, and non-repos are left alone. Override per launch with `claudemux -w`
+  (mark the session regardless of config or repo state) / `-W` (never mark), or per
   project with `worktree: true|false` in `.project.yml`. Default `false`. `-w`/`-W`
   (and the config/`.project.yml` toggles) only take effect on newly created sessions —
-  `claudemux -w <existing-session>` attaches without a worktree, silently ignoring
+  `claudemux -w <existing-session>` attaches without marking it, silently ignoring
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
 - `teardown.command` — the wrap-up command the status pane types into the `claude`
@@ -189,7 +203,7 @@ launch it in. See [`.project.yml.example`](.project.yml.example) for the full fo
 ```yaml
 color: blue          # tmux status-bar / iTerm2 tab color
 name: my-project      # passed to `claude -n`
-worktree: true        # opt this project in/out of auto --worktree (optional)
+worktree: true        # opt this project in/out of the auto-worktree marker (optional)
 op_env: abcdefghijklmnopqrstuvwxyz  # 1Password Environment ID (optional)
 op_account: my.1password.com        # 1Password account for op_env (optional)
 ```
@@ -231,6 +245,13 @@ window name, it also appears as the window label in the tmux status bar.
 This needs no tmux configuration — claudemux sets `set-titles` itself. It applies
 only inside tmux, and only while summaries are on; turn it off with
 `summary.tab_title: false`. Outside tmux there is nothing to rename.
+
+**Worktree names.** When the head *observes* a session move from outside a worktree
+into one — the signature of `hooks/claudemux-worktree.sh` having just created one — the
+tab takes that worktree's name, dashes rendered as spaces, ahead of any Haiku label. It
+holds until the summarizer's topic replaces an already-established one, at which point
+Haiku's label takes over the tab for good. A session already sitting in a worktree when
+the head started never counted as a transition, so it skips straight to Haiku's label.
 
 **Pinning the tab.** Click the status pane and press `r` to put the tab back the
 way it launched: the window name returns to the project's `name:` (or the
@@ -285,9 +306,14 @@ wrap-up in order:
    `claude` to actually be gone, and then kills the tmux session.
 
 The worktree the gate watches is the one **the session's working directory is in** — the
-cwd from its transcript, which is where `claudemux -w` (or `launch.auto_worktree`, or
-`worktree: true`) put it. That is not where the status pane itself was started, so the
-check holds for auto-worktree sessions, which are the common case.
+cwd from its transcript. `claudemux -w` (or `launch.auto_worktree`, or `worktree: true`
+in `.project.yml`) only marks the session as wanting one; it's the model, prompted by
+`hooks/claudemux-worktree.sh`, that actually calls `EnterWorktree` and moves the
+session's cwd there, typically during its first response. The gate reads that cwd
+regardless of when the move happened, so it holds just as well for a worktree entered
+mid-session as it would have for one that existed at launch. That is not where the
+status pane itself was started, so the check holds for the common case of a
+session that ends up working in a worktree.
 
 It follows the cwd, though, not the work. A session whose cwd stays in the main checkout
 while it drives a worktree by explicit path (`git -C <worktree> …`) gets **no** worktree
