@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -68,5 +69,58 @@ func TestWorktreeHookAsksForWorktree(t *testing.T) {
 	// The name convention must reach the model, or it will invent its own shape.
 	if !strings.Contains(got, "dash-separated") {
 		t.Errorf("instruction does not state the naming convention: %q", got)
+	}
+}
+
+// The cwd check only ends the nagging when EnterWorktree SUCCEEDS. On every
+// failure path — the user says "no, just work here", the tool refuses on a
+// dirty tree, the model declines — the cwd never moves, so without a cap the
+// hook would re-inject on every prompt for the rest of the session.
+func TestWorktreeHookStopsAskingAfterCap(t *testing.T) {
+	home := t.TempDir()
+	payload := `{"cwd":"/tmp/repo","session_id":"sess-cap"}`
+	env := []string{"CLAUDEMUX_WORKTREE_PENDING=1", "HOME=" + home, "PATH=" + os.Getenv("PATH")}
+
+	for i := 1; i <= 2; i++ {
+		if got := runWorktreeHook(t, payload, env...); !strings.Contains(got, "EnterWorktree") {
+			t.Fatalf("ask %d: hook stayed silent, want the instruction: %q", i, got)
+		}
+	}
+	if got := runWorktreeHook(t, payload, env...); got != "" {
+		t.Errorf("third ask spoke: %q — the cap must stop the nagging once the human has effectively answered", got)
+	}
+}
+
+// A different session gets its own budget: a resume or /clear is a new task,
+// and it deserves a worktree of its own.
+func TestWorktreeHookCapIsPerSession(t *testing.T) {
+	home := t.TempDir()
+	env := []string{"CLAUDEMUX_WORKTREE_PENDING=1", "HOME=" + home, "PATH=" + os.Getenv("PATH")}
+
+	for i := 0; i < 3; i++ {
+		runWorktreeHook(t, `{"cwd":"/tmp/repo","session_id":"sess-a"}`, env...)
+	}
+	got := runWorktreeHook(t, `{"cwd":"/tmp/repo","session_id":"sess-b"}`, env...)
+	if !strings.Contains(got, "EnterWorktree") {
+		t.Errorf("a fresh session was silenced by another session's budget: %q", got)
+	}
+}
+
+// A corrupt counter must degrade to asking, never to silently disabling the
+// feature — the failure that would be invisible.
+func TestWorktreeHookCorruptCounterStillAsks(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "claudemux", "worktree-asks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sess-bad"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"CLAUDEMUX_WORKTREE_PENDING=1", "HOME=" + home, "PATH=" + os.Getenv("PATH")}
+
+	got := runWorktreeHook(t, `{"cwd":"/tmp/repo","session_id":"sess-bad"}`, env...)
+	if !strings.Contains(got, "EnterWorktree") {
+		t.Errorf("a corrupt counter silenced the hook: %q", got)
 	}
 }

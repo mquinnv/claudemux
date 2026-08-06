@@ -79,9 +79,26 @@ The script writes its instruction only when both hold:
 - `CLAUDEMUX_WORKTREE_PENDING` is set, and
 - the payload's `cwd` is not already inside a linked worktree.
 
-Every other path exits silently. The second condition makes it self-limiting: once
-`EnterWorktree` fires the session's cwd is a worktree, and the hook goes quiet for the
-rest of the session with no state to track.
+Every other path exits silently. The second condition covers the success path with no
+bookkeeping: once `EnterWorktree` fires the session's cwd is a worktree, and the hook goes
+quiet for the rest of the session.
+
+It does NOT cover the failure paths, and an earlier draft of this section claimed
+"self-limiting … no state to track" as though it did. Every way the call can fail — the
+user answers "no, just work here", the tool refuses on a dirty tree, the model declines —
+leaves the cwd exactly where it was. Without a bound the hook would re-inject on every
+prompt for the rest of the session, while `⚠ no worktree` sat on the status line with no
+way to dismiss it: nagging the old `claude --worktree` never did, because a rejected flag
+failed once, loudly, at launch.
+
+So the hook asks at most **twice** per session, counted in
+`~/.claude/claudemux/worktree-asks/<session_id>`. Two rather than one because the first
+failure is often transient — a dirty tree the user then cleans, a race with another tool —
+and a single shot would give up on exactly the case a retry fixes. Past that the human has
+effectively answered. The counter is keyed by session id, so a resumed or `/clear`ed
+session gets a fresh budget (a new task deserves a new worktree), and it is pruned on the
+same seven-day schedule as the pane map. A missing session id or an unreadable counter
+falls through to asking: losing the feature is worse than an occasional extra ask.
 
 The instruction asks for `EnterWorktree` before any other tool call, with a name that is a
 2-5 word lowercase dash-separated slug of the task. That phrasing deliberately matches the
