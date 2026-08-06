@@ -2777,3 +2777,34 @@ func TestHaikuWinsOnlyOnTopicChange(t *testing.T) {
 		t.Error("latch reverted")
 	}
 }
+
+func TestWorktreeChipTextWarnsWhenNoneAppeared(t *testing.T) {
+	tests := []struct {
+		name                      string
+		chip                      string
+		pending, ended, sawPrompt bool
+		want                      string
+	}{
+		{"warns once the first turn ends with no worktree",
+			"", true, true, true, "⚠ no worktree"},
+		{"silent before a prompt",
+			"", true, true, false, ""},
+		{"silent mid-turn",
+			"", true, false, true, ""},
+		{"silent when the session was never marked",
+			"", false, true, true, ""},
+		{"a worktree that appeared wins over the warning",
+			"rename-worktrees-on-topic", true, true, true, "rename-worktrees-on-topic"},
+		{"unmarked session with a worktree still shows it",
+			"some-worktree", false, true, true, "some-worktree"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := worktreeChipText(tt.chip, tt.pending, tt.ended, tt.sawPrompt)
+			if got != tt.want {
+				t.Errorf("worktreeChipText(%q, %v, %v, %v) = %q, want %q",
+					tt.chip, tt.pending, tt.ended, tt.sawPrompt, got, tt.want)
+			}
+		})
+	}
+}

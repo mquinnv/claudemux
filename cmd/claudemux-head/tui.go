@@ -276,6 +276,14 @@ type model struct {
 	mainCheckout string
 	inWorktree   bool
 
+	// worktreePending records that bin/claudemux marked this session as wanting
+	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
+	// one; hooks/claudemux-worktree.sh asks the model to. When the model skips
+	// that call the session works on the default branch in the SHARED checkout,
+	// which is exactly what the marking existed to prevent — so a marked
+	// session whose first turn ended outside a worktree says so in the chip.
+	worktreePending bool
+
 	summarizing   bool
 	lastSummaryAt time.Time
 	// summaryGen identifies the session a summarize call was issued for. It is
@@ -338,6 +346,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.inWorktree = worktreeNameForCwd(wd) != ""
 		m.mainCheckout = mainCheckoutFor(wd)
 	}
+	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
 	m.recomputeFromEvents(time.Now())
 	return m
 }
@@ -1442,7 +1451,8 @@ func worktreeNameFromCwd(cwd string) string {
 	return rest
 }
 
-// worktreeChip selects the worktree chip's source of truth, in priority order:
+// observedWorktree selects the worktree chip's source of truth, in priority
+// order:
 //
 //  1. sessionCwd genuinely inside a worktree — the session was launched there
 //     or entered via native EnterWorktree. worktreeNameForCwd sees both
@@ -1455,7 +1465,10 @@ func worktreeNameFromCwd(cwd string) string {
 //     a worktree at arm's length, never chdir'ing into it).
 //  3. The transcript-path fallback (native encoding only), used solely before
 //     the first event is seeded, when no cwd is known yet.
-func (m model) worktreeChip() string {
+//
+// Returns "" for neither — the session is not in, and not driving at arm's
+// length, any worktree.
+func (m model) observedWorktree() string {
 	if m.sessionCwd != "" {
 		if name := worktreeNameForCwd(m.sessionCwd); name != "" {
 			return name
@@ -1463,6 +1476,26 @@ func (m model) worktreeChip() string {
 		return m.cmdWorktree
 	}
 	return worktreeName(m.jsonlPath)
+}
+
+// worktreeChipText decides what the worktree chip slot shows. A real worktree
+// always wins: the warning is only for a marked session that has not got one.
+//
+// sawPrompt gates the warning so a session sitting at an empty input is not
+// accused of skipping anything — nothing has been asked of it yet.
+func worktreeChipText(chip string, pending, turnEnded, sawPrompt bool) string {
+	if chip != "" {
+		return chip
+	}
+	if pending && turnEnded && sawPrompt {
+		return "⚠ no worktree"
+	}
+	return ""
+}
+
+func (m model) worktreeChip() string {
+	return worktreeChipText(m.observedWorktree(), m.worktreePending,
+		teardownTurnEnded(m.state.Kind), m.firstPrompt != "")
 }
 
 func allDigits(s string) bool {
