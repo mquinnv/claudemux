@@ -223,12 +223,12 @@ ch_config_get() {
   return 0
 }
 
-# auto_worktree_wanted DIR — success when an automatic `claude --worktree` is
-# appropriate for DIR: a git repo's MAIN checkout sitting on its default
-# branch. Feature branches, detached HEADs, linked worktrees, and non-repos
-# all say no — those are states the user chose, and a surprise worktree would
-# fight them. Each check is one fast git subprocess; keep it that way, this
-# runs on the launch path.
+# auto_worktree_wanted DIR — success when DIR should be automatically marked
+# for a worktree: a git repo's MAIN checkout sitting on its default branch.
+# Feature branches, detached HEADs, linked worktrees, and non-repos all say
+# no — those are states the user chose, and a surprise worktree would fight
+# them. Each check is one fast git subprocess; keep it that way, this runs on
+# the launch path.
 auto_worktree_wanted() {
   local dir="$1" branch default gitdirs
   command -v git >/dev/null 2>&1 || return 1
@@ -240,7 +240,7 @@ auto_worktree_wanted() {
   # absolute, so from any subdirectory the two never textually match even in
   # the main checkout — the heuristic would wrongly decline there. On git
   # < 2.31 this call fails outright and the guard below degrades to "no
-  # worktree", which is an acceptable miss (not a wrong `--worktree`).
+  # worktree", which is an acceptable miss (not a wrongly marked session).
   gitdirs="$(git -C "$dir" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null)" || return 1
   [ "$(head -1 <<< "$gitdirs")" = "$(tail -1 <<< "$gitdirs")" ] || return 1
   branch="$(git -C "$dir" symbolic-ref --short -q HEAD)" || return 1 # detached
@@ -254,11 +254,11 @@ auto_worktree_wanted() {
   fi
 }
 
-# worktree_requested DIR — success when this launch should pass --worktree.
-# Precedence, highest first: -w/-W, `worktree:` in DIR/.project.yml,
-# launch.auto_worktree in config.yml. An explicit -w skips the
-# appropriateness heuristic entirely — the user asked, and if DIR turns out
-# not to be a repo, claude reports that itself. Both config sources are
+# worktree_requested DIR — success when this launch should mark the session
+# for a worktree. Precedence, highest first: -w/-W, `worktree:` in
+# DIR/.project.yml, launch.auto_worktree in config.yml. An explicit -w skips
+# the appropriateness heuristic entirely — the user asked, and if DIR turns
+# out not to be a repo, claude reports that itself. Both config sources are
 # auto mode and go through auto_worktree_wanted.
 worktree_requested() {
   local dir="$1" proj
@@ -535,8 +535,10 @@ create_session() {
     holder_cmd="$(printf '%q' "$head_bin") boot"
     holder_cmd+=" --project $(printf '%q' "$session_name")"
     holder_cmd+=" --label 'Unlocking 1Password environment'"
-    # LAST, for the same reason --worktree is last in claude_cmd: everything
-    # after -- is the command the holder execs, verbatim.
+    # LAST: parseBootArgs (cmd/claudemux-head/boot.go) splits `boot`'s argument
+    # list at the FIRST "--" it sees, flags before, command after — so
+    # everything from here on is what the holder execs, verbatim, and a flag
+    # placed after this point would be read as part of that command instead.
     holder_cmd+=" --expected 25s -- $claude_cmd"
     run_in_pane "$claude_pane" "$holder_cmd"
     deferred_launch "$session_name" "$work_dir" "$claude_pane" "$shell_pane" \
