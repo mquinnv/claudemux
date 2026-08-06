@@ -264,8 +264,10 @@ auto_worktree_wanted() {
 # for a worktree. Precedence, highest first: -w/-W, `worktree:` in
 # DIR/.project.yml, launch.auto_worktree in config.yml. An explicit -w skips
 # the appropriateness heuristic entirely — the user asked, and if DIR turns
-# out not to be a repo, claude reports that itself. Both config sources are
-# auto mode and go through auto_worktree_wanted.
+# out not to be a repo, that surfaces later as a failed EnterWorktree
+# mid-session plus a permanent "no worktree" chip, since `claude --worktree`
+# is never passed here anymore. Both config sources are auto mode and go
+# through auto_worktree_wanted.
 worktree_requested() {
   local dir="$1" proj
   case "$WORKTREE_MODE" in
