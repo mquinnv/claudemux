@@ -60,10 +60,10 @@ func TestClaudePaneCandidatesAllGroups(t *testing.T) {
 	// claude, other-window node — regardless of listing order.
 	listing := strings.Join([]string{
 		"%1 @1 claudemux-head", // self
-		"%2 @2 node",        // other-window node
-		"%3 @2 claude",      // other-window claude
-		"%4 @1 node",        // same-window node
-		"%5 @1 claude",      // same-window claude
+		"%2 @2 node",           // other-window node
+		"%3 @2 claude",         // other-window claude
+		"%4 @1 node",           // same-window node
+		"%5 @1 claude",         // same-window claude
 	}, "\n")
 	got := claudePaneCandidates(listing, "%1")
 	want := []string{"%5", "%4", "%3", "%2"}
