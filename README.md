@@ -178,7 +178,9 @@ teardown:
   claudemux, is naming them, and it has the task in front of it. The worktree therefore
   appears during the session's first response, not at launch: a session that's opened
   and never prompted gets none. If the model skips the call, the status pane shows
-  `⚠ no worktree` once the first turn ends. Feature branches, detached HEADs, existing
+  `⚠ no worktree` once the first turn ends, and the hook asks again on the next prompt —
+  but **at most twice per session**, so declining it (or a `EnterWorktree` that refuses on
+  a dirty tree) doesn't nag you for the rest of the session. Feature branches, detached HEADs, existing
   worktrees, and non-repos are left alone. Override per launch with `claudemux -w`
   (mark the session regardless of config or repo state) / `-W` (never mark), or per
   project with `worktree: true|false` in `.project.yml`. Default `false`. `-w`/`-W`

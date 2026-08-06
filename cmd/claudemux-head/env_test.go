@@ -199,6 +199,20 @@ func TestEnvFileValueRetriesTransientlyEmptyFIFO(t *testing.T) {
 	}
 	t.Setenv("CLAUDEMUX_ENV", path)
 
+	// Raise the per-attempt bound for the duration of this test. The scenario
+	// needs the reader's FIRST attempt to complete with EOF, because a timeout
+	// means "no writer ever showed up" and envFileValue then breaks WITHOUT
+	// retrying — which is correct in production and fatal to this test. At the
+	// production 2s bound that made this flaky at roughly 1 run in 10 (reproduce
+	// with `go test ./cmd/claudemux-head/ -count=10`): under load the writer
+	// goroutine below is not always scheduled to its first open inside 2s, the
+	// first attempt times out, and the assertion sees "".
+	//
+	// This does not weaken what is under test. The retry path still has to work
+	// for the test to pass — a longer bound only stops the setup from racing.
+	defer func(orig time.Duration) { envFileTimeout = orig }(envFileTimeout)
+	envFileTimeout = 30 * time.Second
+
 	// First open is served an empty pipe (the "lost the race" case); the second is
 	// served the real content.
 	go func() {

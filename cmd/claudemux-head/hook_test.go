@@ -418,3 +418,45 @@ func TestHookEnsureMissingScriptCopiesNothing(t *testing.T) {
 		}
 	}
 }
+
+// The development layout keeps the shipped scripts in the repo and puts only a
+// symlinked `claudemux` on PATH, while claudemux-head is a `go install` output
+// in GOBIN — so the scripts are NOT siblings of the running binary. Resolution
+// must fall through to the claudemux on PATH, exactly as shippedScriptPath
+// already does for project-color-resolve.sh.
+//
+// This is a regression test with a real scar: hook ensure resolved siblings of
+// the binary only. That was survivable while a missing script merely skipped one
+// hook, and stopped being survivable once validate-all-before-copy-any made any
+// single miss fatal — a dev checkout then registered NOTHING, losing the
+// pane-map hook along with the worktree hook.
+func TestHookEnsureResolvesScriptsViaClaudemuxOnPath(t *testing.T) {
+	writeSettings(t, "")
+
+	// A directory holding `claudemux` and the shipped scripts as siblings, on
+	// PATH — but deliberately NOT beside the test binary.
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "claudemux"),
+		[]byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hs := range hookScripts {
+		if err := os.WriteFile(filepath.Join(pathDir, hs.name),
+			[]byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", pathDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 in the development layout (stderr %s)", code, stderr.String())
+	}
+
+	home, _ := os.UserHomeDir()
+	settings := readSettings(t, filepath.Join(home, ".claude", "settings.json"))
+	ups := hookCommands(t, settings, "UserPromptSubmit")
+	if len(ups) != 2 {
+		t.Errorf("UserPromptSubmit = %v, want both scripts registered from the PATH-resolved layout", ups)
+	}
+}

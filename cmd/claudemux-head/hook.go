@@ -74,6 +74,16 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 	// srcFor returns where to read a shipped script from. --script overrides
 	// only claudemux-map.sh, so existing callers (and tests) that point it at a
 	// stub keep working while the other scripts resolve as siblings.
+	//
+	// Unqualified lookups go through shippedScriptPath, which tries BOTH install
+	// layouts — beside this binary (what install.sh and the Homebrew formula
+	// produce) and beside the claudemux on PATH with symlinks resolved (the
+	// development layout, where the head is a `go install` output in GOBIN while
+	// the scripts stay in the repo). This used to try only the first, which was
+	// survivable while a missing script merely skipped one hook; it stopped being
+	// survivable when the validate-all-before-copy-any pass below made any single
+	// miss fatal. A dev checkout then resolved claudemux-worktree.sh into GOBIN,
+	// found nothing, and registered NOTHING — losing the pane-map hook too.
 	srcFor := func(name string) (string, error) {
 		if name == hookScriptName && *scriptFlag != "" {
 			return *scriptFlag, nil
@@ -81,7 +91,10 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 		if *scriptFlag != "" {
 			return filepath.Join(filepath.Dir(*scriptFlag), name), nil
 		}
-		return siblingOfExecutable(name)
+		if p, ok := shippedScriptPath(name); ok {
+			return p, nil
+		}
+		return "", fmt.Errorf("not found beside %s or beside the claudemux on PATH", filepath.Base(os.Args[0]))
 	}
 
 	home, err := os.UserHomeDir()
