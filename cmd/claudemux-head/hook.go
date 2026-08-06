@@ -115,18 +115,33 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 		return 4
 	}
 
-	changed := false
-	for _, hs := range hookScripts {
+	// Resolve and validate every source BEFORE copying any of them. Without
+	// this pass, a later script failing to resolve (e.g. a shipped script
+	// missing from the install prefix) would leave an earlier one already
+	// copied to hooksDir while settings.json stays untouched — a half-done
+	// install the old single-script code could not produce, since it had
+	// nothing to be "half" of.
+	srcs := make([]string, len(hookScripts))
+	for i, hs := range hookScripts {
 		src, err := srcFor(hs.name)
 		if err != nil {
 			fmt.Fprintf(stderr, "claudemux: locating %s: %v\n", hs.name, err)
 			return 4
 		}
+		if _, err := os.Stat(src); err != nil {
+			fmt.Fprintf(stderr, "claudemux: locating %s: %v\n", hs.name, err)
+			return 4
+		}
+		srcs[i] = src
+	}
+
+	changed := false
+	for i, hs := range hookScripts {
 		// The registered command points HERE, not at wherever the package was
 		// installed: a Homebrew libexec path would be baked into settings.json
 		// and break on the next upgrade.
 		dst := filepath.Join(hooksDir, hs.name)
-		if err := copyExecutable(src, dst); err != nil {
+		if err := copyExecutable(srcs[i], dst); err != nil {
 			fmt.Fprintf(stderr, "claudemux: installing %s: %v\n", hs.name, err)
 			return 4
 		}

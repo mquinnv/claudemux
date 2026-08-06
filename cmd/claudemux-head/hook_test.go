@@ -92,9 +92,13 @@ func TestHookEnsureFreshInstall(t *testing.T) {
 		t.Errorf("SessionStart = %v, want exactly claudemux-map.sh", start)
 	}
 
-	// UserPromptSubmit carries both scripts; the pane-map hook must be among
-	// them at a stable installed path.
+	// UserPromptSubmit carries both scripts, and only both scripts: an exact
+	// count catches a duplicate-registration bug that a "contains" check
+	// would miss.
 	ups := hookCommands(t, s, "UserPromptSubmit")
+	if len(ups) != 2 {
+		t.Fatalf("UserPromptSubmit commands = %v, want exactly 2 entries", ups)
+	}
 	sawMap := false
 	for _, c := range ups {
 		if filepath.Base(c) == "claudemux-map.sh" {
@@ -373,5 +377,44 @@ func TestHookEnsureDoesNotDuplicateOnSecondRun(t *testing.T) {
 	settings := readSettings(t, settingsPath)
 	if got := hookCommands(t, settings, "UserPromptSubmit"); len(got) != 2 {
 		t.Errorf("UserPromptSubmit after two runs = %v, want 2 entries", got)
+	}
+}
+
+// If a later shipped script is missing, nothing must be copied and
+// settings.json must stay untouched — including the earlier script(s) that
+// would otherwise have resolved and copied fine. A half-done install (one
+// script live, settings unregistered) is worse than none: the old
+// single-script code could not produce that state, and the multi-script loop
+// must not either.
+func TestHookEnsureMissingScriptCopiesNothing(t *testing.T) {
+	writeSettings(t, "") // no settings.json at all
+
+	// Lay down only the FIRST shipped script; the second is missing — exactly
+	// the install.sh/release.yml gap this task's own addendum fixed.
+	dir := t.TempDir()
+	first := hookScripts[0]
+	if err := os.WriteFile(filepath.Join(dir, first.name), []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, hookScriptName)
+
+	var stdout, stderr bytes.Buffer
+	code := runHookEnsure([]string{"--script", script}, &stdout, &stderr)
+	if code != 4 {
+		t.Fatalf("runHookEnsure() = %d, want 4 when a shipped script is missing (stderr %s)", code, stderr.String())
+	}
+
+	home, _ := os.UserHomeDir()
+
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Errorf("settings.json exists (err=%v), want it never written when a shipped script is missing", err)
+	}
+
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	for _, hs := range hookScripts {
+		if _, err := os.Stat(filepath.Join(hooksDir, hs.name)); !os.IsNotExist(err) {
+			t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", hs.name, hooksDir)
+		}
 	}
 }

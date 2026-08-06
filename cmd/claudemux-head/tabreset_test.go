@@ -126,7 +126,7 @@ func TestFindShippedScriptSkipsEmptyDirs(t *testing.T) {
 }
 
 // siblingOfExecutable resolves a name against the directory holding the test
-// binary itself, which is what gives hookScriptSource its meaning.
+// binary itself, which is what gives srcFor's default resolution its meaning.
 func TestSiblingOfExecutable(t *testing.T) {
 	got, err := siblingOfExecutable("some-script.sh")
 	if err != nil {
