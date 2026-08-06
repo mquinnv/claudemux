@@ -433,19 +433,29 @@ func TestHookEnsureMissingScriptCopiesNothing(t *testing.T) {
 func TestHookEnsureResolvesScriptsViaClaudemuxOnPath(t *testing.T) {
 	writeSettings(t, "")
 
-	// A directory holding `claudemux` and the shipped scripts as siblings, on
-	// PATH — but deliberately NOT beside the test binary.
-	pathDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(pathDir, "claudemux"),
+	// Mirror the REPO's shape, not a flat directory: claudemux in bin/, the hook
+	// scripts in hooks/ beside it. A flat layout passes even without the hooks/
+	// candidate — which is exactly how the first attempt at this fix shipped
+	// green and still failed on a real checkout.
+	repo := t.TempDir()
+	binDir := filepath.Join(repo, "bin")
+	hooksDir := filepath.Join(repo, "hooks")
+	for _, d := range []string{binDir, hooksDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claudemux"),
 		[]byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, hs := range hookScripts {
-		if err := os.WriteFile(filepath.Join(pathDir, hs.name),
+		if err := os.WriteFile(filepath.Join(hooksDir, hs.name),
 			[]byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	pathDir := binDir
 	t.Setenv("PATH", pathDir)
 
 	var stdout, stderr bytes.Buffer
