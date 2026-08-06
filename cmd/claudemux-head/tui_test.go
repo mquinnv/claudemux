@@ -370,6 +370,63 @@ func TestRenderStateLineTruncatesChipWhenNarrow(t *testing.T) {
 	}
 }
 
+// The "no worktree" warning is not a worktree name: it must render without
+// the "⎇ " branch glyph (which would read as "here is a branch" on a message
+// that means the opposite), and — unlike a real worktree name, which is
+// merely descriptive and re-derivable from the session — it must survive at
+// a width that would truncate away a same-length worktree chip, since it is
+// the entire user-visible mitigation for the design risk this session
+// carries.
+func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
+	warningModel := func(width int) model {
+		return model{
+			width:           width,
+			state:           State{Kind: StateIdle, Since: time.Now()},
+			modelName:       "claude-opus-4-7",
+			worktreePending: true,
+			firstPrompt:     "do the thing",
+			// jsonlPath deliberately NOT a worktree path, and sessionCwd unset:
+			// observedWorktree() must be "" so worktreeChip() falls through to
+			// the warning.
+			jsonlPath: "/proj/abc.jsonl",
+		}
+	}
+
+	t.Run("renderStateLine", func(t *testing.T) {
+		wide := warningModel(100)
+		got := renderStateLine(wide, time.Now())
+		if !strings.Contains(got, "⚠ no worktree") {
+			t.Fatalf("renderStateLine = %q, want it to contain the warning", got)
+		}
+		if strings.Contains(got, "⎇") {
+			t.Errorf("renderStateLine = %q, want no branch glyph on the warning", got)
+		}
+
+		// Narrow enough that even a short worktree chip would already be the
+		// first thing to shrink (compare TestRenderStateLineTruncatesChipWhenNarrow,
+		// which loses a chip at width 30), but wide enough to hold the
+		// state/model text plus the warning — which is exactly the point:
+		// the warning shares the never-shrunk group with state/model, not
+		// the chip slot that shrinks first.
+		narrow := warningModel(45)
+		got = renderStateLine(narrow, time.Now())
+		if !strings.Contains(got, "⚠ no worktree") {
+			t.Errorf("renderStateLine at width 45 = %q, want the full warning to survive clipping", got)
+		}
+	})
+
+	t.Run("renderStatusbar", func(t *testing.T) {
+		m := warningModel(100)
+		got := renderStatusbar(m, time.Now(), m.worktreeChip())
+		if !strings.Contains(got, "⚠ no worktree") {
+			t.Fatalf("renderStatusbar = %q, want it to contain the warning", got)
+		}
+		if strings.Contains(got, "⎇") {
+			t.Errorf("renderStatusbar = %q, want no branch glyph on the warning", got)
+		}
+	})
+}
+
 // renderMetersLine always keeps the ctx gauge; as width shrinks it drops the
 // right-group gauges from the end in today's order: eta, then wk, then 5h.
 func TestRenderMetersLineDropsRightGroupKeepsCtx(t *testing.T) {

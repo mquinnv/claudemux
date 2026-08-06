@@ -1168,7 +1168,11 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	} else if m.tabPinned {
 		leftParts = append(leftParts, "⬚ pinned")
 	}
-	if chip != "" {
+	if chip == noWorktreeWarning {
+		// No "⎇ " glyph here: that's a branch symbol, and this message is
+		// about having NO branch/worktree.
+		leftParts = append(leftParts, chip)
+	} else if chip != "" {
 		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
 	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
@@ -1286,9 +1290,20 @@ func renderStateLine(m model, now time.Time) string {
 	} else if m.tabPinned {
 		parts = append(parts, "⬚ pinned")
 	}
-	left := strings.Join(parts, " · ")
 
 	chip := m.worktreeChip()
+	if chip == noWorktreeWarning {
+		// Put the warning in with the state/model text, which never shrinks,
+		// rather than the chip slot below, which is the first thing dropped
+		// as the pane narrows. A real worktree name is fine to lose under a
+		// narrow pane — it's re-derivable from the session. This warning is
+		// the entire visible mitigation for a design risk and must not be
+		// the first casualty.
+		parts = append(parts, chip)
+		chip = ""
+	}
+	left := strings.Join(parts, " · ")
+
 	if chip == "" {
 		return statusbarStyle.Width(m.width).Render(clipLine(" "+left+" ", m.width))
 	}
@@ -1478,6 +1493,15 @@ func (m model) observedWorktree() string {
 	return worktreeName(m.jsonlPath)
 }
 
+// noWorktreeWarning is the exact text the spec requires the chip slot to
+// show when a marked session's first turn ends without a worktree. Unlike a
+// real worktree name, it is not prefixed with the "⎇ " branch glyph (a
+// branch glyph on a message about having NO worktree reads oddly), and
+// renderStatusbar/renderStateLine give it priority over being clipped —
+// unlike a worktree name, it is not "merely descriptive": it is the entire
+// user-visible mitigation for the risk this design accepts.
+const noWorktreeWarning = "⚠ no worktree"
+
 // worktreeChipText decides what the worktree chip slot shows. A real worktree
 // always wins: the warning is only for a marked session that has not got one.
 //
@@ -1488,7 +1512,7 @@ func worktreeChipText(chip string, pending, turnEnded, sawPrompt bool) string {
 		return chip
 	}
 	if pending && turnEnded && sawPrompt {
-		return "⚠ no worktree"
+		return noWorktreeWarning
 	}
 	return ""
 }
