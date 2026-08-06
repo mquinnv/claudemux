@@ -66,7 +66,7 @@ func siblingOfExecutable(name string) (string, error) {
 func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hook ensure", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	scriptFlag := fs.String("script", "", "path to claudemux-map.sh (defaults to the copy beside this binary)")
+	scriptFlag := fs.String("script", "", "path to claudemux-map.sh; its directory is also where every other shipped script (including claudemux-worktree.sh) is resolved from, so pointing this at a lone claudemux-map.sh silently no-ops the rest (defaults to the copy beside this binary)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
