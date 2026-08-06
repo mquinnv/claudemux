@@ -2865,3 +2865,82 @@ func TestWorktreeChipTextWarnsWhenNoneAppeared(t *testing.T) {
 		})
 	}
 }
+
+// worktreeChipText (above) is well tested as a pure function, but the wiring
+// that feeds it — m.worktreePending reading CLAUDEMUX_WORKTREE_PENDING off
+// the real environment in newModel, composed with teardownTurnEnded and
+// m.firstPrompt in worktreeChip — is the entire mitigation for the risk this
+// design accepts: a session marked for a worktree whose first turn ends
+// outside one. Exercise it through newModel, not a hand-built &model{}, so a
+// regression in the env lookup itself (not just in worktreeChipText's logic)
+// would be caught.
+func TestWorktreeChipWiredThroughEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	// A real user prompt followed by an assistant text reply: the last
+	// conversation event is the assistant one with UserText set, which
+	// classifyState reads as StateIdle — i.e. teardownTurnEnded == true, a
+	// turn that has ended. Nothing here puts sessionCwd inside a worktree
+	// (no "cwd" field, and the temp jsonl path itself doesn't carry the
+	// ".claude/worktrees" marker worktreeName looks for), so observedWorktree
+	// stays "" throughout.
+	lines := `{"type":"user","timestamp":"2026-08-06T10:00:00Z","message":{"content":"rename the worktrees"}}` + "\n" +
+		`{"type":"assistant","timestamp":"2026-08-06T10:00:05Z","message":{"model":"claude","content":[{"type":"text","text":"done"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Avoid newSummarizer touching the real, possibly 1Password-backed
+	// CLAUDEMUX_ENV FIFO — see TestNewModelSeedsSummarizingWithSummarizer.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
+
+	t.Run("marked session whose first turn ended outside a worktree warns", func(t *testing.T) {
+		t.Setenv("CLAUDEMUX_WORKTREE_PENDING", "1")
+		m := newModel(defaultConfig(), path, "sess", false)
+		if !m.worktreePending {
+			t.Fatal("worktreePending = false, want true with CLAUDEMUX_WORKTREE_PENDING set")
+		}
+		if got, want := m.worktreeChip(), "⚠ no worktree"; got != want {
+			t.Errorf("worktreeChip() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unmarked session shows no chip", func(t *testing.T) {
+		t.Setenv("CLAUDEMUX_WORKTREE_PENDING", "")
+		m := newModel(defaultConfig(), path, "sess", false)
+		if m.worktreePending {
+			t.Fatal("worktreePending = true, want false with CLAUDEMUX_WORKTREE_PENDING unset")
+		}
+		if got := m.worktreeChip(); got != "" {
+			t.Errorf("worktreeChip() = %q, want empty when the session was never marked", got)
+		}
+	})
+}
+
+// observeWorktreeTransition (TestWorktreeTabSetOnlyOnTransition) is exercised
+// on a hand-built &model{} there. This covers the same gate through newModel
+// with a seeded event history instead, so the wiring — not just the pure
+// transition logic — is under test: a session already inside a worktree at
+// startup (e.g. the head was restarted mid-session) must not adopt its name,
+// since that name is a leftover from before this feature and not
+// task-derived.
+func TestWorktreeTabNotAdoptedForPreExistingWorktreeThroughNewModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	line := `{"type":"user","timestamp":"2026-08-06T10:00:00Z","cwd":"/repo/.claude/worktrees/lovely-wandering-lovelace","message":{"content":"go"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
+
+	m := newModel(defaultConfig(), path, "sess", false)
+	if m.sessionCwd != "/repo/.claude/worktrees/lovely-wandering-lovelace" {
+		t.Fatalf("sessionCwd = %q, want the seeded cwd — the control for this test is broken", m.sessionCwd)
+	}
+	if m.worktreeTab != "" {
+		t.Errorf("worktreeTab = %q, want empty: a worktree observed on the very first recompute must not be adopted as a transition", m.worktreeTab)
+	}
+}
