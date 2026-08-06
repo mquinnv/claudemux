@@ -124,10 +124,18 @@ runs under a non-interactive shell whose PATH may predate `~/.local/bin` entirel
 When the head observes a session *transition* from the main checkout into a worktree, it
 renders the tab as that worktree's name with dashes turned back into spaces.
 
-The transition is already observable for free. `tui.go:314` recomputes `m.inWorktree` from
-the session's transcript cwd on every poll rather than from launch state, so a mid-session
-`EnterWorktree` is picked up with no new plumbing — and the same is true of the worktree
-chip and the teardown gate, neither of which needs to change.
+The transition is already observable for free, though not via `m.inWorktree` — that field
+describes the *head's own* launch directory, is captured once at startup, and serves only
+as the teardown gate's fallback (`tui.go:250-253`). The session's position is `m.sessionCwd`,
+recomputed every poll by `recomputeFromEvents` from the last non-sidechain transcript cwd,
+precisely because the claude process never chdir's when the agent enters a worktree. That
+is what `worktreeChip()` already reads (`tui.go:1386-1394`), so the chip needs no change,
+and the teardown gate needs none either: `teardownInWorktree` is derived from `sessionCwd`
+at arm time (`tui.go:1556-1562`), which is after any mid-session entry.
+
+The transition itself is therefore: a poll in which `worktreeNameForCwd(m.sessionCwd)` is
+non-empty, having been empty on a previous poll of the same session. It must reset on
+`switchSession` along with the rest of the per-session state.
 
 Gating on the transition rather than on `inWorktree` is what protects the tab from
 regressing. A session that started *already* in a worktree — an older one, or one made by
@@ -188,5 +196,5 @@ duplicated.
 
 - Renaming a worktree, ever — see the approach section.
 - Renaming the branch to follow a corrected tab.
-- Any change to the teardown feature. It reads `m.inWorktree` and the session cwd, both of
-  which already track a mid-session worktree entry.
+- Any change to the teardown feature. `teardownInWorktree` is derived from `sessionCwd` at
+  arm time, which already tracks a mid-session worktree entry.
