@@ -45,6 +45,36 @@ The mapping is:
 | `..._linux_arm64.tar.gz` | `on_linux`  / `on_arm` |
 | `..._linux_amd64.tar.gz` | `on_linux`  / `on_intel`|
 
+### The formula's `libexec.install` file list — check this EVERY release
+
+The formula's `install` block has its own `libexec.install` line that names
+every file it copies out of the tarball, independent of `install.sh` and
+`.github/workflows/release.yml` in this repo. It is **not** generated from
+those — it is a separate, hand-maintained list that must be kept in sync by
+hand, every time a shipped script is added, renamed, or removed here.
+
+As of this writing that list must name exactly these **five** files, kept as
+siblings: `claudemux-head`, `claudemux`, `project-color-resolve.sh`,
+`claudemux-map.sh`, `claudemux-worktree.sh`.
+
+This matters more than a typical packaging omission: `claudemux-head hook
+ensure` resolves and validates every shipped script's source path **before
+copying any of them** (see `cmd/claudemux-head/hook.go`). One missing
+sibling — e.g. a formula that lists only four files — doesn't just fail to
+install the new script; it fails the entire hook-registration pass, so the
+already-working `claudemux-map.sh` pane-map hook is silently lost too. A
+formula that ships four files when five are needed is not "missing one
+feature" — it is "hook registration is a total, silent no-op for every
+Homebrew user."
+
+If you added, renamed, or removed a shipped script in this release, update
+**all three** places it is listed before tagging:
+
+1. `install.sh` (this repo)
+2. `.github/workflows/release.yml` (this repo)
+3. `Formula/claudemux.rb`'s `libexec.install` list, in `mquinnv/homebrew-tap`
+   (a separate repo — not edited from here)
+
 Verify before pushing:
 
 ```bash
