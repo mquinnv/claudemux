@@ -44,6 +44,10 @@ func main() {
 		os.Exit(2)
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "switchboard" {
+		os.Exit(runSwitchboard(os.Stderr))
+	}
+
 	sessionFlag := flag.String("session", "", "Use a specific session ID instead of auto-detecting")
 	flag.Parse()
 
