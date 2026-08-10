@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +82,56 @@ func TestMaybePublishStateOutsideTmux(t *testing.T) {
 	m := &model{state: State{Kind: StateIdle}}
 	if cmd := m.maybePublishState(time.Now()); cmd != nil {
 		t.Error("empty selfPane must yield nil cmd")
+	}
+}
+
+func TestSanitizeOptionValue(t *testing.T) {
+	if got := sanitizeOptionValue("a\tb\nc"); got != "a b c" {
+		t.Errorf("got %q", got)
+	}
+	long := strings.Repeat("word ", 60)
+	if got := sanitizeOptionValue(long); len([]rune(got)) > 120 {
+		t.Errorf("not truncated: %d runes", len([]rune(got)))
+	}
+}
+
+func TestPublishOptionCmd(t *testing.T) {
+	if cmd := publishOptionCmd("", infoSummaryOption, "x"); cmd != nil {
+		t.Error("outside tmux must be nil")
+	}
+	if cmd := publishOptionCmd("%3", infoSummaryOption, ""); cmd == nil {
+		t.Error("empty value must still publish (columns stay aligned)")
+	}
+}
+
+func TestMaybePublishInfo(t *testing.T) {
+	m := &model{selfPane: "%3", publishedContext: -1}
+	m.contextPct = 41.7
+	m.summary = Summary{Now: "doing things"}
+	m.lastTyped = "/done"
+	if got := len(m.maybePublishInfo()); got != 3 {
+		t.Fatalf("first publish: %d cmds, want 3", got)
+	}
+	if m.publishedContext != 41 || m.publishedSummary != "doing things" || m.publishedPrompt != "/done" {
+		t.Errorf("guards not updated: %d %q %q", m.publishedContext, m.publishedSummary, m.publishedPrompt)
+	}
+	if got := len(m.maybePublishInfo()); got != 0 {
+		t.Errorf("unchanged: %d cmds, want 0", got)
+	}
+	m.contextPct = 41.9 // same integer percent: no republish
+	if got := len(m.maybePublishInfo()); got != 0 {
+		t.Errorf("same integer percent republished: %d cmds", got)
+	}
+	m.contextPct = 42.0
+	if got := len(m.maybePublishInfo()); got != 1 {
+		t.Errorf("context change: %d cmds, want 1", got)
+	}
+}
+
+func TestMaybePublishInfoOutsideTmux(t *testing.T) {
+	m := &model{publishedContext: -1}
+	m.summary = Summary{Now: "x"}
+	if got := len(m.maybePublishInfo()); got != 0 {
+		t.Errorf("outside tmux: %d cmds, want 0", got)
 	}
 }

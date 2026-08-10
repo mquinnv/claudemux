@@ -115,6 +115,13 @@ type model struct {
 	// not per tick.
 	publishedState string
 
+	// publishedContext/-Summary/-Prompt are the last-published info option
+	// values (context as integer percent; -1 = never published, since 0 is a
+	// legal percent). Same publish-on-change contract as publishedState.
+	publishedContext int
+	publishedSummary string
+	publishedPrompt  string
+
 	// sessionCwd is the latest cwd the *main* session recorded in its
 	// transcript (last non-sidechain entry's cwd), recomputed from the event
 	// ring each poll. It — not tmux's pane cwd — drives the worktree chip: the
@@ -316,15 +323,17 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 	summarizer := newSummarizer(cfg.Summary)
 
 	m := model{
-		jsonlPath:      jsonlPath,
-		sessionID:      sessionID,
-		followActive:   followActive,
-		selfPane:       os.Getenv("TMUX_PANE"),
-		paneDir:        paneMapDir(),
-		reader:         r,
-		allEvents:      seeded,
-		rateLimitsPath: defaultRateLimitsPath(),
-		firstPrompt:    r.FirstPrompt(),
+		jsonlPath:    jsonlPath,
+		sessionID:    sessionID,
+		followActive: followActive,
+		selfPane:     os.Getenv("TMUX_PANE"),
+		paneDir:      paneMapDir(),
+		// -1: 0 is a legal context percent, so it can't double as "unset".
+		publishedContext: -1,
+		reader:           r,
+		allEvents:        seeded,
+		rateLimitsPath:   defaultRateLimitsPath(),
+		firstPrompt:      r.FirstPrompt(),
 		// Init always issues the first poll itself (see Init below), so the
 		// flag starts held to prevent the first 1s tick from firing a second,
 		// concurrent poll that races on EventReader.offset.
@@ -896,17 +905,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prevTyped := m.lastTyped
 		m.recomputeFromEvents(msg.time)
 		pubCmd := m.maybePublishState(msg.time)
+		infoCmds := m.maybePublishInfo()
+		allPub := tea.Batch(append(infoCmds, pubCmd)...)
 		m.lastUpdate = msg.time
 		m.autoArmTeardown(prevTyped, msg.time)
 		if m.shouldSummarize(prevKind, msg.time) {
 			m.summarizing = true
-			return m, tea.Batch(m.summarize(), pubCmd)
+			return m, tea.Batch(m.summarize(), allPub)
 		}
 		if m.shouldRetrySummarize(msg.time) {
 			m.summarizing = true
-			return m, tea.Batch(m.summarize(), pubCmd)
+			return m, tea.Batch(m.summarize(), allPub)
 		}
-		return m, pubCmd
+		return m, allPub
 
 	case summarizerMsg:
 		m.acquiringKey = false

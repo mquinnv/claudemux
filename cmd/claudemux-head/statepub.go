@@ -98,3 +98,60 @@ func (m *model) maybePublishState(now time.Time) tea.Cmd {
 	m.publishedState = v
 	return publishStateCmd(m.selfPane, m.state, now)
 }
+
+// Companion options to @claudemux_state: coarse per-session facts the lobby
+// renders. Values are sanitized (no tabs/newlines, bounded length) because
+// the lobby's snapshot parser is line- and tab-delimited.
+const (
+	infoContextOption = "@claudemux_context"
+	infoSummaryOption = "@claudemux_summary"
+	infoPromptOption  = "@claudemux_prompt"
+)
+
+// infoValueMaxRunes bounds published summary/prompt text. 120 comfortably
+// fills a lobby line and keeps `tmux list-sessions` output shell-friendly.
+const infoValueMaxRunes = 120
+
+func sanitizeOptionValue(s string) string {
+	return truncateWords(collapseWhitespace(s), infoValueMaxRunes)
+}
+
+// publishOptionCmd sets one session option, fire-and-forget. An empty value
+// is still published: the lobby's parser needs every column present, and
+// "unset" and "empty" must stay distinguishable from a head that predates
+// this option (which never sets it at all).
+func publishOptionCmd(selfPane, option, value string) tea.Cmd {
+	if selfPane == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", "set-option", "-t", selfPane, option, value).Run()
+		return nil
+	}
+}
+
+// maybePublishInfo returns publish cmds for every info option whose value
+// changed since its last publish — usually none, occasionally one. Change
+// guards live per option so a chatty value (context) cannot force republishes
+// of quiet ones (summary).
+func (m *model) maybePublishInfo() []tea.Cmd {
+	if m.selfPane == "" {
+		return nil
+	}
+	var cmds []tea.Cmd
+	if pct := int(m.contextPct); pct != m.publishedContext {
+		m.publishedContext = pct
+		cmds = append(cmds, publishOptionCmd(m.selfPane, infoContextOption, strconv.Itoa(pct)))
+	}
+	if s := sanitizeOptionValue(m.summary.Now); s != m.publishedSummary {
+		m.publishedSummary = s
+		cmds = append(cmds, publishOptionCmd(m.selfPane, infoSummaryOption, s))
+	}
+	if p := sanitizeOptionValue(m.lastTyped); p != m.publishedPrompt {
+		m.publishedPrompt = p
+		cmds = append(cmds, publishOptionCmd(m.selfPane, infoPromptOption, p))
+	}
+	return cmds
+}
