@@ -296,10 +296,18 @@ func teardownCommandTyped(prompt, command string) bool {
 // down` appearing unbidden. The later phases read the same either way —
 // `press x to tear down` and `exiting claude…` describe the action, not who
 // started it, and a blocked reading means the same thing in both paths.
-func teardownChip(p teardownPhase, blocked, auto bool, note string, noteAt, now time.Time) string {
+//
+// reason is the auto/non-worktree block's cleanliness gripe ("dirty tree",
+// "unpushed", ...) — empty for a worktree block, whose reason is always the
+// same fixed sentence below. When set it is appended in parens so the chip
+// says what's actually holding the gate shut, not just that it is shut.
+func teardownChip(p teardownPhase, blocked, auto bool, reason, note string, noteAt, now time.Time) string {
 	switch p {
 	case teardownSent:
 		if blocked {
+			if reason != "" {
+				return "⏻ blocked (" + reason + ")"
+			}
 			return "⏻ worktree still present"
 		}
 		if auto {

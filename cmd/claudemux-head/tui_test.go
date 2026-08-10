@@ -2053,24 +2053,27 @@ func TestTeardownAutoArmSurvivesLastPromptShadow(t *testing.T) {
 	}
 }
 
-// Worktree sessions only. Without a worktree to watch, teardownGateOpen
-// reduces to turn-end, which lands seconds after the wrap-up finishes — one
-// stray `x` would then send /exit and kill a session nobody armed by hand.
-func TestTeardownAutoArmSkipsNonWorktreeSession(t *testing.T) {
+// Auto-arm outside a worktree now captures the session's real (non-worktree)
+// directory as the gate target rather than declining and clearing it — the
+// safety net moved to teardownAutoGateOpen's cleanliness requirement (see
+// TestTeardownAutoArmsOutsideWorktree, TestTeardownProbeMsgAutoNonWorktree),
+// not to refusing to arm at all. This exercises a real temp directory, so
+// worktreeNameForCwd genuinely resolves it to "not a worktree" rather than
+// relying on a made-up path never matching.
+func TestTeardownAutoArmCapturesRealNonWorktreeTarget(t *testing.T) {
 	m := teardownTestModel()
-	m.sessionCwd = filepath.Join(t.TempDir(), "plain-checkout")
+	dir := filepath.Join(t.TempDir(), "plain-checkout")
+	m.sessionCwd = dir
 	got, cmd := pollPrompt(m, "/done", time.Now())
-	if got.teardown != teardownIdle {
-		t.Errorf("phase = %v, want teardownIdle outside a worktree", got.teardown)
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent outside a worktree", got.teardown)
 	}
-	// cmd can no longer be asserted nil here: the Idle→Thinking edge also
-	// carries a state-publish cmd (maybePublishState), unrelated to teardown.
-	// "Must not auto-arm" is covered by the teardown-phase and gate-target
-	// checks above/below.
 	_ = cmd
-	if got.teardownWorkDir != "" || got.teardownInWorktree {
-		t.Errorf("half-captured gate target left behind: %q / %v",
-			got.teardownWorkDir, got.teardownInWorktree)
+	if got.teardownInWorktree {
+		t.Error("inWorktree = true for a plain directory")
+	}
+	if got.teardownWorkDir != dir {
+		t.Errorf("teardownWorkDir = %q, want %q", got.teardownWorkDir, dir)
 	}
 }
 
@@ -2139,6 +2142,27 @@ func TestTeardownAutoArmInertOutsideTmux(t *testing.T) {
 	got, _ := pollPrompt(m, "/done", time.Now())
 	if got.teardown != teardownIdle {
 		t.Errorf("phase = %v, want teardownIdle outside tmux", got.teardown)
+	}
+}
+
+// A non-worktree session now auto-arms too — the not-a-worktree decline is
+// gone. The auto gate (teardownAutoGateOpen) is what keeps this safe: without
+// worktree evidence it additionally requires a clean, pushed tree before the
+// second `x` becomes live, so arming itself is no longer the risky part.
+func TestTeardownAutoArmsOutsideWorktree(t *testing.T) {
+	m := teardownTestModel()
+	m.sessionCwd = "/tmp/plain-project"
+	prev := m.lastTyped
+	m.lastTyped = "/done"
+	m.autoArmTeardown(prev, time.Now())
+	if m.teardown != teardownSent {
+		t.Fatalf("teardown = %v, want teardownSent (auto-arm must no longer decline non-worktree sessions)", m.teardown)
+	}
+	if !m.teardownAuto {
+		t.Error("auto-armed teardown must set teardownAuto")
+	}
+	if m.teardownInWorktree {
+		t.Error("captured target must record non-worktree")
 	}
 }
 
@@ -2267,6 +2291,44 @@ func TestTeardownProbeBlocksWhenWorktreeSurvives(t *testing.T) {
 	if !got.teardownBlocked {
 		t.Error("blocked = false, want true")
 	}
+}
+
+// The auto/non-worktree probe path branches off the worktree logic above:
+// no worktree evidence is available, so the gate rests on cleanliness
+// instead, and a dirty reading blocks with the reason surfaced (never a
+// kill) rather than promoting straight to teardownReady.
+func TestTeardownProbeMsgAutoNonWorktree(t *testing.T) {
+	arm := func() model {
+		m := teardownTestModel()
+		m.sessionCwd = "/tmp/plain-project"
+		prev := m.lastTyped
+		m.lastTyped = "/done"
+		m.autoArmTeardown(prev, time.Now())
+		m.teardownSubmitted = true
+		m.state = State{Kind: StateIdle, Since: time.Now()}
+		return m
+	}
+
+	t.Run("clean opens the gate", func(t *testing.T) {
+		m := arm()
+		next, _ := m.Update(teardownProbeMsg{cleanReason: ""})
+		got := next.(model)
+		if got.teardown != teardownReady {
+			t.Errorf("teardown = %v, want teardownReady", got.teardown)
+		}
+	})
+
+	t.Run("dirty blocks with reason and never kills", func(t *testing.T) {
+		m := arm()
+		next, _ := m.Update(teardownProbeMsg{cleanReason: "dirty tree"})
+		got := next.(model)
+		if got.teardown != teardownSent {
+			t.Errorf("teardown = %v, want still teardownSent", got.teardown)
+		}
+		if !got.teardownBlocked || got.teardownBlockReason != "dirty tree" {
+			t.Errorf("blocked=%v reason=%q, want blocked with dirty tree", got.teardownBlocked, got.teardownBlockReason)
+		}
+	})
 }
 
 // Claude exiting during the wait triggers the kill.

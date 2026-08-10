@@ -233,7 +233,12 @@ type model struct {
 	// standing — a wrap-up that bailed. It drives the status chip; the gate
 	// simply stays shut.
 	teardownBlocked bool
-	teardownProbing bool
+	// teardownBlockReason is why an auto-armed non-worktree gate is shut
+	// ("dirty tree", "unpushed", ...). Rendered beside the blocked chip;
+	// empty for worktree blocks, whose reason is always the same (the
+	// worktree still exists).
+	teardownBlockReason string
+	teardownProbing     bool
 	// teardownProbeAt stamps the last ready-gate probe that was issued, so a
 	// blocked teardown can back off to teardownBlockedProbeInterval instead of
 	// forking git every second for as long as it sits on screen.
@@ -838,7 +843,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.teardownProbing && m.teardownProbeDue(now) {
 				m.teardownProbing = true
 				m.teardownProbeAt = now
-				cmds = append(cmds, teardownProbeCmd(m.teardownWorkDir, m.mainCheckout, false))
+				cmds = append(cmds, teardownProbeCmd(m.teardownWorkDir, m.mainCheckout,
+					m.teardownAuto && !m.teardownInWorktree))
 			}
 		case teardownExiting:
 			if now.Sub(m.teardownAt) >= teardownExitTimeout {
@@ -979,6 +985,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.teardown != teardownSent {
 			return m, nil
 		}
+		if m.teardownAuto && !m.teardownInWorktree {
+			// Auto-armed without worktree evidence: the gate needs the
+			// wrap-up's own success bar. Same freshness requirement as the
+			// worktree path below.
+			if m.teardownSubmitted && teardownAutoGateOpen(m.state.Kind, false, false, msg.cleanReason) {
+				m.teardown = teardownReady
+				m.teardownAt = time.Now()
+				m.teardownBlocked = false
+				m.teardownBlockReason = ""
+				return m, nil
+			}
+			m.teardownBlocked = m.teardownSubmitted && teardownTurnEnded(m.state.Kind) && msg.cleanReason != ""
+			if m.teardownBlocked {
+				m.teardownBlockReason = msg.cleanReason
+			}
+			return m, nil
+		}
 		// teardownSubmitted is required, not just the gate: m.state.Kind is
 		// only as fresh as the last dataMsg, so a probe returning a second
 		// after arming can be judged against a StateIdle that was captured
@@ -991,6 +1014,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.teardown = teardownReady
 			m.teardownAt = time.Now()
 			m.teardownBlocked = false
+			m.teardownBlockReason = ""
 			return m, nil
 		}
 		// The turn is over and the worktree is still there: the wrap-up
@@ -1140,7 +1164,7 @@ func truncateRunes(s string, max int) string {
 // teardownChipText renders this model's teardown chip, or "" when there is
 // nothing to show.
 func (m model) teardownChipText(now time.Time) string {
-	return teardownChip(m.teardown, m.teardownBlocked, m.teardownAuto, m.teardownNote, m.teardownNoteAt, now)
+	return teardownChip(m.teardown, m.teardownBlocked, m.teardownAuto, m.teardownBlockReason, m.teardownNote, m.teardownNoteAt, now)
 }
 
 // renderStatusbar packs state and budget info onto a single
@@ -1574,6 +1598,7 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		m.teardownPrompt = m.lastTyped
 		m.teardownArmedBusy = !teardownTurnEnded(m.state.Kind)
 		m.teardownBlocked = false
+		m.teardownBlockReason = ""
 		m.teardownProbeAt = time.Time{}
 		m.teardownNote = ""
 		m.teardownAuto = false
@@ -1623,14 +1648,15 @@ func (m model) teardownKey() (model, tea.Cmd) {
 // head itself started with `x`, whose command reaches the transcript as this
 // very prompt — has its own submission evidence and must not be restarted.
 //
-// Only for worktree sessions, which is the load-bearing restriction. A wrap-up
-// typed by hand is submitted the moment it is seen, so the ready gate reduces
-// to teardownGateOpen's conditions, and for a non-worktree session that is
-// turn-end alone: the gate would open seconds after `/done` finished and one
-// stray `x` would send `/exit` and kill a session nobody asked to kill. In a
-// worktree the gate additionally requires the worktree to be gone, which is
-// real evidence that the wrap-up succeeded and that the user is done. `x` is
-// unchanged for everything else.
+// Arms for worktree and non-worktree sessions alike. A wrap-up typed by hand
+// is submitted the moment it is seen, so what makes the second `x` safe to
+// offer is the ready gate, not whether arming happened at all — see
+// teardownAutoGateOpen. In a worktree the gate requires the worktree to be
+// gone, which is real evidence the wrap-up succeeded. Without one there is no
+// such evidence, so the gate instead requires the wrap-up's own success bar —
+// a clean, pushed tree — before offering the kill; a dirty reading blocks and
+// keeps polling rather than declining to arm. `x` is unchanged for everything
+// else.
 func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 	if m.teardown != teardownIdle {
 		return
@@ -1645,17 +1671,8 @@ func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 		return
 	}
 	m.captureTeardownTarget()
-	if !m.teardownInWorktree {
-		teardownLogf("auto-arm declined prompt=%q reason=not-a-worktree cwd=%s",
-			m.lastTyped, m.teardownWorkDir)
-		// Leave no half-captured target behind: the fields are only read from
-		// teardownSent, but the next `x` press recaptures them anyway, so
-		// clearing them keeps "captured" and "armed" the same thing.
-		m.teardownWorkDir, m.teardownInWorktree = "", false
-		return
-	}
-	teardownLogf("auto-arm prompt=%q cwd=%s jsonl=%s",
-		m.lastTyped, m.teardownWorkDir, m.jsonlPath)
+	teardownLogf("auto-arm prompt=%q worktree=%v cwd=%s",
+		m.lastTyped, m.teardownInWorktree, m.teardownWorkDir)
 	m.teardown = teardownSent
 	m.teardownAt = now
 	m.teardownPrompt = m.lastTyped
@@ -1668,6 +1685,7 @@ func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 	m.teardownSubmitted = true
 	m.teardownArmedBusy = false
 	m.teardownBlocked = false
+	m.teardownBlockReason = ""
 	m.teardownProbeAt = time.Time{}
 	m.teardownNote = ""
 	m.teardownAuto = true
@@ -1716,6 +1734,7 @@ func (m model) abortTeardown(note string, now time.Time) model {
 		m.teardown, note, m.teardownSubmitted, m.teardownBlocked, m.jsonlPath)
 	m.teardown = teardownIdle
 	m.teardownBlocked = false
+	m.teardownBlockReason = ""
 	m.teardownProbing = false
 	m.teardownSubmitted = false
 	m.teardownArmedBusy = false

@@ -197,29 +197,33 @@ func TestTeardownChip(t *testing.T) {
 		phase   teardownPhase
 		blocked bool
 		auto    bool
+		reason  string
 		note    string
 		noteAt  time.Time
 		want    string
 	}{
-		{"idle, nothing to say", teardownIdle, false, false, "", time.Time{}, ""},
-		{"sent", teardownSent, false, false, "", time.Time{}, "⏻ wrapping up…"},
-		{"sent but blocked", teardownSent, true, false, "", time.Time{}, "⏻ worktree still present"},
-		{"ready", teardownReady, false, false, "", time.Time{}, "⏻ press x to tear down"},
-		{"exiting", teardownExiting, false, false, "", time.Time{}, "⏻ exiting claude…"},
-		{"fresh abort note", teardownIdle, false, false, "claude didn't exit", now.Add(-2 * time.Second), "⏻ claude didn't exit"},
-		{"expired abort note", teardownIdle, false, false, "claude didn't exit", now.Add(-6 * time.Second), ""},
-		{"note is ignored mid-teardown", teardownSent, false, false, "stale", now, "⏻ wrapping up…"},
+		{"idle, nothing to say", teardownIdle, false, false, "", "", time.Time{}, ""},
+		{"sent", teardownSent, false, false, "", "", time.Time{}, "⏻ wrapping up…"},
+		{"sent but blocked", teardownSent, true, false, "", "", time.Time{}, "⏻ worktree still present"},
+		{"ready", teardownReady, false, false, "", "", time.Time{}, "⏻ press x to tear down"},
+		{"exiting", teardownExiting, false, false, "", "", time.Time{}, "⏻ exiting claude…"},
+		{"fresh abort note", teardownIdle, false, false, "", "claude didn't exit", now.Add(-2 * time.Second), "⏻ claude didn't exit"},
+		{"expired abort note", teardownIdle, false, false, "", "claude didn't exit", now.Add(-6 * time.Second), ""},
+		{"note is ignored mid-teardown", teardownSent, false, false, "", "stale", now, "⏻ wrapping up…"},
 		// A teardown the head armed itself says so while it waits: the user
 		// pressed nothing, so the arming must not be invisible.
-		{"auto-armed, waiting", teardownSent, false, true, "", time.Time{}, "⏻ watching your wrap-up…"},
+		{"auto-armed, waiting", teardownSent, false, true, "", "", time.Time{}, "⏻ watching your wrap-up…"},
 		// A bailed wrap-up means the same thing however it was armed.
-		{"auto-armed but blocked", teardownSent, true, true, "", time.Time{}, "⏻ worktree still present"},
+		{"auto-armed but blocked", teardownSent, true, true, "", "", time.Time{}, "⏻ worktree still present"},
 		// Past the wait the chip describes the action, not its provenance.
-		{"auto-armed, ready", teardownReady, false, true, "", time.Time{}, "⏻ press x to tear down"},
+		{"auto-armed, ready", teardownReady, false, true, "", "", time.Time{}, "⏻ press x to tear down"},
+		// An auto/non-worktree block carries a cleanliness reason, and the
+		// chip must say what it is rather than the fixed worktree sentence.
+		{"auto-armed, blocked with reason", teardownSent, true, true, "dirty tree", "", time.Time{}, "⏻ blocked (dirty tree)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := teardownChip(tt.phase, tt.blocked, tt.auto, tt.note, tt.noteAt, now)
+			got := teardownChip(tt.phase, tt.blocked, tt.auto, tt.reason, tt.note, tt.noteAt, now)
 			if got != tt.want {
 				t.Errorf("teardownChip() = %q, want %q", got, tt.want)
 			}
