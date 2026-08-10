@@ -13,9 +13,10 @@ func swTestModel() swModel {
 	m.width, m.height = 80, 24
 	m.snap = swSnapshot{
 		Sessions: []swSession{
-			{Name: "api", State: "Idle", Since: time.Now().Add(-2 * time.Minute)},
-			{Name: "web", State: "Thinking", Since: time.Now()},
-			{Name: "scratch"},
+			{Name: "api", State: "Idle", Since: time.Now().Add(-2 * time.Minute),
+				Context: 37, Topic: "build fixes", Summary: "fixing the build", Prompt: "run the tests"},
+			{Name: "web", State: "Thinking", Since: time.Now(), Context: -1},
+			{Name: "scratch", Context: -1},
 		},
 		Lobby:   "switchboard",
 		Clients: map[string]string{"/dev/ttys001": "switchboard"},
@@ -89,6 +90,32 @@ func TestSwModelViewShowsFleet(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestSwModelViewShowsInfo(t *testing.T) {
+	m := swTestModel()
+	view := m.View()
+	for _, want := range []string{"37%", "build fixes", "fixing the build"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestSwModelViewPromptFallback(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions[0].Summary = ""
+	m.snap.Sessions[0].Prompt = "run the tests"
+	if view := m.View(); !strings.Contains(view, "run the tests") {
+		t.Errorf("prompt fallback missing:\n%s", view)
+	}
+}
+
+func TestSwModelViewOmitsUnsetContext(t *testing.T) {
+	m := swTestModel()
+	if view := m.View(); strings.Contains(view, "-1%") {
+		t.Errorf("unset context must be omitted, not rendered:\n%s", view)
 	}
 }
 

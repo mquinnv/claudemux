@@ -63,12 +63,12 @@ func swPollCmd(selfPane string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}")
+			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}")
 		if err != nil {
 			return swSnapshotMsg{err: err}
 		}
 		paneOut, err := swTmux(ctx, "list-panes", "-a", "-F",
-			"#{session_name}\t#{pane_id}\t#{pane_current_command}")
+			"#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_name}")
 		if err != nil {
 			return swSnapshotMsg{err: err}
 		}
@@ -183,11 +183,37 @@ func (m swModel) View() string {
 		if !sess.Since.IsZero() {
 			age = " " + swUnknownStyle.Render(formatDuration(now.Sub(sess.Since)))
 		}
+		// Unset context (-1, pre-publish head or unparseable) renders nothing
+		// rather than a misleading "-1%".
+		ctx := ""
+		if sess.Context >= 0 {
+			pct := float64(sess.Context)
+			ctx = "  " + renderBar(5, pct, thresholdColor(pct)) + fmt.Sprintf(" %d%%", sess.Context)
+		}
+		topic := ""
+		if sess.Topic != "" {
+			topic = "  " + swUnknownStyle.Render(sess.Topic)
+		}
 		name := fmt.Sprintf("%-24s", sess.Name)
 		if i == m.sel {
 			name = swSelStyle.Render(name)
 		}
-		fmt.Fprintf(&b, " %s%s %s%s\n", marker, name, style.Render(state), age)
+		fmt.Fprintf(&b, " %s%s %s%s%s%s\n", marker, name, style.Render(state), age, ctx, topic)
+
+		// Line 2: summary falls back to prompt, both falls back to
+		// "summary · prompt"; omitted entirely when both are empty.
+		detail := sess.Summary
+		if detail == "" {
+			detail = sess.Prompt
+		} else if sess.Prompt != "" {
+			detail = detail + " · " + sess.Prompt
+		}
+		if detail != "" {
+			if m.width > 6 && len([]rune(detail)) > m.width-6 {
+				detail = truncateRunes(detail, m.width-6)
+			}
+			fmt.Fprintf(&b, "    %s\n", swStatusStyle.Render(detail))
+		}
 	}
 	status := m.cond.statusLine(m.snap)
 	if m.standby {
