@@ -63,11 +63,14 @@ tmux set-option -t <session> @claudemux_state <value> \; \
 ### 2. Switchboard subcommand
 
 Runs full screen in its own tmux session (the lobby). Once per second it takes a
-snapshot via two tmux calls:
+snapshot via three tmux calls:
 
 - `tmux list-sessions -F '#{session_name}\t#{@claudemux_state}\t#{@claudemux_state_since}'`
-- `tmux list-panes -a -F '#{session_name}\t#{pane_current_command}'` — liveness: a
-  session counts as a claudemux session only if it has a pane running `claudemux-head`.
+- `tmux list-panes -a -F '#{session_name}\t#{pane_id}\t#{pane_current_command}'` —
+  liveness (a session counts as a claudemux session only if it has a pane running
+  `claudemux-head`) and identifying the lobby (the session owning our own pane).
+- `tmux list-clients -F '#{client_name}\t#{client_session}'` — locating the driven
+  client and where it currently is.
 
 The snapshot feeds a **conductor** state machine:
 
