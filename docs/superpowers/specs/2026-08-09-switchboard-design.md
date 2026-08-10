@@ -6,16 +6,28 @@
 
 A full-screen utility that automatically ferries your tmux client between claudemux
 sessions that are paused waiting on input. You park on a lobby screen; when a session
-starts Awaiting, the switchboard switches your client to it; when you answer, it moves
+starts waiting on input, the switchboard switches your client to it; when you answer, it moves
 you to the next waiting session, or back to the lobby when nothing is waiting.
 
 ## Scope
 
 - Watches **claudemux sessions only** (sessions with a live `claudemux-head` pane).
 - Switch policy: **only when resolved** — once it lands you on a waiting session it
-  stays put until that session leaves Awaiting. No dwell timer.
+  stays put until that session stops waiting. No dwell timer.
 - Home base: a **lobby screen** in the switchboard's own tmux session showing the
   fleet and its states.
+
+## What "waiting on input" means
+
+`classifyState` deliberately no longer emits `StateAwaiting` (the 15s stuck-tool
+heuristic was removed for false positives — see `state.go:36`, `teardown.go:164`).
+A session counts as **waiting** when its published state is either:
+
+- `Idle` — Claude's turn ended; the session is waiting for the next prompt, or
+- `Tool:AskUserQuestion` — an AskUserQuestion tool_use is unresolved; Claude is
+  literally asking the user something.
+
+Permission prompts are **not** detectable from the transcript and are out of scope.
 
 ## Architecture
 
@@ -34,11 +46,13 @@ re-implements transcript tailing.
 On every state-kind transition (and once at startup), the head runs:
 
 ```
-tmux set-option -t <session> @claudemux_state <Kind> \; \
+tmux set-option -t <session> @claudemux_state <value> \; \
      set-option -t <session> @claudemux_state_since <unix-seconds>
 ```
 
-- `<Kind>` is the `StateKind` string (`Idle`, `Working`, `Tool`, `Awaiting`, …).
+- `<value>` is the machine form of the state: the kind name (`Idle`, `Thinking`,
+  `Compacting`, …), with tool states as `Tool:<ToolName>` (e.g.
+  `Tool:AskUserQuestion`).
 - `_since` comes from `State.Since`, letting the watcher order the waiting queue
   oldest-first even across watcher restarts.
 - Fire-and-forget with a short timeout, following the `tabtitle.go` pattern; a wedged
@@ -57,10 +71,10 @@ snapshot via two tmux calls:
 
 The snapshot feeds a **conductor** state machine:
 
-- **Parked** — the driven client is on the lobby. If any session is Awaiting,
+- **Parked** — the driven client is on the lobby. If any session is waiting,
   `switch-client` to the oldest-waiting one and move to Escorting.
-- **Escorting** — the conductor moved the client to session X. Hold until X's state is
-  not Awaiting for one full poll tick, then switch to the next queued session, or back
+- **Escorting** — the conductor moved the client to session X. Hold until a poll
+  observes X no longer waiting, then switch to the next queued session, or back
   to the lobby if the queue is empty.
 - **Paused** — the client's current session is not where the conductor put it (the
   user switched manually, including via the lobby's Enter key). Stop conducting;
@@ -71,7 +85,13 @@ Client handling: the conductor drives exactly one client — the one attached to
 lobby session when conducting starts (re-resolved if it detaches). The switchboard's
 own session is excluded from watching.
 
-Queue: sessions whose state is `Awaiting`, ordered by `_since` ascending. Sessions
+Queue: sessions that are waiting (per the definition above) and not snoozed,
+ordered by `_since` ascending (name as tiebreak).
+
+Snooze: if the user manually leaves an escorted session that is still waiting, that
+session is snoozed for its current waiting episode — it re-queues only when its
+`_since` changes (a new waiting episode). Without this, skipping an Idle session
+would bounce the client straight back to it on the next return to the lobby. Sessions
 with a missing or unparseable option are shown as unknown and never queued.
 
 ### 3. Lobby UI
@@ -80,7 +100,7 @@ Full-screen fleet view rendered with Bubble Tea + lipgloss (matching the existin
 head styling conventions):
 
 - One row per claudemux session: name, colored state chip, time in state, and a queue
-  marker on Awaiting sessions.
+  marker on waiting sessions.
 - A status line: `conducting` / `paused — you navigated away` / `N waiting`.
 - Keys: `j`/`k` (and arrows) to move the selection, `Enter` to switch-client to the
   selected session manually (this pauses conducting), `q` to quit.
