@@ -166,3 +166,37 @@ func TestConductorPicksLobbyClientDeterministically(t *testing.T) {
 		t.Errorf("must pick lexicographically smallest lobby client, act=%+v ok=%v", act, ok)
 	}
 }
+
+func TestConductorClientChurnMidEscort(t *testing.T) {
+	c := newConductor()
+	// Dispatch to "a" on old client.
+	c.step(swSnapshot{
+		Sessions: []swSession{waiting("a", 100)},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys001": "switchboard"},
+	})
+	// Old client vanishes, new one appears at lobby; "a" still waits.
+	// This is not a user walk-away, so no snooze.
+	if _, ok := c.step(swSnapshot{
+		Sessions: []swSession{waiting("a", 100)},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys002": "switchboard"},
+	}); ok {
+		t.Error("client churn: no switch this tick")
+	}
+	if len(c.snoozed) > 0 {
+		t.Errorf("client churn: no snooze entry, got %v", c.snoozed)
+	}
+	if c.phase != swParked {
+		t.Errorf("phase = %v, want parked", c.phase)
+	}
+	// On next tick with the new client at lobby and "a" waiting, dispatch "a".
+	act, ok := c.step(swSnapshot{
+		Sessions: []swSession{waiting("a", 100)},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys002": "switchboard"},
+	})
+	if !ok || act.Target != "a" || act.Client != "/dev/ttys002" {
+		t.Errorf("re-dispatch after churn, act=%+v ok=%v", act, ok)
+	}
+}

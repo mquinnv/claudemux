@@ -66,11 +66,12 @@ func (s swSnapshot) waitingQueue(snoozed map[string]time.Time) []swSession {
 
 // resolveClient keeps driving the same client while it exists, else adopts
 // the lexicographically smallest client attached to the lobby (deterministic
-// under Go's random map order). No lobby client means nothing to drive.
-func (c *conductor) resolveClient(s swSnapshot) {
+// under Go's random map order). Returns whether the client identity changed
+// (old disconnected, new one adopted). No lobby client means nothing to drive.
+func (c *conductor) resolveClient(s swSnapshot) bool {
 	if c.client != "" {
 		if _, ok := s.Clients[c.client]; ok {
-			return
+			return false
 		}
 		c.client = ""
 	}
@@ -82,8 +83,11 @@ func (c *conductor) resolveClient(s swSnapshot) {
 	}
 	if len(names) > 0 {
 		sort.Strings(names)
+		old := c.client
 		c.client = names[0]
+		return old != c.client
 	}
+	return false
 }
 
 // pruneSnoozes drops snoozes whose episode ended: session gone, no longer
@@ -102,7 +106,7 @@ func (c *conductor) pruneSnoozes(s swSnapshot) {
 // switch-client to issue this tick.
 func (c *conductor) step(s swSnapshot) (swAction, bool) {
 	c.pruneSnoozes(s)
-	c.resolveClient(s)
+	clientChanged := c.resolveClient(s)
 	if c.client == "" {
 		return swAction{}, false
 	}
@@ -121,9 +125,22 @@ func (c *conductor) step(s swSnapshot) (swAction, bool) {
 			return swAction{Client: c.client, Target: c.escortee}, true
 		}
 	case swEscorting:
+		// If the driven client disconnected and a new one was adopted, that's
+		// not a walk-away (user did not move themselves). Clear escortee and
+		// transition; the escortee will be re-dispatched on a following tick.
+		if clientChanged {
+			c.escortee = ""
+			if cur == s.Lobby {
+				c.phase = swParked
+			} else {
+				c.phase = swPaused
+			}
+			return swAction{}, false
+		}
 		if cur != c.escortee {
-			// The user moved themselves. Snooze the abandoned session's
-			// current episode so the lobby doesn't bounce them right back.
+			// The user moved themselves with the same client. Snooze the
+			// abandoned session's current episode so the lobby doesn't bounce
+			// them right back.
 			if sess, ok := s.session(c.escortee); ok && isWaiting(sess.State) {
 				c.snoozed[c.escortee] = sess.Since
 			}
