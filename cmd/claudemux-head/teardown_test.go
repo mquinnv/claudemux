@@ -359,29 +359,49 @@ func TestTeardownAutoGateOpen(t *testing.T) {
 	}
 }
 
+// gitTestEnv isolates a test fixture's git calls from this machine's
+// global/system gitconfig — e.g. this machine's commit.gpgsign=true, which
+// makes these tests pass here only because a working signing key happens to
+// be present. A CI runner with signing mandated but no key/agent would hang
+// on pinentry or fail outright. GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM pointed
+// at /dev/null neutralize both config tiers for every subcommand (init, add,
+// commit, clone, status, rev-list alike), so the fixture behaves the same
+// everywhere. gitCleanReason itself must NOT use this: it probes the user's
+// real repos at runtime and has to see their actual config.
+func gitTestEnv() []string {
+	return append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+}
+
+// runGitTest runs a git fixture command under gitTestEnv, failing the test on
+// error. dir is the working directory ("" to run without one, as clone does
+// not need one).
+func runGitTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitTestEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
 func TestGitCleanReason(t *testing.T) {
 	ctx := context.Background()
 
 	mk := func(t *testing.T) string {
 		t.Helper()
 		dir := t.TempDir()
-		run := func(args ...string) {
-			t.Helper()
-			cmd := exec.Command("git", args...)
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v\n%s", args, err, out)
-			}
-		}
-		run("init", "-q", "-b", "main")
+		runGitTest(t, dir, "init", "-q", "-b", "main")
 		if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		run("add", "f")
-		run("commit", "-q", "-m", "c")
+		runGitTest(t, dir, "add", "f")
+		runGitTest(t, dir, "commit", "-q", "-m", "c")
 		return dir
 	}
 
@@ -406,10 +426,7 @@ func TestGitCleanReason(t *testing.T) {
 		// A local branch tracking itself via a file remote: clone the repo and
 		// use the clone, whose origin/main equals its HEAD.
 		clone := t.TempDir()
-		cmd := exec.Command("git", "clone", "-q", dir, clone)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("clone: %v\n%s", err, out)
-		}
+		runGitTest(t, "", "clone", "-q", dir, clone)
 		if got := gitCleanReason(ctx, clone); got != "" {
 			t.Errorf("got %q, want clean", got)
 		}
@@ -418,23 +435,12 @@ func TestGitCleanReason(t *testing.T) {
 	t.Run("unpushed commit blocks", func(t *testing.T) {
 		dir := mk(t)
 		clone := t.TempDir()
-		cmd := exec.Command("git", "clone", "-q", dir, clone)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("clone: %v\n%s", err, out)
-		}
+		runGitTest(t, "", "clone", "-q", dir, clone)
 		if err := os.WriteFile(filepath.Join(clone, "h"), []byte("z"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		for _, args := range [][]string{{"add", "h"}, {"commit", "-q", "-m", "local"}} {
-			cmd := exec.Command("git", args...)
-			cmd.Dir = clone
-			cmd.Env = append(os.Environ(),
-				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v\n%s", args, err, out)
-			}
-		}
+		runGitTest(t, clone, "add", "h")
+		runGitTest(t, clone, "commit", "-q", "-m", "local")
 		if got := gitCleanReason(ctx, clone); got != "unpushed" {
 			t.Errorf("got %q, want %q", got, "unpushed")
 		}
