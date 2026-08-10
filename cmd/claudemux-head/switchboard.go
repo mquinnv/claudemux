@@ -57,7 +57,7 @@ func (s swSnapshot) session(name string) (swSession, bool) {
 // oddities. Formats (tab-separated):
 //
 //	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt}
-//	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{pane_title}
+//	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 	snap := swSnapshot{Clients: map[string]string{}}
