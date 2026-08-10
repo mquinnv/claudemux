@@ -595,7 +595,12 @@ if [ "${1:-}" = "switch" ]; then
   # every `claudemux switch`, not just session creation, so it survives a tmux
   # server restart — but never over a binding the user set themselves: once
   # prefix+S is taken (by us or by them), it is left alone.
-  if ! tmux list-keys -T prefix S >/dev/null 2>&1; then
+  #
+  # The check greps the full prefix table: `list-keys -T prefix S` looks like
+  # the obvious probe but exits 0 with no output for bound AND unbound keys
+  # (observed on tmux 3.7b), so it cannot distinguish the two.
+  if ! tmux list-keys -T prefix 2>/dev/null \
+      | grep -qE '^bind-key([[:space:]]+-r)?[[:space:]]+-T[[:space:]]+prefix[[:space:]]+S([[:space:]]|$)'; then
     tmux bind-key S switch-client -t '=switchboard'
   fi
   if [ -n "${TMUX:-}" ]; then
