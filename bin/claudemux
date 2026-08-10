@@ -603,6 +603,17 @@ if [ "${1:-}" = "switch" ]; then
       | grep -qE '^bind-key([[:space:]]+-r)?[[:space:]]+-T[[:space:]]+prefix[[:space:]]+S([[:space:]]|$)'; then
     tmux bind-key S switch-client -t '=switchboard'
   fi
+  # Follow the client with the iTerm2 tab color: client-session-changed fires
+  # once per client switch — conductor escort, prefix+S skip, and manual
+  # prefix+s alike — and the helper paints only that client's tab, via its
+  # tty. This is NOT the retired focus-hook repaint (which redrew every tab on
+  # each focus change); see apply_tab_color. Global and idempotent; -b so a
+  # slow resolver never blocks tmux.
+  tab_color_helper="$(dirname "$(resolve_self "$0")")/claudemux-tab-color"
+  if [ -x "$tab_color_helper" ]; then
+    tmux set-hook -g client-session-changed \
+      "run-shell -b '$tab_color_helper \"#{client_tty}\" \"#{session_path}\"'"
+  fi
   if [ -n "${TMUX:-}" ]; then
     exec tmux switch-client -t '=switchboard'
   fi

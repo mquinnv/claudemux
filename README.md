@@ -52,6 +52,10 @@ It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
 until it starts waiting again for a new reason.
 
+The iTerm2 tab color follows you as you're carried between sessions — each
+session paints its project color, and sessions without one (the lobby included)
+reset the tab to the terminal default.
+
 To **skip** a session you don't want to answer right now, jump back to the lobby —
 `claudemux switch` binds `prefix + S` to do exactly that (unless you've bound
 `prefix + S` yourself, in which case it's left alone). The skipped session is

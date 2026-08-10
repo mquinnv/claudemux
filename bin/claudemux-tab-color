@@ -1,0 +1,37 @@
+#!/bin/bash
+# Repaint one iTerm2 tab after a tmux client changes sessions.
+#
+# Usage: claudemux-tab-color CLIENT_TTY SESSION_PATH
+#
+# Invoked by the client-session-changed hook that `claudemux switch` installs,
+# with an already-resolved absolute path (so plain dirname finds the sibling
+# resolver — no symlink walk needed here). Writes the iTerm2 escapes directly
+# to CLIENT_TTY: only the tab whose client actually moved gets painted, unlike
+# the retired focus hooks that repainted every tab on each focus change (see
+# apply_tab_color in bin/claudemux). A session with no project color — the
+# switchboard lobby, a non-project dir — resets the tab to the terminal
+# default so stale colors never linger.
+
+set -euo pipefail
+
+tty="${1:-}"
+dir="${2:-}"
+[ -n "$tty" ] && [ -w "$tty" ] || exit 0
+
+resolver="$(cd "$(dirname "$0")" && pwd)/project-color-resolve.sh"
+[ -f "$resolver" ] || exit 0
+# shellcheck disable=SC1090
+. "$resolver"
+
+hex=""
+[ -n "$dir" ] && hex="$(resolve_project_hex "$dir" 2>/dev/null || true)"
+
+if [ -z "$hex" ]; then
+  printf '\033]6;1;bg;*;default\a' > "$tty"
+  exit 0
+fi
+
+r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+printf '\033]6;1;bg;red;brightness;%d\a'   "$r" > "$tty"
+printf '\033]6;1;bg;green;brightness;%d\a' "$g" > "$tty"
+printf '\033]6;1;bg;blue;brightness;%d\a'  "$b" > "$tty"
