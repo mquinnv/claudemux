@@ -589,6 +589,15 @@ if [ "${1:-}" = "switch" ]; then
   if ! tmux has-session -t '=switchboard' 2>/dev/null; then
     tmux new-session -d -s switchboard "exec $head_bin switchboard"
   fi
+  # prefix+S is the skip key: returning to the lobby is the switchboard's skip
+  # gesture (the conductor snoozes the session you left and advances), so a
+  # one-chord jump back to the lobby from anywhere completes the loop. Bound on
+  # every `claudemux switch`, not just session creation, so it survives a tmux
+  # server restart — but never over a binding the user set themselves: once
+  # prefix+S is taken (by us or by them), it is left alone.
+  if ! tmux list-keys -T prefix S >/dev/null 2>&1; then
+    tmux bind-key S switch-client -t '=switchboard'
+  fi
   if [ -n "${TMUX:-}" ]; then
     exec tmux switch-client -t '=switchboard'
   fi

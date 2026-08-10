@@ -52,6 +52,11 @@ It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
 until it starts waiting again for a new reason.
 
+To **skip** a session you don't want to answer right now, jump back to the lobby —
+`claudemux switch` binds `prefix + S` to do exactly that (unless you've bound
+`prefix + S` yourself, in which case it's left alone). The skipped session is
+snoozed and the conductor carries you to the next waiting one.
+
 Keys in the lobby: `j`/`k` select, `Enter` jumps to a session (and pauses
 conducting), `q` quits.
 
