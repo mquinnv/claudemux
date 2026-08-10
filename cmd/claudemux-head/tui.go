@@ -110,6 +110,11 @@ type model struct {
 	selfPane string
 	paneDir  string
 
+	// publishedState is the last @claudemux_state value pushed to tmux, so the
+	// poll loop republishes only on change — one subprocess per transition,
+	// not per tick.
+	publishedState string
+
 	// sessionCwd is the latest cwd the *main* session recorded in its
 	// transcript (last non-sidechain entry's cwd), recomputed from the event
 	// ring each poll. It — not tmux's pane cwd — drives the worktree chip: the
@@ -884,16 +889,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// EDGE rather than the value — see autoArmTeardown.
 		prevTyped := m.lastTyped
 		m.recomputeFromEvents(msg.time)
+		pubCmd := m.maybePublishState(msg.time)
 		m.lastUpdate = msg.time
 		m.autoArmTeardown(prevTyped, msg.time)
 		if m.shouldSummarize(prevKind, msg.time) {
 			m.summarizing = true
-			return m, m.summarize()
+			return m, tea.Batch(m.summarize(), pubCmd)
 		}
 		if m.shouldRetrySummarize(msg.time) {
 			m.summarizing = true
-			return m, m.summarize()
+			return m, tea.Batch(m.summarize(), pubCmd)
 		}
+		return m, pubCmd
 
 	case summarizerMsg:
 		m.acquiringKey = false

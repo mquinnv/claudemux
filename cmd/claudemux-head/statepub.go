@@ -75,3 +75,16 @@ func publishStateCmd(selfPane string, s State, now time.Time) tea.Cmd {
 		return nil
 	}
 }
+
+// maybePublishState returns a cmd publishing the current state when its
+// machine form changed since the last publish, nil otherwise. Cheap enough to
+// call every poll. Outside tmux the cmd is nil every time — publishedState
+// still updates, which is harmless: there is no consumer without tmux.
+func (m *model) maybePublishState(now time.Time) tea.Cmd {
+	v := statePublishValue(m.state)
+	if v == m.publishedState {
+		return nil
+	}
+	m.publishedState = v
+	return publishStateCmd(m.selfPane, m.state, now)
+}

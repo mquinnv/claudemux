@@ -58,3 +58,28 @@ func TestPublishStateCmdNilWhenUnpublishable(t *testing.T) {
 		t.Error("expected nil cmd outside tmux")
 	}
 }
+
+func TestMaybePublishState(t *testing.T) {
+	m := &model{selfPane: "%3", state: State{Kind: StateIdle, Since: time.Unix(1754700000, 0)}}
+	now := time.Now()
+	if cmd := m.maybePublishState(now); cmd == nil {
+		t.Fatal("first call after a state change must publish")
+	}
+	if m.publishedState != "Idle" {
+		t.Errorf("publishedState = %q, want %q", m.publishedState, "Idle")
+	}
+	if cmd := m.maybePublishState(now); cmd != nil {
+		t.Error("unchanged state must not republish")
+	}
+	m.state = State{Kind: StateThinking, Since: time.Unix(1754700100, 0)}
+	if cmd := m.maybePublishState(now); cmd == nil {
+		t.Error("changed state must publish again")
+	}
+}
+
+func TestMaybePublishStateOutsideTmux(t *testing.T) {
+	m := &model{state: State{Kind: StateIdle}}
+	if cmd := m.maybePublishState(time.Now()); cmd != nil {
+		t.Error("empty selfPane must yield nil cmd")
+	}
+}
