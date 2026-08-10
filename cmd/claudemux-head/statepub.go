@@ -80,6 +80,16 @@ func publishStateCmd(selfPane string, s State, now time.Time) tea.Cmd {
 // machine form changed since the last publish, nil otherwise. Cheap enough to
 // call every poll. Outside tmux the cmd is nil every time — publishedState
 // still updates, which is harmless: there is no consumer without tmux.
+//
+// The guard compares only the value (statePublishValue), not value+since. A
+// session that rotates back to the same value (e.g. Idle -> Busy -> Idle)
+// leaves the published "_since" stale — pinned to the first Idle transition —
+// until the next real state transition republishes it. This is a deliberate
+// trade-off, not an oversight: guarding on value+since instead would
+// republish on every tick for sessions with an empty transcript, since
+// classifyState returns Since: now when there are no events, so "since"
+// would never compare equal across polls. The stale-_since case self-heals
+// on any real transition, so don't "fix" this into a per-tick republish.
 func (m *model) maybePublishState(now time.Time) tea.Cmd {
 	v := statePublishValue(m.state)
 	if v == m.publishedState {

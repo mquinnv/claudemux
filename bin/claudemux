@@ -448,10 +448,10 @@ create_session() {
   local session_name
   session_name="$(basename "$work_dir")"
 
-  if tmux has-session -t "$session_name" 2>/dev/null; then
+  if tmux has-session -t "=$session_name" 2>/dev/null; then
     if [ "$FORCE_NEW" = true ]; then
       local i=2
-      while tmux has-session -t "${session_name}-${i}" 2>/dev/null; do
+      while tmux has-session -t "=${session_name}-${i}" 2>/dev/null; do
         ((i++))
       done
       session_name="${session_name}-${i}"
@@ -575,16 +575,19 @@ create_session() {
 
 # `claudemux switch` — the switchboard: a lobby session whose pane runs
 # `claudemux-head switchboard`, auto-ferrying the attached client to sessions
-# waiting on input. The pane runs the program directly (no shell), matching
-# the head/claude panes: exiting the switchboard closes the pane. A project
-# directory literally named "switchboard" collides with this session name;
-# the switchboard tolerates it (it just watches from inside that session),
-# so first-wins is acceptable.
+# waiting on input. The pane runs the program directly via exec (no shell),
+# matching the head/claude panes: exiting the switchboard closes the pane, and
+# exec guarantees pane_current_command reads claudemux-head rather than
+# relying on sh's exec optimization. A project directory literally named
+# "switchboard" collides with this session name: if a project session named
+# "switchboard" already exists, `claudemux switch` attaches to that project
+# session instead and no switchboard ever runs (first-wins) — see the
+# exact-match guard in create_session for the other half of this hazard.
 if [ "${1:-}" = "switch" ]; then
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
   if ! tmux has-session -t '=switchboard' 2>/dev/null; then
-    tmux new-session -d -s switchboard "$head_bin switchboard"
+    tmux new-session -d -s switchboard "exec $head_bin switchboard"
   fi
   if [ -n "${TMUX:-}" ]; then
     exec tmux switch-client -t '=switchboard'

@@ -168,11 +168,11 @@ func (m swModel) View() string {
 		if !sess.Since.IsZero() {
 			age = " " + swUnknownStyle.Render(formatDuration(now.Sub(sess.Since)))
 		}
-		name := sess.Name
+		name := fmt.Sprintf("%-24s", sess.Name)
 		if i == m.sel {
 			name = swSelStyle.Render(name)
 		}
-		fmt.Fprintf(&b, " %s%-24s %s%s\n", marker, name, style.Render(state), age)
+		fmt.Fprintf(&b, " %s%s %s%s\n", marker, name, style.Render(state), age)
 	}
 	b.WriteString("\n" + swStatusStyle.Render(m.cond.statusLine(m.snap)) + "\n")
 	if m.lastErr != "" {

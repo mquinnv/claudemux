@@ -117,7 +117,8 @@ used for the head and claude panes) — then attach/switch to it.
 
 ## Error handling
 
-- tmux command failures during a tick: log to the debug log, skip the tick; the next
+- tmux command failures during a tick: surface the error in the lobby UI's status area
+  and keep the last-known (stale) data on screen rather than blanking it; the next
   tick retries. Repeated failures leave the lobby visible with stale data rather than
   crashing.
 - Publishing failures in the head are best-effort and silent (as with tab renames).
