@@ -61,8 +61,13 @@ To **skip** a session you don't want to answer right now, jump back to the lobby
 `prefix + S` yourself, in which case it's left alone). The skipped session is
 snoozed and the conductor carries you to the next waiting one.
 
-Keys in the lobby: `j`/`k` select, `Enter` jumps to a session (and pauses
-conducting), `q` quits.
+The lobby is a dispatch point: whenever you're parked there and something waits,
+you get carried to it. To sit and watch the fleet instead, press `Space` — it
+toggles **standby**, which keeps the states live but never dispatches, until you
+press `Space` again.
+
+Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
+jumps to a session (and pauses conducting), `q` quits.
 
 ## Install
 

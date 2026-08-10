@@ -99,3 +99,52 @@ func TestSwModelViewEmptyFleet(t *testing.T) {
 		t.Errorf("empty fleet needs a hint, got:\n%s", v)
 	}
 }
+
+func TestSwModelSpaceTogglesStandby(t *testing.T) {
+	m := swTestModel()
+	m.cond.phase = swEscorting
+	m.cond.escortee = "api"
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = next.(swModel)
+	if !m.standby {
+		t.Fatal("space must enter standby")
+	}
+	if m.cond.escortee != "" || m.cond.phase != swPaused {
+		t.Errorf("standby must neutralize the conductor, got phase=%v escortee=%q", m.cond.phase, m.cond.escortee)
+	}
+	if len(m.cond.snoozed) != 0 {
+		t.Error("entering standby must not snooze the escortee")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	if next.(swModel).standby {
+		t.Error("space again must leave standby")
+	}
+}
+
+func TestSwModelStandbyNeverDispatches(t *testing.T) {
+	m := swTestModel()
+	m.standby = true
+	m.cond.phase = swPaused
+	snap := swSnapshot{
+		Sessions: []swSession{{Name: "api", State: "Idle", Since: time.Unix(100, 0)}},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys001": "switchboard"},
+	}
+	// Two snapshots: an active conductor would go Paused->Parked on the
+	// first and dispatch on the second. Standby must do neither.
+	for i := 0; i < 2; i++ {
+		next, _ := m.Update(swSnapshotMsg{snap: snap})
+		m = next.(swModel)
+	}
+	if m.cond.phase != swPaused || m.cond.escortee != "" {
+		t.Errorf("standby stepped the conductor: phase=%v escortee=%q", m.cond.phase, m.cond.escortee)
+	}
+}
+
+func TestSwModelStandbyStatusLine(t *testing.T) {
+	m := swTestModel()
+	m.standby = true
+	if v := m.View(); !strings.Contains(v, "standby") {
+		t.Errorf("view must show standby state:\n%s", v)
+	}
+}

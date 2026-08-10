@@ -43,6 +43,10 @@ type swModel struct {
 	width    int
 	height   int
 	lastErr  string
+	// standby stops all conducting (space toggles it): the lobby keeps
+	// showing live states but the conductor is never stepped, so the user
+	// can sit and look at the fleet without being dispatched.
+	standby bool
 }
 
 func newSwModel(selfPane string) swModel {
@@ -118,14 +122,25 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sel < 0 {
 			m.sel = 0
 		}
-		if act, ok := m.cond.step(m.snap); ok {
-			return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target))
+		if !m.standby {
+			if act, ok := m.cond.step(m.snap); ok {
+				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target))
+			}
 		}
 		return m, swNextTick()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case " ":
+			m.standby = !m.standby
+			if m.standby {
+				// The user asked to stop conducting, not to skip: neutralize
+				// the conductor without snoozing whatever it was escorting.
+				// Paused self-heals to Parked at the lobby once standby ends.
+				m.cond.phase = swPaused
+				m.cond.escortee = ""
+			}
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
 				m.sel++
@@ -174,11 +189,16 @@ func (m swModel) View() string {
 		}
 		fmt.Fprintf(&b, " %s%s %s%s\n", marker, name, style.Render(state), age)
 	}
-	b.WriteString("\n" + swStatusStyle.Render(m.cond.statusLine(m.snap)) + "\n")
+	status := m.cond.statusLine(m.snap)
+	if m.standby {
+		status = fmt.Sprintf("standby · %d waiting — space to conduct",
+			len(m.snap.waitingQueue(m.cond.snoozed)))
+	}
+	b.WriteString("\n" + swStatusStyle.Render(status) + "\n")
 	if m.lastErr != "" {
 		b.WriteString(swStatusStyle.Render("tmux: "+m.lastErr) + "\n")
 	}
-	b.WriteString(swStatusStyle.Render("j/k select · enter jump · q quit"))
+	b.WriteString(swStatusStyle.Render("space conduct/standby · j/k select · enter jump · q quit"))
 	return b.String()
 }
 
