@@ -838,7 +838,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.teardownProbing && m.teardownProbeDue(now) {
 				m.teardownProbing = true
 				m.teardownProbeAt = now
-				cmds = append(cmds, teardownProbeCmd(m.teardownWorkDir, m.mainCheckout))
+				cmds = append(cmds, teardownProbeCmd(m.teardownWorkDir, m.mainCheckout, false))
 			}
 		case teardownExiting:
 			if now.Sub(m.teardownAt) >= teardownExitTimeout {

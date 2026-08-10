@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -99,6 +100,33 @@ func worktreeIsGone(ctx context.Context, workDir, mainCheckout string) bool {
 	return !worktreeListed(string(out), workDir)
 }
 
+// gitCleanReason reports why dir's checkout is not provably wrapped up: a
+// dirty tree, commits the upstream has not seen, or no upstream at all. ""
+// means clean-and-pushed — the same bar `/done` itself holds work to. Every
+// failure mode (git missing, timeout, not a repo) returns a blocking reason
+// rather than "": this feeds a gate that kills a session, and a probe that
+// cannot tell must never open it.
+func gitCleanReason(ctx context.Context, dir string) string {
+	status, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return "probe failed"
+	}
+	if len(bytes.TrimSpace(status)) > 0 {
+		return "dirty tree"
+	}
+	ahead, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-list", "--count", "@{upstream}..HEAD").Output()
+	if err != nil {
+		// rev-list fails when no upstream is configured — indistinguishable
+		// here from other failures, and both must block, so one reason
+		// suffices for the common case and stays honest for the rest.
+		return "no upstream"
+	}
+	if n := strings.TrimSpace(string(ahead)); n != "0" {
+		return "unpushed"
+	}
+	return ""
+}
+
 // teardownPhase is where a session teardown has got to. It advances on the `x`
 // key and on poll ticks; every phase but teardownIdle is visible in the status
 // line, because a key that arms a kill-session must never be armed silently.
@@ -189,6 +217,21 @@ func teardownGateOpen(kind StateKind, inWorktree, worktreeGone bool) bool {
 		return true
 	}
 	return worktreeGone
+}
+
+// teardownAutoGateOpen is teardownGateOpen for auto-armed teardowns. The
+// difference is the non-worktree arm: a manual `x` press has the user right
+// there watching, so turn-end suffices; an auto-armed teardown acts with
+// nobody at the wheel and needs the wrap-up's own success bar — clean tree,
+// nothing unpushed — before it may kill the session.
+func teardownAutoGateOpen(kind StateKind, inWorktree, worktreeGone bool, cleanReason string) bool {
+	if !teardownTurnEnded(kind) {
+		return false
+	}
+	if inWorktree {
+		return worktreeGone
+	}
+	return cleanReason == ""
 }
 
 // teardownCommandSegment reduces a slash command to the part that identifies
@@ -335,8 +378,14 @@ const teardownTmuxTimeout = 2 * time.Second
 // the status chip.
 type teardownSentMsg struct{ note string }
 
-// teardownProbeMsg carries one ready-gate observation.
-type teardownProbeMsg struct{ worktreeGone bool }
+// teardownProbeMsg carries one ready-gate observation. cleanReason is set
+// only by probes asked to check git cleanliness (auto-armed non-worktree
+// teardowns): "" means clean, anything else is the human-readable reason the
+// gate must stay shut.
+type teardownProbeMsg struct {
+	worktreeGone bool
+	cleanReason  string
+}
 
 // claudeGoneMsg reports whether any pane in this session is still running
 // claude.
@@ -393,10 +442,15 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 // workDir is the SESSION's working directory as captured when the teardown was
 // armed (model.teardownWorkDir), not the head process's own cwd — the head is
 // launched in the main checkout even for sessions that work in a worktree.
-func teardownProbeCmd(workDir, mainCheckout string) tea.Cmd {
+// checkClean selects the auto/non-worktree evidence (git cleanliness) instead
+// of worktree-goneness; both run under the same deadline.
+func teardownProbeCmd(workDir, mainCheckout string, checkClean bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 		defer cancel()
+		if checkClean {
+			return teardownProbeMsg{cleanReason: gitCleanReason(ctx, workDir)}
+		}
 		return teardownProbeMsg{worktreeGone: worktreeIsGone(ctx, workDir, mainCheckout)}
 	}
 }

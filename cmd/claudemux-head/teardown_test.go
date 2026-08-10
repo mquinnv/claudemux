@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -296,7 +297,7 @@ func TestTeardownSendCmdNoPane(t *testing.T) {
 // repo, no session required.
 func TestTeardownProbeCmdMissingDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "deleted")
-	msg := teardownProbeCmd(missing, "")()
+	msg := teardownProbeCmd(missing, "", false)()
 	probe, ok := msg.(teardownProbeMsg)
 	if !ok {
 		t.Fatalf("msg = %T, want teardownProbeMsg", msg)
@@ -307,7 +308,7 @@ func TestTeardownProbeCmdMissingDir(t *testing.T) {
 }
 
 func TestTeardownProbeCmdLiveDir(t *testing.T) {
-	msg := teardownProbeCmd(t.TempDir(), "")()
+	msg := teardownProbeCmd(t.TempDir(), "", false)()
 	if probe := msg.(teardownProbeMsg); probe.worktreeGone {
 		t.Error("worktreeGone = true for a directory that still exists")
 	}
@@ -331,4 +332,117 @@ func TestKillSessionCmdNoPane(t *testing.T) {
 	if cmd := killSessionCmd(""); cmd != nil {
 		t.Error("killSessionCmd(\"\") returned a command")
 	}
+}
+
+func TestTeardownAutoGateOpen(t *testing.T) {
+	cases := []struct {
+		name        string
+		kind        StateKind
+		inWorktree  bool
+		gone        bool
+		cleanReason string
+		want        bool
+	}{
+		{"worktree gone opens", StateIdle, true, true, "", true},
+		{"worktree present holds", StateIdle, true, false, "", false},
+		{"non-worktree clean opens", StateIdle, false, false, "", true},
+		{"non-worktree dirty holds", StateIdle, false, false, "dirty tree", false},
+		{"non-worktree unpushed holds", StateIdle, false, false, "unpushed", false},
+		{"non-worktree no-upstream holds", StateIdle, false, false, "no upstream", false},
+		{"turn not ended holds even when clean", StateThinking, false, false, "", false},
+		{"pending tool holds even when clean", StateTool, false, false, "", false},
+	}
+	for _, c := range cases {
+		if got := teardownAutoGateOpen(c.kind, c.inWorktree, c.gone, c.cleanReason); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestGitCleanReason(t *testing.T) {
+	ctx := context.Background()
+
+	mk := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		run := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(),
+				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		run("init", "-q", "-b", "main")
+		if err := os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run("add", "f")
+		run("commit", "-q", "-m", "c")
+		return dir
+	}
+
+	t.Run("no upstream blocks", func(t *testing.T) {
+		if got := gitCleanReason(ctx, mk(t)); got != "no upstream" {
+			t.Errorf("got %q, want %q", got, "no upstream")
+		}
+	})
+
+	t.Run("dirty tree blocks before upstream is consulted", func(t *testing.T) {
+		dir := mk(t)
+		if err := os.WriteFile(filepath.Join(dir, "g"), []byte("y"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitCleanReason(ctx, dir); got != "dirty tree" {
+			t.Errorf("got %q, want %q", got, "dirty tree")
+		}
+	})
+
+	t.Run("clean with pushed upstream", func(t *testing.T) {
+		dir := mk(t)
+		// A local branch tracking itself via a file remote: clone the repo and
+		// use the clone, whose origin/main equals its HEAD.
+		clone := t.TempDir()
+		cmd := exec.Command("git", "clone", "-q", dir, clone)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("clone: %v\n%s", err, out)
+		}
+		if got := gitCleanReason(ctx, clone); got != "" {
+			t.Errorf("got %q, want clean", got)
+		}
+	})
+
+	t.Run("unpushed commit blocks", func(t *testing.T) {
+		dir := mk(t)
+		clone := t.TempDir()
+		cmd := exec.Command("git", "clone", "-q", dir, clone)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("clone: %v\n%s", err, out)
+		}
+		if err := os.WriteFile(filepath.Join(clone, "h"), []byte("z"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"add", "h"}, {"commit", "-q", "-m", "local"}} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = clone
+			cmd.Env = append(os.Environ(),
+				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		if got := gitCleanReason(ctx, clone); got != "unpushed" {
+			t.Errorf("got %q, want %q", got, "unpushed")
+		}
+	})
+
+	t.Run("not a repo blocks as probe failure", func(t *testing.T) {
+		if got := gitCleanReason(ctx, t.TempDir()); got != "probe failed" {
+			t.Errorf("got %q, want %q", got, "probe failed")
+		}
+	})
 }
