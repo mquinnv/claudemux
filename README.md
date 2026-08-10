@@ -40,6 +40,21 @@ In a project with an `op_env`, the `claude` pane is held by a waiting screen whi
 by `claude` itself, with the secrets in its environment. Pressing any key skips the wait
 and starts `claude` immediately, *without* those secrets.
 
+## The switchboard
+
+`claudemux switch` opens a **switchboard**: a full-screen lobby session that watches
+every claudemux session and automatically carries your tmux client to whichever one
+is waiting on input — Claude's turn ended, or it asked you a question — oldest first.
+Answer, and it moves you to the next waiting session; when nothing waits, you're
+returned to the lobby.
+
+It never fights you for the client: switch away manually and it pauses until you
+come back to the lobby. A session you deliberately walk away from isn't re-queued
+until it starts waiting again for a new reason.
+
+Keys in the lobby: `j`/`k` select, `Enter` jumps to a session (and pauses
+conducting), `q` quits.
+
 ## Install
 
 **Homebrew** (recommended — it installs `tmux`, `jq`, and `git` for you):

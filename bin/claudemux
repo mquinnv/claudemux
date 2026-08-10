@@ -573,6 +573,26 @@ create_session() {
   attach "$session_name" "$work_dir"
 }
 
+# `claudemux switch` — the switchboard: a lobby session whose pane runs
+# `claudemux-head switchboard`, auto-ferrying the attached client to sessions
+# waiting on input. The pane runs the program directly (no shell), matching
+# the head/claude panes: exiting the switchboard closes the pane. A project
+# directory literally named "switchboard" collides with this session name;
+# the switchboard tolerates it (it just watches from inside that session),
+# so first-wins is acceptable.
+if [ "${1:-}" = "switch" ]; then
+  head_bin="$(command -v claudemux-head || true)"
+  head_bin="${head_bin:-claudemux-head}"
+  if ! tmux has-session -t '=switchboard' 2>/dev/null; then
+    tmux new-session -d -s switchboard "$head_bin switchboard"
+  fi
+  if [ -n "${TMUX:-}" ]; then
+    exec tmux switch-client -t '=switchboard'
+  fi
+  tmux attach -t '=switchboard'
+  exit 0
+fi
+
 # No args: attach the sole session if there's exactly one, else launch in $PWD.
 if [ "$#" -eq 0 ]; then
   session_count="$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')"
