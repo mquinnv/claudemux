@@ -186,11 +186,20 @@ func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 // but whose *tool_use input* has no run_in_background flag and whose *result
 // text* either uses a different wording or none the old patterns knew:
 //
-//   - auto: Claude Code backgrounded a plain Bash on its own. A sweep of this
-//     machine found 102 of 821 real shell launches in this shape.
+// Counts below are reachable figures: main-session transcripts only, which is
+// all the head ever tails (522 shell launches, 1557 async-agent launches, 2079
+// total across 325 files). subagents/*.jsonl sits one directory level too deep
+// for its glob, so it never opens those; corpus-wide, including subagent files,
+// there are 1915 files, 821 shell launches and 1596 agent launches.
+//
+//   - auto: Claude Code backgrounded a plain Bash on its own. 3 of the 522
+//     reachable shell launches are in this shape (36 of 821 corpus-wide).
 //   - timeout: the command overran its timeout and was moved to the background
-//     (64 of 821).
-//   - user: the human backgrounded it from the UI (2 of 821).
+//     (23 of 522 reachable).
+//   - user: the human backgrounded it from the UI (2 of 522 reachable).
+//
+// Together the three reachable shapes total 28 of the 2079 main-session shell +
+// agent launches (522 + 1557) — 1.35%.
 //
 // PRIVACY: all three shapes exist on this machine only inside the user's
 // employer's project transcripts, so these fixtures are DERIVED from real
@@ -478,6 +487,7 @@ func TestBgNonObjectToolUseResultIsHarmless(t *testing.T) {
 		{"an object whose id field has the wrong type", map[string]any{"backgroundTaskId": 123}},
 		{"an object whose isAsync has the wrong type", map[string]any{"isAsync": "yes", "agentId": "a1"}},
 		{"an object with an empty id", map[string]any{"backgroundTaskId": ""}},
+		{"an agent record that is not async", map[string]any{"isAsync": false, "agentId": "a1"}},
 	}
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {

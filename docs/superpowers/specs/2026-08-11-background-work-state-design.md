@@ -225,15 +225,18 @@ the lobby needs no second option.
 
 ## Parser changes
 
-`events.go` needs two fields it does not currently expose:
+`events.go` needs three fields it does not currently expose:
 
 1. `ToolResult.Content` is declared but tagged `json:"-"` and never populated
    (`events.go:58`). Populate it, concatenating text blocks when the content is an array
    and taking the string as-is when it is not.
 2. The top-level `content` string carried by `queue-operation` events is not read at all.
    Expose it; it is where the completion signal arrives first.
+3. The top-level `toolUseResult` sibling of `message` is not read at all — this is the whole
+   point of the current design. `extractLaunch` decodes it into `Event.BgTaskID` /
+   `Event.BgAgentID`, ignoring the (common) case where it is not a JSON object.
 
-Both are additive. Nothing currently reads these fields, so nothing else changes behavior.
+All three are additive. Nothing else reads these fields, so nothing else changes behavior.
 
 ## Testing
 
@@ -257,9 +260,10 @@ quoted above.
 
 ## Known limits
 
-- **Wording drift.** If Claude Code rewords either launch string, detection silently
-  reverts to today's behavior for that kind. The fixtures make it visible when the tests
-  are run against a new version; nothing alerts at runtime.
+- **Field drift.** If the harness stops writing `toolUseResult.backgroundTaskId` or
+  `toolUseResult.isAsync`/`agentId`, detection sees no launch and every session reports
+  `Idle` at the end of its turn — the pre-branch bug, and a graceful degradation rather
+  than a silent wrong answer.
 - **Seeding.** Work launched before the head started or rotated is invisible (above).
 - **Foreground agents are unaffected**, and deliberately so — they already classify
   correctly through the unresolved `tool_use` path.
