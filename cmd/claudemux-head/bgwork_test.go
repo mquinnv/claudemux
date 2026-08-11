@@ -26,9 +26,17 @@ func TestBgLaunches(t *testing.T) {
 			Event{ToolResults: []ToolResult{{Content: "total 42\ndrwxr-xr-x  bin"}}},
 			"",
 		},
+		// Both fixtures below are real shapes that fooled the old unanchored
+		// search: a Grep hit or a file read that merely quotes a marker id
+		// registered a phantom launch. Both must yield no launches now.
 		{
-			"prose about background work is not a launch",
-			Event{ToolResults: []ToolResult{{Content: "the job is running in background somewhere, no ID here"}}},
+			"a Grep hit quoting agentId is not a launch",
+			Event{ToolResults: []ToolResult{{Content: "src/agent.ts:42:  const opts = { agentId: agentRecord.id };"}}},
+			"",
+		},
+		{
+			"the shell marker mid-sentence, not at line start, is not a launch",
+			Event{ToolResults: []ToolResult{{Content: "As documented: Command running in background with ID: someid appears mid-paragraph."}}},
 			"",
 		},
 		{"no tool results", Event{Type: "assistant"}, ""},
@@ -164,5 +172,44 @@ func TestBgTrackerNotificationTurnIsNotAPrompt(t *testing.T) {
 	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>"}}, now)
 	if n, _ := b.outstanding(now); n != 1 {
 		t.Errorf("outstanding = %d, want 1: the notification retires its own task, not the set", n)
+	}
+}
+
+// The spec requires this to be harmless: the same task id can arrive as
+// both completion forms (the queue-operation that lands the moment the task
+// ends, and the delivered user turn once the session wakes to consume it).
+// Retiring it twice must not error or resurrect it.
+func TestBgTrackerIdempotentAcrossCompletionForms(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:00:00Z")}, now)
+	b.observe([]Event{bgDoneEvent("aaa")}, now)                                                                                  // queue-operation form
+	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>"}}, now) // delivered form, same id
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: the same id retired by both forms must stay retired", n)
+	}
+}
+
+// A completion for an id this tracker never launched (e.g. from before a
+// head restart) must be a harmless no-op delete, not a crash or a negative
+// count.
+func TestBgTrackerCompletionForUnknownIDIsHarmless(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{bgDoneEvent("neverlaunched")}, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0", n)
+	}
+}
+
+// The same id launched twice (a retried tool call, say) must not double
+// count — the tracker keys on id, so the second launch just re-stamps it.
+func TestBgTrackerSameIDLaunchedTwice(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:00:00Z")}, now)
+	b.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:05:00Z")}, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: relaunching the same id must not double-count", n)
 	}
 }

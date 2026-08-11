@@ -18,9 +18,20 @@ import (
 // verified event shapes.
 
 var (
-	bgShellRe  = regexp.MustCompile(`running in background with ID: ([A-Za-z0-9]+)`)
-	bgAgentRe  = regexp.MustCompile(`agentId: ([A-Za-z0-9]+)`)
-	bgTaskIDRe = regexp.MustCompile(`<task-id>([A-Za-z0-9]+)</task-id>`)
+	// Anchored to the start of a line: the bare id fragment appears unanchored
+	// in ordinary tool output too (a Grep hit quoting it, a YAML file being
+	// read), and an unanchored search registered a phantom launch for every
+	// one of those. Requiring the whole launch sentence at column zero is what
+	// tells a real background-shell result apart from prose that merely
+	// mentions one.
+	bgShellRe = regexp.MustCompile(`(?m)^Command running in background with ID: ([A-Za-z0-9]+)`)
+	// agentId alone is not enough to anchor on: the real payload has it on its
+	// own line inside a larger block, and a quoted doc (or this repo's own
+	// design spec) reproduces that same shape verbatim. bgLaunches only
+	// extracts it when the same tool_result also carries bgAgentLaunchMarker.
+	bgAgentRe           = regexp.MustCompile(`agentId: ([A-Za-z0-9]+)`)
+	bgAgentLaunchMarker = "Async agent launched"
+	bgTaskIDRe          = regexp.MustCompile(`<task-id>([A-Za-z0-9]+)</task-id>`)
 )
 
 // bgNotificationPrefix opens a task-notification payload. Recognition is a
@@ -33,8 +44,13 @@ const bgNotificationPrefix = "<task-notification>"
 func bgLaunches(e Event) []string {
 	var ids []string
 	for _, tr := range e.ToolResults {
-		for _, re := range []*regexp.Regexp{bgShellRe, bgAgentRe} {
-			if m := re.FindStringSubmatch(tr.Content); m != nil {
+		if m := bgShellRe.FindStringSubmatch(tr.Content); m != nil {
+			ids = append(ids, m[1])
+		}
+		// Gated on the launch sentence, not the id pattern alone — see
+		// bgAgentRe's comment.
+		if strings.Contains(tr.Content, bgAgentLaunchMarker) {
+			if m := bgAgentRe.FindStringSubmatch(tr.Content); m != nil {
 				ids = append(ids, m[1])
 			}
 		}
