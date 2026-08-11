@@ -3,6 +3,7 @@ package main
 import (
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Tracking work a session launched and then stopped waiting on: async agents
@@ -57,4 +58,67 @@ func bgCompletions(e Event) []string {
 		}
 	}
 	return ids
+}
+
+// bgMaxAge is how long an unfinished launch keeps counting. A task that never
+// notifies — killed, crashed, or launched before a head restart — would
+// otherwise mark the session busy forever, and the conductor would never visit
+// it again: a worse bug than the one this fixes. Thirty minutes is longer than
+// any agent this has been observed to run and short enough to self-heal within
+// one sitting.
+const bgMaxAge = 30 * time.Minute
+
+// bgTracker holds the background tasks a session has launched and not yet seen
+// finish, keyed by task id and stamped with the launch time.
+//
+// Accumulated from each poll's NEW events rather than recomputed from the event
+// ring: allEvents is capped at 1000, so a busy session scrolls a long-running
+// task's launch out while it is still running, and a recompute would silently
+// call the session Idle again.
+type bgTracker struct {
+	tasks map[string]time.Time
+}
+
+func newBgTracker() bgTracker {
+	return bgTracker{tasks: map[string]time.Time{}}
+}
+
+// observe folds one batch of new events into the tracker.
+func (b *bgTracker) observe(events []Event, now time.Time) {
+	if b.tasks == nil {
+		b.tasks = map[string]time.Time{}
+	}
+	for _, e := range events {
+		// A prompt the human actually typed retires everything: they are
+		// looking at the session, so what it was waiting on no longer decides
+		// whether it needs them. genuinePrompt already rejects the delivered
+		// notification turns (their text opens with "<").
+		if genuinePrompt(e) {
+			b.tasks = map[string]time.Time{}
+			continue
+		}
+		for _, id := range bgCompletions(e) {
+			delete(b.tasks, id)
+		}
+		for _, id := range bgLaunches(e) {
+			b.tasks[id] = parseTimestampOr(e.Timestamp, now)
+		}
+	}
+}
+
+// outstanding reports how many launches are still counting and when the oldest
+// of them started. Entries past bgMaxAge are dropped as they are found, so a
+// stale tracker heals itself without a separate sweep.
+func (b *bgTracker) outstanding(now time.Time) (int, time.Time) {
+	var oldest time.Time
+	for id, at := range b.tasks {
+		if now.Sub(at) > bgMaxAge {
+			delete(b.tasks, id)
+			continue
+		}
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+	}
+	return len(b.tasks), oldest
 }

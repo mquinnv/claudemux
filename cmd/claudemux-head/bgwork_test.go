@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestBgLaunches(t *testing.T) {
@@ -81,4 +82,87 @@ func TestBgCompletions(t *testing.T) {
 			t.Errorf("bgCompletions = %q, want none", got)
 		}
 	})
+}
+
+func bgLaunchEvent(id, ts string) Event {
+	return Event{
+		Type:        "user",
+		Timestamp:   ts,
+		ToolResults: []ToolResult{{Content: "Command running in background with ID: " + id + ". Output is being written to: /tmp/x"}},
+	}
+}
+
+func bgDoneEvent(id string) Event {
+	return Event{Type: "queue-operation", QueueText: "<task-notification>\n<task-id>" + id + "</task-id>\n<status>completed</status>"}
+}
+
+func TestBgTrackerPairsLaunchAndCompletion(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:00:00Z")}, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Fatalf("outstanding = %d, want 1 after a launch", n)
+	}
+	b.observe([]Event{bgDoneEvent("aaa")}, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0 after its completion", n)
+	}
+}
+
+func TestBgTrackerCountsAndOldest(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{
+		bgLaunchEvent("aaa", "2026-08-11T10:00:00Z"),
+		bgLaunchEvent("bbb", "2026-08-11T10:05:00Z"),
+	}, now)
+	n, oldest := b.outstanding(now)
+	if n != 2 {
+		t.Errorf("outstanding = %d, want 2", n)
+	}
+	if want := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC); !oldest.Equal(want) {
+		t.Errorf("oldest = %v, want %v: the duration must read as how long work has been out", oldest, want)
+	}
+	// Retiring the older one moves the clock to the survivor.
+	b.observe([]Event{bgDoneEvent("aaa")}, now)
+	if _, oldest = b.outstanding(now); !oldest.Equal(time.Date(2026, 8, 11, 10, 5, 0, 0, time.UTC)) {
+		t.Errorf("oldest = %v, want the surviving launch", oldest)
+	}
+}
+
+// A task that never notifies must not mark the session busy forever — that
+// would make the conductor refuse to ever visit it.
+func TestBgTrackerExpiresStaleLaunches(t *testing.T) {
+	b := newBgTracker()
+	b.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:00:00Z")}, time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
+	late := time.Date(2026, 8, 11, 10, 31, 0, 0, time.UTC)
+	if n, _ := b.outstanding(late); n != 0 {
+		t.Errorf("outstanding = %d, want 0: a launch past the cap stops counting", n)
+	}
+}
+
+// If the human typed at the session, whatever it was tracking is moot.
+func TestBgTrackerClearedByGenuinePrompt(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:00:00Z")}, now)
+	b.observe([]Event{{Type: "user", UserText: "what's up?"}}, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0 after a real prompt", n)
+	}
+}
+
+// The delivered notification turn is a user event, but it is not the human
+// typing — it must not be mistaken for one.
+func TestBgTrackerNotificationTurnIsNotAPrompt(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe([]Event{
+		bgLaunchEvent("aaa", "2026-08-11T10:00:00Z"),
+		bgLaunchEvent("bbb", "2026-08-11T10:00:00Z"),
+	}, now)
+	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>"}}, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: the notification retires its own task, not the set", n)
+	}
 }
