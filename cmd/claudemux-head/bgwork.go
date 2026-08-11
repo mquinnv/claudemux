@@ -18,18 +18,34 @@ import (
 // verified event shapes.
 
 var (
-	// Anchored to the start of a line: the bare id fragment appears unanchored
-	// in ordinary tool output too (a Grep hit quoting it, a YAML file being
-	// read), and an unanchored search registered a phantom launch for every
-	// one of those. Requiring the whole launch sentence at column zero is what
-	// tells a real background-shell result apart from prose that merely
-	// mentions one.
-	bgShellRe = regexp.MustCompile(`(?m)^Command running in background with ID: ([A-Za-z0-9]+)`)
-	// agentId alone is not enough to anchor on: the real payload has it on its
-	// own line inside a larger block, and a quoted doc (or this repo's own
-	// design spec) reproduces that same shape verbatim. bgLaunches only
-	// extracts it when the same tool_result also carries bgAgentLaunchMarker.
-	bgAgentRe           = regexp.MustCompile(`agentId: ([A-Za-z0-9]+)`)
+	// Anchored to the ABSOLUTE start of the tool_result text — no `(?m)` —
+	// not merely the start of a line. Per the design spec, a background
+	// shell's tool_result.content IS that sentence: nothing precedes it in a
+	// real payload. `(?m)^` (start of any line) was tried first and still
+	// false-positived on this repo's own design spec, which quotes the exact
+	// sentence as a standalone paragraph in a fenced code block — a real
+	// physical line in the raw markdown, so a per-line anchor still matched
+	// it. Anchoring to the whole string's start instead requires the sentence
+	// to be the FIRST thing in the tool_result, which a doc being read never
+	// is (whatever text precedes the quoted line in the file is included in
+	// the same tool_result content ahead of it).
+	bgShellRe = regexp.MustCompile(`^Command running in background with ID: ([A-Za-z0-9]+)`)
+	// agentId is ALSO anchored to the start of a line, not just gated on the
+	// launch-sentence substring: the design spec (and this repo's plan doc,
+	// and our own test fixtures) quote the real async-agent payload as raw,
+	// unparsed JSON text, where the payload's "\n" is two literal characters
+	// on ONE physical line — so an unanchored-but-gated search still matched
+	// a doc that merely quotes both strings anywhere in the same tool_result.
+	// A REAL tool_result has already been through flattenText's json.Unmarshal,
+	// which decodes that escape into an actual newline, so "agentId:" only
+	// begins a true physical line in real data. bgLaunches still requires the
+	// launch sentence in the same tool_result too, matching bgShellRe's
+	// "Command " lead-in requirement: this trades a possible false negative if
+	// the harness rephrases either string (degrades to pre-branch behavior)
+	// for immunity to a session merely reading text that quotes one — a false
+	// positive hides a session from the conductor for up to bgMaxAge, which is
+	// the worse failure.
+	bgAgentRe           = regexp.MustCompile(`(?m)^agentId: ([A-Za-z0-9]+)`)
 	bgAgentLaunchMarker = "Async agent launched"
 	bgTaskIDRe          = regexp.MustCompile(`<task-id>([A-Za-z0-9]+)</task-id>`)
 )

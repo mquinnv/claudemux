@@ -1,9 +1,27 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+// repoDocPath locates a file relative to the repo root, resolved via this
+// test file's own path (like worktreeHookPath in worktreehook_test.go) so
+// it doesn't depend on the working directory the test binary happens to run
+// from.
+func repoDocPath(t *testing.T, relPath string) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", relPath)
+}
 
 func TestBgLaunches(t *testing.T) {
 	tests := []struct {
@@ -54,6 +72,77 @@ func TestBgLaunches(t *testing.T) {
 				t.Errorf("bgLaunches = %q, want [%s]", got, tt.want)
 			}
 		})
+	}
+}
+
+// Regression for the exact scenario the merge-blocker finding named: a
+// session reading this repo's OWN docs must never register a phantom
+// background launch. Built from the real files' bytes on disk, not a
+// synthetic one-liner — the previous round's negative fixtures were written
+// as short strings invented to fit the fix, which let a narrower form of the
+// same bug (an agentId anchored to line-start, but gated on an unanchored
+// substring search for "Async agent launched" anywhere in the text) slip
+// through undetected.
+//
+// The design spec quotes the real async-agent payload as raw, unparsed JSON
+// text: `"...successfully. (…)\nagentId: afbbf7a8f9ee52e81..."` where `\n`
+// is two literal characters (backslash, n) on ONE physical line of the
+// markdown file, not a real newline. A real transcript's tool_result, once
+// JSON-decoded by flattenText, has an ACTUAL newline there instead — that
+// distinction is exactly what an anchored `(?m)^agentId:` can tell apart,
+// and exactly what an unanchored substring gate cannot.
+func TestBgLaunchesIgnoresQuotedPayloadsInRepoDocs(t *testing.T) {
+	docs := []string{
+		"docs/superpowers/specs/2026-08-11-background-work-state-design.md",
+		"docs/superpowers/plans/2026-08-11-background-work-state.md",
+	}
+	for _, rel := range docs {
+		t.Run(rel, func(t *testing.T) {
+			path := repoDocPath(t, rel)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading %s: %v", path, err)
+			}
+			content := string(raw)
+			// Guard the fixture: if a future doc edit drops either marker,
+			// there would be nothing left to falsely match and this test
+			// would pass vacuously — silently stopping being a regression
+			// test at all. Fail loudly instead so the fixture gets fixed.
+			if !strings.Contains(content, "Async agent launched") ||
+				!strings.Contains(content, "running in background with ID:") {
+				t.Fatalf("%s no longer quotes both launch markers verbatim; update this fixture", rel)
+			}
+			got := bgLaunches(Event{ToolResults: []ToolResult{{Content: content}}})
+			if len(got) != 0 {
+				t.Errorf("bgLaunches = %q, want none: reading this repo's own docs must not launch anything", got)
+			}
+		})
+	}
+}
+
+// The same failure mode in miniature: the spec's async-agent payload puts
+// the launch sentence and the id on one physical line, so a single
+// `grep -n` line quoting it carries both — and must not register either,
+// the same way the full-file read must not.
+func TestBgLaunchesIgnoresGrepLineQuotingSpec(t *testing.T) {
+	path := repoDocPath(t, "docs/superpowers/specs/2026-08-11-background-work-state-design.md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var quoted string
+	for i, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, "Async agent launched") && strings.Contains(line, "agentId:") {
+			quoted = fmt.Sprintf("%s:%d:%s", path, i+1, line)
+			break
+		}
+	}
+	if quoted == "" {
+		t.Fatal("spec no longer has a single line quoting both the launch sentence and agentId; update this fixture")
+	}
+	got := bgLaunches(Event{ToolResults: []ToolResult{{Content: quoted}}})
+	if len(got) != 0 {
+		t.Errorf("bgLaunches = %q, want none: a grep line quoting the spec must not launch anything", got)
 	}
 }
 

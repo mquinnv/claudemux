@@ -86,12 +86,41 @@ the pairing exact.
 
 ## Detection rules
 
-**Launch** — a `tool_result` whose concatenated text matches either:
+**Launch** — a `tool_result` whose text matches either pattern below. Both are anchored,
+not a bare substring search: an unanchored `agentId: ([A-Za-z0-9]+)` (and, briefly, an
+unanchored `running in background with ID: ...`) registered a phantom launch for any tool
+result that merely QUOTED a marker — a Grep hit on `agentId: agentRecord.id`, or a Read of
+this repo's own docs, which quote both real payloads verbatim as worked examples.
 
 | Pattern | Produces |
 |---|---|
-| `running in background with ID: ([A-Za-z0-9]+)` | the background shell's task id |
-| `agentId: ([A-Za-z0-9]+)` | the async agent's id |
+| `^Command running in background with ID: ([A-Za-z0-9]+)` (anchored to the ABSOLUTE start of the text, no multiline) | the background shell's task id |
+| `(?m)^agentId: ([A-Za-z0-9]+)`, only when the same tool_result also contains the literal `Async agent launched` | the async agent's id |
+
+The two anchors differ because the two payloads have different shapes. A background
+shell's `tool_result.content` **is** the launch sentence — nothing precedes it — so
+anchoring to the start of the whole string is exact and rejects any text where the
+sentence merely appears somewhere inside a longer document (which is what a Read or Grep
+of a file quoting it produces: the sentence is never the first byte of that tool_result's
+content). An async agent's payload is a longer block where `agentId:` legitimately sits on
+its own line after other text has already run, so it needs a per-line anchor
+(`(?m)^`) instead of a whole-string one — but a per-line anchor by itself is not enough,
+because a **quoted** copy of the payload (this repo's own design spec and plan doc quote
+it verbatim, each on one physical markdown/source line) still starts a real line when the
+file is read. The launch-sentence gate (requiring `Async agent launched` in the same
+tool_result) is what tells those apart: in the raw JSON text a doc quotes, the payload's
+`\n` between the launch sentence and `agentId:` is two literal characters on one physical
+line, so `agentId:` never begins a true line there — but once a real tool_result has been
+through `flattenText`'s `json.Unmarshal`, that escape decodes into an actual newline, and
+`agentId:` genuinely starts a line only in that real, parsed data.
+
+This trades a possible false negative — if Claude Code ever rewords either sentence,
+detection silently reverts to pre-branch behavior for that kind — for immunity to a
+session merely reading or grepping text that quotes one. That is the right side to err on:
+a false negative degrades to the bug this feature fixes (already the pre-branch state,
+recoverable by the wording drift being visible in a failing fixture), while a false
+positive hides a session from the conductor for up to `bgMaxAge`, undetectably, which is
+strictly worse than doing nothing.
 
 **Completion** — a `<task-id>` extracted from a notification, recognized **structurally**:
 a `queue-operation` whose top-level content, or a `user` turn whose text, *starts with*
