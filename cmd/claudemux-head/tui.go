@@ -371,7 +371,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 }
 
 func (m *model) recomputeFromEvents(now time.Time) {
-	m.state = classifyState(m.allEvents, now)
+	m.state = classifyState(m.allEvents, 0, time.Time{}, now)
 	for i := len(m.allEvents) - 1; i >= 0; i-- {
 		// Skip placeholder models like "<synthetic>" (error/bookkeeping
 		// events) — show the last real API model instead.

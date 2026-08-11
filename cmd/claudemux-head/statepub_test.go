@@ -29,6 +29,19 @@ func TestStatePublishValue(t *testing.T) {
 	}
 }
 
+func TestStatePublishValueBackground(t *testing.T) {
+	got := statePublishValue(State{Kind: StateBackground, BgCount: 2})
+	if got != "Background:2" {
+		t.Errorf("statePublishValue = %q, want Background:2", got)
+	}
+	// The conductor's rule is exact-match on the waiting values, so an
+	// unrecognized value is already not-waiting. Assert it, because that is
+	// what keeps switchboard.go unchanged.
+	if isWaiting(got) {
+		t.Error("a session with background work must not count as waiting")
+	}
+}
+
 func TestStatePublishArgs(t *testing.T) {
 	since := time.Unix(1754700000, 0)
 	args, ok := statePublishArgs("%3", "Idle", since)

@@ -6,7 +6,7 @@ import (
 )
 
 func TestClassifyEmptyStream(t *testing.T) {
-	got := classifyState(nil, time.Now())
+	got := classifyState(nil, 0, time.Time{}, time.Now())
 	if got.Kind != StateIdle {
 		t.Errorf("empty stream: got %v, want StateIdle", got.Kind)
 	}
@@ -14,7 +14,7 @@ func TestClassifyEmptyStream(t *testing.T) {
 
 func TestClassifyLastIsAssistantText(t *testing.T) {
 	events := []Event{{Type: "assistant", UserText: "all done"}}
-	got := classifyState(events, time.Now())
+	got := classifyState(events, 0, time.Time{}, time.Now())
 	if got.Kind != StateIdle {
 		t.Errorf("got %v, want StateIdle", got.Kind)
 	}
@@ -24,7 +24,7 @@ func TestClassifyToolInFlight(t *testing.T) {
 	events := []Event{
 		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
 	}
-	got := classifyState(events, time.Now())
+	got := classifyState(events, 0, time.Time{}, time.Now())
 	if got.Kind != StateTool || got.ToolName != "Bash" {
 		t.Errorf("got %v/%q, want StateTool/Bash", got.Kind, got.ToolName)
 	}
@@ -35,7 +35,7 @@ func TestClassifyToolCompletedNotInFlight(t *testing.T) {
 		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
 		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1"}}},
 	}
-	got := classifyState(events, time.Now())
+	got := classifyState(events, 0, time.Time{}, time.Now())
 	if got.Kind != StateThinking {
 		t.Errorf("after tool result with no new assistant turn: got %v, want StateThinking", got.Kind)
 	}
@@ -53,7 +53,7 @@ func TestClassifySkipsBookkeepingEvents(t *testing.T) {
 		{Type: "attachment"},
 		{Type: "last-prompt", UserText: "tail of user input"},
 	}
-	got := classifyState(events, now)
+	got := classifyState(events, 0, time.Time{}, now)
 	if got.Kind != StateThinking {
 		t.Errorf("got %v, want StateThinking (last conversation event was user/tool_result)", got.Kind)
 	}
@@ -65,10 +65,54 @@ func TestClassifyError(t *testing.T) {
 		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1", IsError: true}}},
 		{Type: "assistant", UserText: "I hit an error"},
 	}
-	got := classifyState(events, time.Now())
+	got := classifyState(events, 0, time.Time{}, time.Now())
 	// Last event is assistant text — that's idle, not error. Errors should not
 	// surface here as StateError. This guards against false positives.
 	if got.Kind == StateError {
 		t.Errorf("assistant text after error tool_result should not be StateError")
+	}
+}
+
+// The bug this fixes: the main thread ended its turn while work it launched is
+// still running, and the session reported Idle — which isWaiting reads as
+// "waiting on the human".
+func TestClassifyStateBackgroundOverridesIdle(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
+	oldest := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	events := []Event{{Type: "assistant", Timestamp: "2026-08-11T10:09:00Z", UserText: "Kicked that off in the background."}}
+
+	if got := classifyState(events, 0, time.Time{}, now); got.Kind != StateIdle {
+		t.Errorf("Kind = %v, want StateIdle with no background work", got.Kind)
+	}
+	got := classifyState(events, 2, oldest, now)
+	if got.Kind != StateBackground {
+		t.Errorf("Kind = %v, want StateBackground", got.Kind)
+	}
+	if got.BgCount != 2 {
+		t.Errorf("BgCount = %d, want 2", got.BgCount)
+	}
+	if !got.Since.Equal(oldest) {
+		t.Errorf("Since = %v, want the oldest launch %v", got.Since, oldest)
+	}
+}
+
+// A foreground tool is the more specific truth and already classifies
+// correctly; background work must not mask it.
+func TestClassifyStateToolBeatsBackground(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
+	events := []Event{{
+		Type:      "assistant",
+		Timestamp: "2026-08-11T10:09:00Z",
+		ToolUses:  []ToolUse{{ID: "toolu_1", Name: "Bash"}},
+	}}
+	got := classifyState(events, 3, now.Add(-time.Minute), now)
+	if got.Kind != StateTool || got.ToolName != "Bash" {
+		t.Errorf("got %v/%q, want StateTool/Bash", got.Kind, got.ToolName)
+	}
+}
+
+func TestBackgroundLabel(t *testing.T) {
+	if got := (State{Kind: StateBackground, BgCount: 2}).Label(); got != "Working 2" {
+		t.Errorf("Label = %q, want %q", got, "Working 2")
 	}
 }
