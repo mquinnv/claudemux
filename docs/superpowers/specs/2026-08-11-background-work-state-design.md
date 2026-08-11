@@ -86,41 +86,55 @@ the pairing exact.
 
 ## Detection rules
 
-**Launch** — a `tool_result` whose text matches either pattern below. Both are anchored,
-not a bare substring search: an unanchored `agentId: ([A-Za-z0-9]+)` (and, briefly, an
-unanchored `running in background with ID: ...`) registered a phantom launch for any tool
-result that merely QUOTED a marker — a Grep hit on `agentId: agentRecord.id`, or a Read of
-this repo's own docs, which quote both real payloads verbatim as worked examples.
+**Launch** — decided by the **tool that produced the `tool_result`**, never by the
+result's text. A `tool_result` carries `tool_use_id`; the `tool_use` it names carries
+`name` and `input`. Text inside a tool_result cannot fabricate a matching `tool_use`
+block, so this is structural in the same way completion recognition is.
 
-| Pattern | Produces |
-|---|---|
-| `^Command running in background with ID: ([A-Za-z0-9]+)` (anchored to the ABSOLUTE start of the text, no multiline) | the background shell's task id |
-| `(?m)^agentId: ([A-Za-z0-9]+)`, only when the same tool_result also contains the literal `Async agent launched` | the async agent's id |
+| Launch kind | Gate (structural) | Then extract the id from the result text |
+|---|---|---|
+| background shell | the `tool_use` is `Bash` with `input.run_in_background == true` | `running in background with ID: ([A-Za-z0-9]+)` |
+| async agent | the `tool_use` is `Agent` **and** the result contains `Async agent launched` | `agentId: ([A-Za-z0-9]+)` |
 
-The two anchors differ because the two payloads have different shapes. A background
-shell's `tool_result.content` **is** the launch sentence — nothing precedes it — so
-anchoring to the start of the whole string is exact and rejects any text where the
-sentence merely appears somewhere inside a longer document (which is what a Read or Grep
-of a file quoting it produces: the sentence is never the first byte of that tool_result's
-content). An async agent's payload is a longer block where `agentId:` legitimately sits on
-its own line after other text has already run, so it needs a per-line anchor
-(`(?m)^`) instead of a whole-string one — but a per-line anchor by itself is not enough,
-because a **quoted** copy of the payload (this repo's own design spec and plan doc quote
-it verbatim, each on one physical markdown/source line) still starts a real line when the
-file is read. The launch-sentence gate (requiring `Async agent launched` in the same
-tool_result) is what tells those apart: in the raw JSON text a doc quotes, the payload's
-`\n` between the launch sentence and `agentId:` is two literal characters on one physical
-line, so `agentId:` never begins a true line there — but once a real tool_result has been
-through `flattenText`'s `json.Unmarshal`, that escape decodes into an actual newline, and
-`agentId:` genuinely starts a line only in that real, parsed data.
+`Agent` is the tool's verified name: of every transcript under `~/.claude/projects` on
+this machine, all 1648 results carrying the async-launch sentence came from a `tool_use`
+named exactly `Agent`, out of 1696 dispatches. The agent case still needs its text check
+for a real reason — the **same tool** dispatches foreground agents, whose result is the
+agent's final report rather than a launch acknowledgement, and no input flag distinguishes
+them. Tool identity says "this is an agent dispatch"; the sentence says "and it was an
+async one". That is a semantic distinction the structure genuinely does not carry.
 
-This trades a possible false negative — if Claude Code ever rewords either sentence,
-detection silently reverts to pre-branch behavior for that kind — for immunity to a
-session merely reading or grepping text that quotes one. That is the right side to err on:
-a false negative degrades to the bug this feature fixes (already the pre-branch state,
-recoverable by the wording drift being visible in a failing fixture), while a false
-positive hides a session from the conductor for up to `bgMaxAge`, undetectably, which is
-strictly worse than doing nothing.
+The id patterns are unanchored on purpose. With the gate guarding, anchors buy nothing and
+cost real launches: a sweep of this machine's transcripts found 40 of 803 genuine shell
+launch payloads that do not begin at byte 0.
+
+Correlation lives in `bgTracker.pending`, a `toolUseID → kind` map holding **only**
+launch-capable tool_uses — recording every tool_use would grow without bound for no gain.
+It must persist across `observe` calls, because the assistant turn calling the tool and
+the user turn carrying its result routinely land in different polls. Each entry is stamped
+with its event's timestamp and expires after `bgMaxAge` in the same sweep that expires
+outstanding tasks, so a session killed mid-tool cannot leak entries. A result whose
+`tool_use_id` is absent from the map is ignored entirely, whatever its text says.
+
+### Why not text-only detection
+
+It was tried twice and cannot work. No pattern distinguishes *a launch happened* from
+*text about a launch*: a session that reads or greps a document quoting a launch payload
+produces a tool_result containing exactly those bytes. An unanchored search fell to a Grep
+hit on `agentId: agentRecord.id` and to a Read of this repo's own docs. Anchoring to the
+absolute start of the text then fell to `grep` on a single file, which emits no path
+prefix, so the spec's own quoted example landed at byte 0. Each round narrowed the
+patterns and each was defeated by a different quoting shape — the shapes are unbounded,
+so the class cannot be closed from the text side. Do not reintroduce it.
+
+The gate errs toward missing launches, and that is the correct side. A false negative
+degrades to the pre-branch bug this feature fixes. A false positive publishes `Background`
+for a genuinely idle session, hiding it from the conductor for up to `bgMaxAge`,
+undetectably — strictly worse than not having the feature. The one known false negative
+this buys is a Bash command Claude Code *auto*-backgrounds after it exceeds its timeout:
+that carries no `run_in_background` flag (40 of 803 observed launches), and it is
+indistinguishable, structurally, from the foreground `grep` whose output quotes the same
+sentence.
 
 **Completion** — a `<task-id>` extracted from a notification, recognized **structurally**:
 a `queue-operation` whose top-level content, or a `user` turn whose text, *starts with*
