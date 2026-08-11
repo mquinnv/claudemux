@@ -637,11 +637,23 @@ type dataMsg struct {
 	rateLimitErr error
 }
 
-// shouldSummarize reports whether this poll crossed the busy → idle edge, which
-// is usually a finished turn but not always: classifyState calls any assistant
-// event carrying text Idle, so an assistant that emits prose and then a tool
-// call in separate JSONL events shows a mid-turn Idle blip that also fires.
-// That's acceptable — the in-flight flag serializes calls, and the rate floor
+// turnEndedByIdle reports whether kind reads as "the main thread's turn
+// ended" for summarize purposes: genuinely Idle, or Idle except that work it
+// launched is still running (Background). The two look the same to the
+// human — there's nothing new to summarize either way — so folding them into
+// one side of shouldSummarize's edge check means Idle<->Background never
+// fires a spurious extra call by itself, while Thinking/Tool ending the turn
+// as either Idle OR Background still does.
+func turnEndedByIdle(kind StateKind) bool {
+	return kind == StateIdle || kind == StateBackground
+}
+
+// shouldSummarize reports whether this poll crossed the busy → ended edge,
+// which is usually a finished turn but not always: classifyState calls any
+// assistant event carrying text Idle (or Background, if work is still
+// outstanding), so an assistant that emits prose and then a tool call in
+// separate JSONL events shows a mid-turn ended blip that also fires. That's
+// acceptable — the in-flight flag serializes calls, and the rate floor
 // (summary.min_interval) bounds how often they may fire, so short back-to-back
 // edges can't hammer the API. Note the floor is user-configurable and may be
 // set to 0, which disables it: the in-flight flag is then the only guard, and
@@ -650,7 +662,7 @@ func (m model) shouldSummarize(prevKind StateKind, now time.Time) bool {
 	if !m.canSummarize(now) {
 		return false
 	}
-	return prevKind != StateIdle && m.state.Kind == StateIdle
+	return !turnEndedByIdle(prevKind) && turnEndedByIdle(m.state.Kind)
 }
 
 // shouldRetrySummarize reports whether this poll should re-issue a summarize
@@ -1356,6 +1368,11 @@ func stateDot(kind StateKind) string {
 		return dotError
 	case StateCompacting:
 		return dotCompact
+	case StateBackground:
+		// Work is still running even though the main thread's turn ended —
+		// the busy dot is the honest read, not the idle one "Working N" sits
+		// next to.
+		return dotTool
 	default:
 		return dotIdle
 	}

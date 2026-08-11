@@ -813,6 +813,47 @@ func TestShouldSummarize(t *testing.T) {
 			lastAt: base, now: base.Add(time.Minute),
 			want: false,
 		},
+		// A turn that ends with background work outstanding lands on
+		// Background, not Idle. The busy -> ended edge must still fire, or
+		// the summary/topic never refreshes until the work clears.
+		{
+			name:       "busy to background fires",
+			summarizer: &Summarizer{},
+			prevKind:   StateThinking, kind: StateBackground,
+			lastAt: base, now: base.Add(time.Minute),
+			want: true,
+		},
+		{
+			name:       "tool to background fires",
+			summarizer: &Summarizer{},
+			prevKind:   StateTool, kind: StateBackground,
+			lastAt: base, now: base.Add(time.Minute),
+			want: true,
+		},
+		// Idle and Background both mean "the turn already ended" — crossing
+		// between them is not a busy -> ended edge and must not fire a
+		// spurious extra call.
+		{
+			name:       "idle to background does not fire",
+			summarizer: &Summarizer{},
+			prevKind:   StateIdle, kind: StateBackground,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
+		{
+			name:       "background to idle does not fire",
+			summarizer: &Summarizer{},
+			prevKind:   StateBackground, kind: StateIdle,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
+		{
+			name:       "still background does not fire",
+			summarizer: &Summarizer{},
+			prevKind:   StateBackground, kind: StateBackground,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1982,6 +2023,24 @@ func TestStatusChipPriority(t *testing.T) {
 	}
 	if chip == "" {
 		t.Error("an armed teardown must render a chip")
+	}
+}
+
+// StateBackground means work is still running even though the main thread's
+// turn ended, so the dot next to "Working N" must read as busy, not idle —
+// stateDot used to fall through to the default case and render dotIdle.
+//
+// dotIdle and dotTool render as byte-identical plain "●" in this non-TTY
+// test binary (no ANSI color survives), so comparing the real values can't
+// tell them apart. Swap in distinguishable sentinels for the duration of
+// the test so the assertion actually exercises which case fired.
+func TestStateDotBackgroundIsBusy(t *testing.T) {
+	origIdle, origTool := dotIdle, dotTool
+	dotIdle, dotTool = "SENTINEL-IDLE", "SENTINEL-TOOL"
+	defer func() { dotIdle, dotTool = origIdle, origTool }()
+
+	if got := stateDot(StateBackground); got != dotTool {
+		t.Errorf("stateDot(StateBackground) = %q, want dotTool (busy), not the idle dot", got)
 	}
 }
 
