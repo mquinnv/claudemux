@@ -117,9 +117,10 @@ func sanitizeOptionValue(s string) string {
 }
 
 // publishOptionCmd sets one session option, fire-and-forget. An empty value
-// is still published: the lobby's parser needs every column present, and
-// "unset" and "empty" must stay distinguishable from a head that predates
-// this option (which never sets it at all).
+// is still published: a previously-published non-empty value (a summary that
+// got cleared, a prompt that scrolled out) must be overwritable back to
+// empty, and skipping the call whenever value is "" would leave tmux holding
+// the stale non-empty one forever.
 func publishOptionCmd(selfPane, option, value string) tea.Cmd {
 	if selfPane == "" {
 		return nil

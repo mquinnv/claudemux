@@ -455,4 +455,10 @@ func TestGitCleanReason(t *testing.T) {
 			t.Errorf("got %q, want %q", got, "probe failed")
 		}
 	})
+
+	t.Run("empty dir blocks as probe failure rather than probing our own cwd", func(t *testing.T) {
+		if got := gitCleanReason(ctx, ""); got != "probe failed" {
+			t.Errorf("got %q, want %q", got, "probe failed")
+		}
+	})
 }

@@ -107,6 +107,13 @@ func worktreeIsGone(ctx context.Context, workDir, mainCheckout string) bool {
 // rather than "": this feeds a gate that kills a session, and a probe that
 // cannot tell must never open it.
 func gitCleanReason(ctx context.Context, dir string) string {
+	if dir == "" {
+		// `git -C ""` is a no-op, not an error: git silently runs against the
+		// head process's OWN cwd instead of the session's, so an empty dir
+		// must be refused here rather than falling through to a probe of the
+		// wrong repository.
+		return "probe failed"
+	}
 	status, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
 	if err != nil {
 		return "probe failed"
@@ -386,13 +393,20 @@ const teardownTmuxTimeout = 2 * time.Second
 // the status chip.
 type teardownSentMsg struct{ note string }
 
-// teardownProbeMsg carries one ready-gate observation. cleanReason is set
-// only by probes asked to check git cleanliness (auto-armed non-worktree
-// teardowns): "" means clean, anything else is the human-readable reason the
-// gate must stay shut.
+// teardownProbeMsg carries one ready-gate observation. checkedClean records
+// which question this probe actually answered — worktree-goneness or git
+// cleanliness — so the handler can tell a probe of one mode from the zero
+// value of the other rather than inferring the mode from the model's current
+// fields. Those fields can change between a probe being issued and its
+// result arriving (an esc followed by a re-arm, for instance), so a stale
+// probe answering the wrong question must be recognizable as such: cleanReason
+// is only meaningful when checkedClean is true, and worktreeGone only when it
+// is false. cleanReason itself is "" for clean, anything else the
+// human-readable reason the gate must stay shut.
 type teardownProbeMsg struct {
 	worktreeGone bool
 	cleanReason  string
+	checkedClean bool
 }
 
 // claudeGoneMsg reports whether any pane in this session is still running
@@ -457,7 +471,7 @@ func teardownProbeCmd(workDir, mainCheckout string, checkClean bool) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 		defer cancel()
 		if checkClean {
-			return teardownProbeMsg{cleanReason: gitCleanReason(ctx, workDir)}
+			return teardownProbeMsg{cleanReason: gitCleanReason(ctx, workDir), checkedClean: true}
 		}
 		return teardownProbeMsg{worktreeGone: worktreeIsGone(ctx, workDir, mainCheckout)}
 	}

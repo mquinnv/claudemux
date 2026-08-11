@@ -2311,7 +2311,7 @@ func TestTeardownProbeMsgAutoNonWorktree(t *testing.T) {
 
 	t.Run("clean opens the gate", func(t *testing.T) {
 		m := arm()
-		next, _ := m.Update(teardownProbeMsg{cleanReason: ""})
+		next, _ := m.Update(teardownProbeMsg{cleanReason: "", checkedClean: true})
 		got := next.(model)
 		if got.teardown != teardownReady {
 			t.Errorf("teardown = %v, want teardownReady", got.teardown)
@@ -2320,13 +2320,104 @@ func TestTeardownProbeMsgAutoNonWorktree(t *testing.T) {
 
 	t.Run("dirty blocks with reason and never kills", func(t *testing.T) {
 		m := arm()
-		next, _ := m.Update(teardownProbeMsg{cleanReason: "dirty tree"})
+		next, _ := m.Update(teardownProbeMsg{cleanReason: "dirty tree", checkedClean: true})
 		got := next.(model)
 		if got.teardown != teardownSent {
 			t.Errorf("teardown = %v, want still teardownSent", got.teardown)
 		}
 		if !got.teardownBlocked || got.teardownBlockReason != "dirty tree" {
 			t.Errorf("blocked=%v reason=%q, want blocked with dirty tree", got.teardownBlocked, got.teardownBlockReason)
+		}
+	})
+}
+
+// A stale probe answering the wrong question must not be misread as its
+// answer to the right one. teardownProbeMsg's zero value (checkedClean:
+// false, cleanReason: "") looks exactly like "clean" to the auto path unless
+// checkedClean says otherwise -- a worktree-mode probe landing here (e.g.
+// across an esc -> re-arm boundary) must not open the gate on evidence that
+// was never gathered.
+func TestTeardownProbeMsgIgnoresWrongMode(t *testing.T) {
+	arm := func() model {
+		m := teardownTestModel()
+		m.sessionCwd = "/tmp/plain-project"
+		prev := m.lastTyped
+		m.lastTyped = "/done"
+		m.autoArmTeardown(prev, time.Now())
+		m.teardownSubmitted = true
+		m.state = State{Kind: StateIdle, Since: time.Now()}
+		return m
+	}
+
+	t.Run("unchecked clean reading (worktree-mode zero value) does not open the gate", func(t *testing.T) {
+		m := arm()
+		next, _ := m.Update(teardownProbeMsg{cleanReason: "", checkedClean: false})
+		got := next.(model)
+		if got.teardown != teardownSent {
+			t.Errorf("teardown = %v, want still teardownSent; an unchecked probe must not be read as clean", got.teardown)
+		}
+	})
+
+	t.Run("a checked clean reading does open the gate", func(t *testing.T) {
+		m := arm()
+		next, _ := m.Update(teardownProbeMsg{cleanReason: "", checkedClean: true})
+		got := next.(model)
+		if got.teardown != teardownReady {
+			t.Errorf("teardown = %v, want teardownReady", got.teardown)
+		}
+	})
+
+	t.Run("a checkedClean reading is ignored on the worktree path", func(t *testing.T) {
+		m := teardownTestModel() // teardownInWorktree: true, not auto
+		m.teardown = teardownSent
+		m.teardownSubmitted = true
+		next, _ := m.Update(teardownProbeMsg{worktreeGone: true, checkedClean: true})
+		got := next.(model)
+		if got.teardown != teardownSent {
+			t.Errorf("teardown = %v, want still teardownSent; a cleanliness-mode probe must not be read as worktreeGone", got.teardown)
+		}
+	})
+}
+
+// A ready gate is evidence gathered at the moment it opened, not a standing
+// guarantee. type /done at noon -> ready latches; keep working; press x at
+// 5pm intending to START a fresh wrap-up -> without this check it sends
+// /exit immediately on stale evidence. A new prompt landing while ready --
+// unless it is the wrap-up command itself, which is a legitimate re-arm --
+// means work resumed and the gate must be re-earned.
+func TestTeardownReadyAbortsOnResumedWork(t *testing.T) {
+	// Seed a first prompt so there is a real lastTyped value to edge away
+	// from, then arm to teardownReady the way other tests do: set the phase
+	// and fields directly, bypassing the probe that would normally get here.
+	base, _ := pollPrompt(teardownTestModel(), "start the work", time.Now())
+
+	t.Run("a new non-wrap-up prompt aborts", func(t *testing.T) {
+		m := base
+		m.teardown = teardownReady
+		got, _ := pollPrompt(m, "one more thing before we wrap up", time.Now())
+		if got.teardown != teardownIdle {
+			t.Fatalf("phase = %v, want teardownIdle; resumed work must not sail through on a stale gate", got.teardown)
+		}
+		if got.teardownNote != "session resumed" {
+			t.Errorf("note = %q, want %q", got.teardownNote, "session resumed")
+		}
+	})
+
+	t.Run("no new prompt does not abort", func(t *testing.T) {
+		m := base
+		m.teardown = teardownReady
+		got, _ := pollPrompt(m, "", time.Now())
+		if got.teardown != teardownReady {
+			t.Errorf("phase = %v, want teardownReady unchanged when lastTyped didn't move", got.teardown)
+		}
+	})
+
+	t.Run("the edge landing on the wrap-up command itself does not abort", func(t *testing.T) {
+		m := base
+		m.teardown = teardownReady
+		got, _ := pollPrompt(m, "/done", time.Now())
+		if got.teardown != teardownReady {
+			t.Errorf("phase = %v, want teardownReady; re-typing the wrap-up command is not resumed work", got.teardown)
 		}
 	})
 }

@@ -66,6 +66,11 @@ you get carried to it. To sit and watch the fleet instead, press `Space` — it
 toggles **standby**, which keeps the states live but never dispatches, until you
 press `Space` again.
 
+Each session gets two lines: state, timer, a context-usage meter, and its
+live Haiku-generated topic on the first, and a dimmer second line underneath
+with the running summary and last prompt (`summary · prompt`, either half
+omitted if empty, the whole line omitted if both are).
+
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `q` quits.
 
@@ -325,16 +330,28 @@ wrap-up in order:
    It matches the command's own name, so `/done`, `/ameriglide-core:done` and any other
    plugin-qualified spelling all count (Claude Code rewrites slash commands, so the
    transcript rarely holds the bare form). `/done-something` and `/undone` are different
-   commands and are ignored. It arms **only for sessions working in a worktree**: without
-   a worktree there is nothing to verify, so the gate would open on turn-end alone and one
-   stray `x` could kill a session you never armed. Non-worktree sessions still tear down
-   with `x`.
-2. Once the wrap-up has actually reached `claude`, the turn has ended, **and** the
-   session's worktree is gone, the pane shows `⏻ press x to tear down`. If the wrap-up
-   bailed — uncommitted work, unpushed commits, you declined — the worktree is still
-   there, so the gate never opens and the pane says `⏻ worktree still present` instead.
-3. The second press sends `/exit`, shows `⏻ exiting claude…` while it waits for
-   `claude` to actually be gone, and then kills the tmux session.
+   commands and are ignored. Typing it arms the watch in **every** session, worktree or
+   not — what differs between the two is the evidence the ready gate demands before it
+   will offer the second press (see step 2).
+2. Once the wrap-up has actually reached `claude` and the turn has ended, the pane checks
+   whether it's safe to offer the kill, and what "safe" means depends on the session:
+   - **Working in a worktree**: the session's worktree must be gone. If the wrap-up
+     bailed — uncommitted work, unpushed commits, you declined — the worktree is still
+     there, so the gate never opens and the pane says `⏻ worktree still present` instead.
+   - **Not in a worktree**: there's no worktree deletion to check, so the gate instead
+     holds the wrap-up to its own success bar — a clean tree and nothing unpushed. A
+     dirty or unpushed tree blocks with the reason named right in the chip:
+     `⏻ blocked (dirty tree)`, `⏻ blocked (unpushed)`, `⏻ blocked (no upstream)`.
+
+   Either way, once the gate opens the pane shows `⏻ press x to tear down`. `esc`
+   dismisses a blocked or ready teardown the same as any other in-progress one (see
+   below). A ready gate is also re-checked against anything typed afterwards: if you
+   keep working past the point it opened, the next prompt that isn't the wrap-up command
+   itself drops the teardown back to idle instead of trusting evidence that may no longer
+   be true — the pane says `⏻ session resumed`.
+3. The second press — `x` at the `⏻ press x to tear down` chip — sends `/exit`, shows
+   `⏻ exiting claude…` while it waits for `claude` to actually be gone, and then kills
+   the tmux session.
 
 The worktree the gate watches is the one **the session's working directory is in** — the
 cwd from its transcript. `claudemux -w` (or `launch.auto_worktree`, or `worktree: true`
@@ -348,9 +365,10 @@ session that ends up working in a worktree.
 
 It follows the cwd, though, not the work. A session whose cwd stays in the main checkout
 while it drives a worktree by explicit path (`git -C <worktree> …`) gets **no** worktree
-verification — the gate falls back to turn-end alone, even though the status line may
-show a worktree chip for it. The chip tracks where the commands are going; the gate
-tracks where the session is sitting.
+verification — the gate falls back to the non-worktree bar (clean tree, nothing
+unpushed) against the main checkout, even though the status line may show a worktree
+chip for it. The chip tracks where the commands are going; the gate tracks where the
+session is sitting.
 
 `esc` cancels a teardown in progress. **It does not undo anything** — by then the
 wrap-up command has already run; cancelling only stops the status pane from driving
@@ -360,10 +378,8 @@ Nothing here is silent. Every abort names its reason on the status line —
 `⏻ wrap-up didn't submit` (the command never reached `claude`),
 `⏻ claude didn't exit` (it was still running after 15 seconds, so the session was
 left alive), `⏻ no claude pane`, `⏻ session rotated` (the pane re-bound to a different
-session mid-teardown, so what was armed no longer applies).
-
-Sessions whose cwd isn't in a worktree have no deletion to verify, so the gate opens as
-soon as the wrap-up turn ends.
+session mid-teardown, so what was armed no longer applies), `⏻ session resumed` (new
+work landed after the ready gate opened, so it was withdrawn rather than trusted).
 
 Outside tmux `x` does nothing at all: there is no pane to type into and no session to
 kill.

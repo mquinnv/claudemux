@@ -909,6 +909,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		allPub := tea.Batch(append(infoCmds, pubCmd)...)
 		m.lastUpdate = msg.time
 		m.autoArmTeardown(prevTyped, msg.time)
+		// A ready gate is evidence gathered at the moment it opened, not a
+		// standing guarantee: if the session keeps going after that (a new
+		// prompt lands that is not the wrap-up itself), the evidence may be
+		// stale by the time `x` is pressed — the clean/pushed tree a probe
+		// saw at noon says nothing about unpushed work made since. Re-arming
+		// from teardownIdle already tracks this edge (autoArmTeardown above);
+		// this mirrors that edge detection for the ready phase, dropping back
+		// to idle so a resumed session is re-armed and re-probed from
+		// scratch rather than trusting a latched gate.
+		switch m.teardown {
+		case teardownReady:
+			if m.lastTyped != prevTyped && !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
+				return m.abortTeardown("session resumed", msg.time), allPub
+			}
+		}
 		if m.shouldSummarize(prevKind, msg.time) {
 			m.summarizing = true
 			return m, tea.Batch(m.summarize(), allPub)
@@ -1000,6 +1015,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Auto-armed without worktree evidence: the gate needs the
 			// wrap-up's own success bar. Same freshness requirement as the
 			// worktree path below.
+			//
+			// A probe issued before an esc → re-arm boundary can still land
+			// here after the model has moved on; checkedClean is what marks
+			// it as answering the cleanliness question at all — without it, a
+			// worktree-mode probe's zero-value cleanReason ("") would read as
+			// "clean" and could open the gate on evidence that was never
+			// gathered.
+			if !msg.checkedClean {
+				return m, nil
+			}
 			if m.teardownSubmitted && teardownAutoGateOpen(m.state.Kind, false, false, msg.cleanReason) {
 				m.teardown = teardownReady
 				m.teardownAt = time.Now()
@@ -1011,6 +1036,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.teardownBlocked {
 				m.teardownBlockReason = msg.cleanReason
 			}
+			return m, nil
+		}
+		// A stale probe from the other mode is the same risk as above, mirror
+		// image: this path wants a worktree-goneness reading, so a probe that
+		// actually checked cleanliness is ignored rather than misread as
+		// worktreeGone's zero value (false, which is at least safe — but only
+		// by accident, and the next tick re-probes properly either way).
+		if msg.checkedClean {
 			return m, nil
 		}
 		// teardownSubmitted is required, not just the gate: m.state.Kind is
