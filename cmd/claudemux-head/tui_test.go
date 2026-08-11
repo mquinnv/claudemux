@@ -1923,6 +1923,68 @@ func TestPinnedIndicatorRenders(t *testing.T) {
 	}
 }
 
+// `s` forces a Haiku refresh. The rate floor here is an hour and the last call
+// was just now, so an automatic caller could not fire — proving the key skips
+// the floor rather than merely riding a window that happened to be open.
+func TestRefreshKeyForcesSummarize(t *testing.T) {
+	now := time.Now()
+	m := model{ready: true, summarizer: &Summarizer{}, minSummaryInterval: time.Hour, lastSummaryAt: now}
+	if m.canSummarize(now) {
+		t.Fatal("test setup: the rate floor must be closed for this to prove anything")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd == nil {
+		t.Fatal("s must issue a summarize call even inside the rate floor")
+	}
+	if !next.(model).summarizing {
+		t.Error("s must mark the call in flight")
+	}
+}
+
+// The floor is skippable; the in-flight guard is not. A mashed key must not put
+// two billed calls in the air.
+func TestRefreshKeyRespectsInFlight(t *testing.T) {
+	m := model{ready: true, summarizer: &Summarizer{}, summarizing: true}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}); cmd != nil {
+		t.Error("s must not issue a second call while one is in flight")
+	}
+}
+
+func TestRefreshKeyWithoutSummarizer(t *testing.T) {
+	m := model{ready: true}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}); cmd != nil {
+		t.Error("s must be a no-op with no summarizer (no API key)")
+	}
+}
+
+// One chip slot, three claimants. Teardown is transient AND actionable so it
+// wins; the refresh indicator is transient so it beats the ambient pin.
+func TestStatusChipPriority(t *testing.T) {
+	now := time.Now()
+
+	m := model{summarizing: true, tabPinned: true}
+	if got := m.statusChip(now); got != summarizingChip {
+		t.Errorf("statusChip = %q, want %q: a refresh in flight outranks the pin", got, summarizingChip)
+	}
+
+	m.summarizing = false
+	if got := m.statusChip(now); got != pinnedChip {
+		t.Errorf("statusChip = %q, want %q", got, pinnedChip)
+	}
+
+	td := teardownTestModel()
+	td.summarizing = true
+	td.tabPinned = true
+	td.teardown = teardownReady
+	chip := td.statusChip(now)
+	if chip == summarizingChip || chip == pinnedChip {
+		t.Errorf("statusChip = %q, want the teardown chip to win", chip)
+	}
+	if chip == "" {
+		t.Error("an armed teardown must render a chip")
+	}
+}
+
 // A model with just enough set up to exercise teardown transitions.
 // teardownTestModel is a head watching a worktree session, shaped the way
 // bin/claudemux really launches one: the head's OWN cwd is the main checkout

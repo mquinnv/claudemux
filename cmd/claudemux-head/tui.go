@@ -790,6 +790,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the safe direction for a key sequence that ends in kill-session.
 			m.restart = true
 			return m, tea.Quit
+		case "s":
+			// Force a Haiku refresh. Deliberately skips the rate floor that
+			// canSummarize applies: the floor exists to bound automatic,
+			// edge-driven calls, and a key the human pressed is neither — a
+			// refresh that silently did nothing because an edge fired twenty
+			// seconds ago would be indistinguishable from a broken key.
+			//
+			// The other two guards still hold. No summarizer means no API key
+			// and nothing to call; the in-flight flag means a mashed key
+			// cannot put two billed calls in the air at once.
+			if m.summarizer == nil || m.summarizing {
+				return m, nil
+			}
+			m.summarizing = true
+			return m, m.summarize()
 		case "x":
 			return m.teardownKey()
 		case "r":
@@ -1211,6 +1226,35 @@ func (m model) teardownChipText(now time.Time) string {
 	return teardownChip(m.teardown, m.teardownBlocked, m.teardownAuto, m.teardownBlockReason, m.teardownNote, m.teardownNoteAt, now)
 }
 
+const (
+	summarizingChip = "⟳ summarizing"
+	pinnedChip      = "⬚ pinned"
+)
+
+// statusChip picks the one chip both status layouts have room for. The order is
+// transient-and-actionable, then transient, then ambient:
+//
+//   - an armed teardown is the only one the user must answer;
+//   - a refresh in flight is the sole feedback that `s` registered, and it
+//     clears itself within a second or two;
+//   - the pin is a mode that stays until toggled, and its effect is visible in
+//     the tab itself, so it is the one that can afford to yield.
+//
+// Shared by renderStateLine and renderStatusbar so the two layouts cannot
+// disagree about which chip won.
+func (m model) statusChip(now time.Time) string {
+	if td := m.teardownChipText(now); td != "" {
+		return td
+	}
+	if m.summarizing {
+		return summarizingChip
+	}
+	if m.tabPinned {
+		return pinnedChip
+	}
+	return ""
+}
+
 // renderStatusbar packs state and budget info onto a single
 // background-filled line at the bottom of the pane. chip, if non-empty, is
 // the worktree name to show (truncated to 24 runes) between the model and
@@ -1235,13 +1279,11 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	// saying why. The worktree chip is merely descriptive and is re-derivable
 	// from the session itself, so it is the one that should vanish first.
 	//
-	// The teardown chip takes the pin's slot and wins when both apply: it is
-	// transient and actionable, the pin is ambient. Both sit ahead of the
-	// worktree chip for the clipping reason documented above.
-	if td := m.teardownChipText(now); td != "" {
-		leftParts = append(leftParts, td)
-	} else if m.tabPinned {
-		leftParts = append(leftParts, "⬚ pinned")
+	// Which of teardown / refresh / pin gets that slot is statusChip's call,
+	// shared with renderStateLine so the two layouts cannot disagree. All of
+	// them sit ahead of the worktree chip for the clipping reason above.
+	if c := m.statusChip(now); c != "" {
+		leftParts = append(leftParts, c)
 	}
 	if chip == noWorktreeWarning {
 		// No "⎇ " glyph here: that's a branch symbol, and this message is
@@ -1360,10 +1402,8 @@ func renderStateLine(m model, now time.Time) string {
 	if m.modelName != "" {
 		parts = append(parts, shortModel(m.modelName))
 	}
-	if td := m.teardownChipText(now); td != "" {
-		parts = append(parts, td)
-	} else if m.tabPinned {
-		parts = append(parts, "⬚ pinned")
+	if c := m.statusChip(now); c != "" {
+		parts = append(parts, c)
 	}
 
 	chip := m.worktreeChip()

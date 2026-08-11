@@ -299,6 +299,16 @@ but they stop renaming the window — and the status pane shows `⬚ pinned`. Pr
 Sessions cloned with `-n` share one `.project.yml`, so `remix-2` restores to
 `Remix 2` rather than colliding with `remix`'s `Remix`.
 
+**Refreshing the summary.** Summaries normally land on their own, when a turn
+ends, and no more often than `summary.min_interval`. Click the status pane and
+press `s` to run one now — the interval is skipped, because a refresh you asked
+for should not quietly do nothing just because an edge fired seconds ago. While
+the call is out the pane shows `⟳ summarizing`; an armed teardown takes that
+slot back, since it is the one that needs an answer. `s` does nothing when there
+is no API key, and a second press while a call is in flight is ignored rather
+than billed twice. A pinned tab stays pinned: the summary and topic refresh, the
+window name does not.
+
 **Restarting the status pane.** Press `R` (capital) to restart it in place. The
 process re-execs the `claudemux-head` binary as it stands on disk right now, so
 this is how you pick up a rebuild or an edited `config.yml` without touching the
