@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -175,6 +176,67 @@ func TestSwModelViewClipsLongName(t *testing.T) {
 	m.snap.Sessions[0].Name = strings.Repeat("x", swNameColW+10)
 	if view := ansi.Strip(m.View()); strings.Contains(view, strings.Repeat("x", swNameColW+1)) {
 		t.Errorf("over-long name must be truncated to %d cells:\n%s", swNameColW, view)
+	}
+}
+
+// Mutation guard for the clipLine call on line 1 (and, by the same
+// mechanism, line 2 and the status/footer lines): every rendered line must
+// fit within m.width in display cells. A long name/state/topic combination
+// assembles a line far wider than the pane before clipping, so if the width
+// guard is ever dropped this fails instead of merely looking wrong on a real
+// terminal.
+func TestSwModelViewNeverExceedsWidth(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 40, 24
+	m.snap = swSnapshot{Sessions: []swSession{
+		{Name: "a-very-long-session-name-that-overflows-the-grid",
+			State: "Tool:AskUserQuestion", Since: now.Add(-3 * time.Hour), Context: 100,
+			Topic:   "a topic long enough to overflow the configured pane width many times over",
+			Summary: "a summary long enough to overflow the pane width on its own, several times over"},
+	}}
+	for _, l := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(l); w > m.width {
+			t.Errorf("line measures %d cells, want <= %d: %q", w, m.width, l)
+		}
+	}
+}
+
+// CJK runes measure two cells each. The name column must clip and pad by
+// display width, not rune count, or a wide-rune session name truncated to
+// swNameColW RUNES still measures 2x that many CELLS, overrunning the
+// column and pushing state/age/context/topic to the right — same failure
+// mode TestSwModelViewAlignsColumns guards for ordinary names.
+func TestSwModelViewClipsWideRuneNameToColumn(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 100, 24
+	m.snap = swSnapshot{Sessions: []swSession{
+		{Name: strings.Repeat("囲", swNameColW+5), State: "Idle", Since: now,
+			Context: 42, Topic: "wide-rune-name-alignment"},
+	}}
+	const (
+		ctxCol   = 1 + 2 + swNameColW + 1 + swStateColW + swAgeColW + 2
+		topicCol = ctxCol + swCtxColW + 2
+	)
+	view := ansi.Strip(m.View())
+	line := ""
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "wide-rune-name-alignment") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no row rendered:\n%s", view)
+	}
+	// Cut by display CELL width, not rune index: the name is wide-rune
+	// content, so a rune-indexed slice (as ordinary-name tests use) would
+	// itself misalign against the CJK text and false-fail. ansi.Cut is the
+	// same grapheme/wide-rune-aware measure clipLine and swCell use.
+	topic := "wide-rune-name-alignment"
+	if got := ansi.Cut(line, topicCol, topicCol+len([]rune(topic))); got != topic {
+		t.Errorf("topic starts at the wrong column with a wide-rune name; from cell %d got %q, want %q\n%s",
+			topicCol, got, topic, view)
 	}
 }
 

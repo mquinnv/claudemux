@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // The switchboard's Bubble Tea shell: a full-screen fleet list that runs the
@@ -50,10 +51,11 @@ func swCell(text string, w int, st lipgloss.Style, right bool) string {
 	if text == "" {
 		return strings.Repeat(" ", w)
 	}
-	text = truncateRunes(text, w)
+	// Truncate by display width, not rune count: a cell of wide (CJK) runes
+	// clipped to w RUNES can still measure past w CELLS, overrunning the
+	// column and pushing every column after it.
+	text = ansi.Truncate(text, w, "…")
 	pad := ""
-	// Guard the width, not the rune count: a cell of wide (CJK) runes is
-	// clipped to w runes above but can still measure past w cells.
 	if n := w - lipgloss.Width(text); n > 0 {
 		pad = strings.Repeat(" ", n)
 	}
@@ -240,8 +242,11 @@ func (m swModel) View() string {
 			topic = "  " + swUnknownStyle.Render(sess.Topic)
 		}
 		// The name cell is padded before styling so the selection highlight
-		// covers the whole column, not just the name's own runes.
-		name := swPad(truncateRunes(sess.Name, swNameColW), swNameColW)
+		// covers the whole column, not just the name's own runes. Truncated
+		// by display width (not rune count) for the same reason as swCell: a
+		// CJK name clipped to swNameColW runes still overruns the column in
+		// cells.
+		name := swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW)
 		if i == m.sel {
 			name = swSelStyle.Render(name)
 		}
@@ -263,10 +268,14 @@ func (m swModel) View() string {
 			detail = detail + " · " + sess.Prompt
 		}
 		if detail != "" {
-			if m.width > 6 && len([]rune(detail)) > m.width-6 {
-				detail = truncateRunes(detail, m.width-6)
+			// Same width guard as line 1: a rune count is not a cell count,
+			// and an unclipped line here wraps in the terminal and shifts
+			// every row below it, destroying the column grid.
+			line2 := fmt.Sprintf("    %s", swStatusStyle.Render(detail))
+			if m.width > 0 {
+				line2 = clipLine(line2, m.width)
 			}
-			fmt.Fprintf(&b, "    %s\n", swStatusStyle.Render(detail))
+			b.WriteString(line2 + "\n")
 		}
 	}
 	status := m.cond.statusLine(m.snap)
@@ -274,11 +283,25 @@ func (m swModel) View() string {
 		status = fmt.Sprintf("standby · %d waiting — space to conduct",
 			len(m.snap.waitingQueue(m.cond.snoozed)))
 	}
-	b.WriteString("\n" + swStatusStyle.Render(status) + "\n")
-	if m.lastErr != "" {
-		b.WriteString(swStatusStyle.Render("tmux: "+m.lastErr) + "\n")
+	statusLine := swStatusStyle.Render(status)
+	if m.width > 0 {
+		statusLine = clipLine(statusLine, m.width)
 	}
-	b.WriteString(swStatusStyle.Render("space conduct/standby · j/k select · enter jump · q quit"))
+	b.WriteString("\n" + statusLine + "\n")
+	if m.lastErr != "" {
+		errLine := swStatusStyle.Render("tmux: " + m.lastErr)
+		if m.width > 0 {
+			errLine = clipLine(errLine, m.width)
+		}
+		b.WriteString(errLine + "\n")
+	}
+	// Cosmetic footer, but clipped for the same reason as the rows above it:
+	// consistency, and a narrow pane shouldn't wrap it either.
+	footer := swStatusStyle.Render("space conduct/standby · j/k select · enter jump · q quit")
+	if m.width > 0 {
+		footer = clipLine(footer, m.width)
+	}
+	b.WriteString(footer)
 	return b.String()
 }
 
