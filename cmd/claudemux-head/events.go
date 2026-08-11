@@ -99,7 +99,15 @@ type Event struct {
 	// is where a finished background task's notification arrives first — the
 	// delivered user turn only follows when the session next runs. Empty for
 	// every other event type.
-	QueueText   string
+	QueueText string
+	// BgTaskID and BgAgentID are the harness's own record that this entry's
+	// tool_result STARTED background work — a background shell and an async
+	// agent respectively. They come from the top-level `toolUseResult`, a
+	// sibling of `message`, so no tool's output can forge one: a command's
+	// stdout lands inside `toolUseResult.stdout` and cannot add a key beside
+	// it. Empty when the entry is not a launch, which is nearly always.
+	BgTaskID    string
+	BgAgentID   string
 	IsSidechain bool // true for subagent (Task) entries — excluded from the worktree chip
 	RawLine     string
 }
@@ -262,6 +270,10 @@ func parseEvent(line string) (Event, bool) {
 		Message     json.RawMessage `json:"message"`
 		Content     json.RawMessage `json:"content"`    // top level; queue-operation only
 		LastPrompt  string          `json:"lastPrompt"` // present on type=last-prompt events
+		// ToolUseResult is the harness's structured record of what a tool
+		// actually did, written beside `message` rather than inside it. Raw
+		// because its shape varies per tool — see extractLaunch.
+		ToolUseResult json.RawMessage `json:"toolUseResult"`
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Event{}, false
@@ -277,6 +289,8 @@ func parseEvent(line string) (Event, bool) {
 		ev.QueueText = flattenText(raw.Content)
 	}
 
+	extractLaunch(&ev, raw.ToolUseResult)
+
 	if len(raw.Message) > 0 {
 		var msg struct {
 			Model   string          `json:"model"`
@@ -290,6 +304,41 @@ func parseEvent(line string) (Event, bool) {
 		}
 	}
 	return ev, true
+}
+
+// extractLaunch reads the harness's own launch record off a `toolUseResult`.
+// Verified against all 1915 transcripts under ~/.claude/projects on this
+// machine: `backgroundTaskId` is a non-empty string on all 821 background shell
+// launches and nothing else; `isAsync` is a bool that is only ever true, paired
+// with a non-empty string `agentId`, on all 1596 async agent launches and
+// nothing else.
+//
+// `toolUseResult` is frequently NOT an object — 4035 entries write a bare
+// string there and 2728 an array — so a failed decode is the normal case, not
+// an error. It must leave the event untouched rather than fail parseEvent or
+// drop the line: the same entry still carries the tool_result and timestamp the
+// rest of the head classifies from.
+func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
+	if len(toolUseResult) == 0 {
+		return
+	}
+	var res struct {
+		BackgroundTaskID string `json:"backgroundTaskId"`
+		IsAsync          bool   `json:"isAsync"`
+		AgentID          string `json:"agentId"`
+	}
+	if json.Unmarshal(toolUseResult, &res) != nil {
+		return
+	}
+	ev.BgTaskID = res.BackgroundTaskID
+	// isAsync is the load-bearing half: the same `Agent` tool dispatches
+	// foreground agents, and only an ASYNC one ends the main thread's turn.
+	// Every observed isAsync is true, so requiring it costs nothing today and
+	// keeps a future foreground record — which would have to say isAsync
+	// false — from reading as a launch.
+	if res.IsAsync {
+		ev.BgAgentID = res.AgentID
+	}
 }
 
 func extractContent(ev *Event, content json.RawMessage) {

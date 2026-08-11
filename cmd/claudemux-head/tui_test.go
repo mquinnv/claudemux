@@ -3230,7 +3230,7 @@ func TestModelBackgroundStateFromPoll(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
 	m := model{bg: newBgTracker()}
 	events := append(
-		bgShellLaunch("aaa", "2026-08-11T10:00:00Z"),
+		bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"),
 		Event{Type: "assistant", Timestamp: "2026-08-11T10:01:00Z", UserText: "Kicked that off in the background."},
 	)
 	m.bg.observe(events, now)
@@ -3256,7 +3256,7 @@ func TestSwitchSessionResetsBackgroundWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := model{bg: newBgTracker()}
-	m.bg.observe(bgShellLaunch("aaa", "2026-08-11T10:00:00Z"), now)
+	m.bg.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
 	m.switchSession(path, now)
 	if n, _ := m.bg.outstanding(now); n != 0 {
 		t.Errorf("outstanding = %d, want 0: a rotated session starts clean", n)
@@ -3274,7 +3274,7 @@ func TestUpdateDataMsgFeedsBackgroundTracker(t *testing.T) {
 	got, _ := m.Update(dataMsg{
 		time: now,
 		newEvents: append(
-			bgShellLaunch("aaa", "2026-08-11T10:00:00Z"),
+			bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"),
 			Event{Type: "assistant", Timestamp: "2026-08-11T10:01:00Z", UserText: "Kicked that off in the background."},
 		),
 		rateLimitErr: errors.New("no rate limits in this test"),

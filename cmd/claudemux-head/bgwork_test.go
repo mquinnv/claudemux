@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,40 +26,93 @@ func repoDocPath(t *testing.T, relPath string) string {
 
 // --- fixture builders -------------------------------------------------------
 //
-// Launch detection is gated on the tool_use that PRODUCED a result, so every
-// launch fixture is a pair of events: the assistant turn that called the tool,
-// then the user turn carrying its tool_result. That is how the transcript
-// really reads (see testdata/launch-*.jsonl), and it is why these helpers
-// return a slice rather than one event.
+// Every event below is built as a transcript LINE and run through parseEvent,
+// never assembled as an Event literal. The signal these tests are about — the
+// harness's `toolUseResult` — is a sibling of `message` at the top level of the
+// line, so a hand-built Event would be testing the test's own idea of the
+// payload rather than the parser's. Building lines also keeps the fixtures
+// honest against testdata/*.jsonl, which are real transcript excerpts.
 
-func bgToolUseEvent(toolUseID, name, ts string, input map[string]interface{}) Event {
-	return Event{
-		Type:      "assistant",
-		Timestamp: ts,
-		ToolUses:  []ToolUse{{ID: toolUseID, Name: name, Input: input}},
-	}
+// bgToolUseLine renders the assistant turn that calls a tool.
+func bgToolUseLine(t *testing.T, toolUseID, name, ts string, input map[string]any) string {
+	t.Helper()
+	return bgMarshalLine(t, map[string]any{
+		"type":      "assistant",
+		"timestamp": ts,
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type": "tool_use", "id": toolUseID, "name": name, "input": input,
+			}},
+		},
+	})
 }
 
-func bgResultEvent(toolUseID, content, ts string) Event {
-	return Event{
-		Type:        "user",
-		Timestamp:   ts,
-		ToolResults: []ToolResult{{ToolUseID: toolUseID, Content: content}},
+// bgResultLine renders the user turn carrying a tool_result. toolUseResult is
+// written as the top-level sibling the harness really uses; pass nil to omit it
+// entirely, which is how a result with no harness record reads.
+func bgResultLine(t *testing.T, toolUseID, content, ts string, toolUseResult any) string {
+	t.Helper()
+	line := map[string]any{
+		"type":      "user",
+		"timestamp": ts,
+		"message": map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "tool_result", "tool_use_id": toolUseID, "content": content,
+			}},
+		},
+	}
+	if toolUseResult != nil {
+		line["toolUseResult"] = toolUseResult
+	}
+	return bgMarshalLine(t, line)
+}
+
+func bgMarshalLine(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshalling a transcript line: %v", err)
+	}
+	return string(b)
+}
+
+// bgParse turns transcript lines into events the way production does.
+func bgParse(t *testing.T, lines ...string) []Event {
+	t.Helper()
+	var events []Event
+	for _, line := range lines {
+		e, ok := parseEvent(line)
+		if !ok {
+			t.Fatalf("parseEvent rejected a line it must accept: %s", line)
+		}
+		events = append(events, e)
+	}
+	return events
+}
+
+// bgShellResult is the harness record on a background shell's tool_result.
+func bgShellResult(id string) map[string]any {
+	return map[string]any{
+		"stdout": "", "stderr": "", "interrupted": false,
+		"isImage": false, "noOutputExpected": false, "backgroundTaskId": id,
 	}
 }
 
 // bgShellLaunch is one complete background-shell launch: the Bash tool_use
-// carrying run_in_background, then its acknowledgement.
-func bgShellLaunch(id, ts string) []Event {
+// carrying run_in_background, then its acknowledgement — text and harness
+// record both, exactly as a real transcript writes them.
+func bgShellLaunch(t *testing.T, id, ts string) []Event {
+	t.Helper()
 	use := "toolu_" + id
-	return []Event{
-		bgToolUseEvent(use, "Bash", ts, map[string]interface{}{
-			"command":           "sleep 300",
-			"run_in_background": true,
+	return bgParse(t,
+		bgToolUseLine(t, use, "Bash", ts, map[string]any{
+			"command": "sleep 300", "run_in_background": true,
 		}),
-		bgResultEvent(use, "Command running in background with ID: "+id+
-			". Output is being written to: /tmp/x", ts),
-	}
+		bgResultLine(t, use, "Command running in background with ID: "+id+
+			". Output is being written to: /tmp/x", ts, bgShellResult(id)),
+	)
 }
 
 func bgDoneEvent(id string) Event {
@@ -92,12 +146,26 @@ func bgFixture(t *testing.T, name string) ([]Event, time.Time) {
 	return events, parseTimestampOr(events[1].Timestamp, time.Now())
 }
 
-// --- launches: the structural gate ------------------------------------------
+// bgAssertFixtureRegisters observes a fixture and proves the launch was tracked
+// under wantID — counting something is not evidence the right id was read.
+func bgAssertFixtureRegisters(t *testing.T, fixture, wantID string) {
+	t.Helper()
+	events, now := bgFixture(t, fixture)
+	b := newBgTracker()
+	b.observe(events, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Fatalf("outstanding = %d, want 1: a real launch must register", n)
+	}
+	b.observe([]Event{bgDoneEvent(wantID)}, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: the launch should have been tracked under %q", n, wantID)
+	}
+}
 
-// A launch is registered from the identity of the tool that produced the
-// result, using payloads captured verbatim from real transcripts. Both kinds
-// go through parseEvent first, so the content arrives flattened and
-// JSON-unescaped the way the running head sees it.
+// --- launches: the harness's own record --------------------------------------
+
+// The two originally captured launches, one per kind. Both are verbatim
+// transcript lines from a claudemux session.
 func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	tests := []struct {
 		fixture string
@@ -108,26 +176,63 @@ func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
-			events, now := bgFixture(t, tt.fixture)
-			b := newBgTracker()
-			b.observe(events, now)
-			if n, _ := b.outstanding(now); n != 1 {
-				t.Fatalf("outstanding = %d, want 1: a real launch must register", n)
-			}
-			// Retiring by the expected id is what proves the id was
-			// extracted, not merely that something was counted.
-			b.observe([]Event{bgDoneEvent(tt.wantID)}, now)
-			if n, _ := b.outstanding(now); n != 0 {
-				t.Errorf("outstanding = %d, want 0: the launch should have been tracked under %q", n, tt.wantID)
+			bgAssertFixtureRegisters(t, tt.fixture, tt.wantID)
+		})
+	}
+}
+
+// The launches text detection could never see. Each of these is a real shell
+// backgrounding that carries `toolUseResult.backgroundTaskId` like any other,
+// but whose *tool_use input* has no run_in_background flag and whose *result
+// text* either uses a different wording or none the old patterns knew:
+//
+//   - auto: Claude Code backgrounded a plain Bash on its own. A sweep of this
+//     machine found 102 of 821 real shell launches in this shape.
+//   - timeout: the command overran its timeout and was moved to the background
+//     (64 of 821).
+//   - user: the human backgrounded it from the UI (2 of 821).
+//
+// PRIVACY: all three shapes exist on this machine only inside the user's
+// employer's project transcripts, so these fixtures are DERIVED from real
+// lines with content redacted — the harness's structure, wording, field names,
+// ids and key order are untouched, while commands, cwd, git branch, project
+// slugs and every session/message/request identifier were replaced with neutral
+// placeholders. See the report at
+// .superpowers/sdd/2026-08-11-background-work-state/harness-signal-report.md.
+func TestBgTrackerRegistersRecoveredLaunches(t *testing.T) {
+	tests := []struct {
+		fixture string
+		wantID  string
+	}{
+		{"launch-shell-auto.jsonl", "bhhcrhd2d"},
+		{"launch-shell-timeout.jsonl", "bgk9vrtgb"},
+		{"launch-shell-user.jsonl", "b5wz612zv"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			bgAssertFixtureRegisters(t, tt.fixture, tt.wantID)
+		})
+	}
+}
+
+// The recovered fixtures earn their keep only if they really are the shapes
+// text detection missed: no run_in_background in the input. If a future
+// recapture quietly replaced them with ordinary flagged launches they would
+// still pass above while testing nothing new.
+func TestBgRecoveredFixturesCarryNoBackgroundFlag(t *testing.T) {
+	for _, name := range []string{"launch-shell-auto.jsonl", "launch-shell-timeout.jsonl", "launch-shell-user.jsonl"} {
+		t.Run(name, func(t *testing.T) {
+			events, _ := bgFixture(t, name)
+			if _, ok := events[0].ToolUses[0].Input["run_in_background"]; ok {
+				t.Errorf("%s carries run_in_background; it is no longer an example of a launch the flag cannot reveal", name)
 			}
 		})
 	}
 }
 
-// The tool_use and its result usually arrive in different polls: the assistant
-// turn lands as soon as it is written, the result whenever the tool returns.
-// The pending map has to survive between observe calls or every real launch
-// whose result was even one poll behind would go unnoticed.
+// A tool_use is a request, not a launch: nothing is running until the harness
+// says so on the result. This also guards the batch boundary — the calling turn
+// and its result routinely land in different polls.
 func TestBgTrackerLaunchSpansPollBatches(t *testing.T) {
 	events, now := bgFixture(t, "launch-shell.jsonl")
 	b := newBgTracker()
@@ -235,128 +340,174 @@ func bgFindLine(t *testing.T, doc, rel, desc string, want func(string) bool) (st
 	return "", 0
 }
 
-// The whole class of false positive, closed at the root: a tool_result's text
-// cannot start background work, because the decision is made from the tool that
-// produced it. Every shape below is text ABOUT a launch. Under a Read — and
-// under a result whose tool_use was never recorded at all — none of them is
-// even a near miss; there is simply no launch-capable tool in the picture.
-func TestBgLaunchesInertWhenToolCannotLaunch(t *testing.T) {
-	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
-	const ts = "2026-08-11T10:00:00Z"
-	for _, shape := range bgQuotingShapes(t) {
-		t.Run("read/"+shape.name, func(t *testing.T) {
-			b := newBgTracker()
-			b.observe([]Event{
-				bgToolUseEvent("toolu_read", "Read", ts, map[string]interface{}{
-					"file_path": "/repo/docs/spec.md",
-				}),
-				bgResultEvent("toolu_read", shape.content, ts),
-			}, now)
-			if n, _ := b.outstanding(now); n != 0 {
-				t.Errorf("outstanding = %d, want 0: a Read cannot launch anything", n)
-			}
-		})
-		t.Run("unrecorded/"+shape.name, func(t *testing.T) {
-			b := newBgTracker()
-			b.observe([]Event{bgResultEvent("toolu_never_seen", shape.content, ts)}, now)
-			if n, _ := b.outstanding(now); n != 0 {
-				t.Errorf("outstanding = %d, want 0: a result with no recorded tool_use is not a launch", n)
-			}
-		})
-	}
+// bgCarrier is one way a quoted launch payload can reach the head: which tool
+// produced the result, and what the harness recorded alongside it.
+type bgCarrier struct {
+	name string
+	// events builds the turns carrying shape as a tool_result payload.
+	events func(t *testing.T, shape, ts string) []Event
 }
 
-// The proof that the gate, not the text, is doing the work: text that is inert
-// under a Read must still register under a genuine background Bash tool_use.
-// The payload here is a grep-prefixed line — a launch sentence that does NOT
-// begin at byte 0, which the previous round's absolute anchor rejected outright
-// and which a sweep found 42 of 844 real shell results share.
-func TestBgLaunchRegistersUnderRealLaunchToolUse(t *testing.T) {
+// bgCarriers is every carrier a quoted payload has been seen to arrive under.
+// The Agent carrier is the one that matters most here: an agent dispatch is the
+// only carrier the previous round could not clear structurally, so it fell back
+// to requiring an "Async agent launched" substring — and a foreground Agent
+// that merely READ this repo's own spec then reported a phantom launch.
+var bgCarriers = []bgCarrier{
+	{"read", func(t *testing.T, shape, ts string) []Event {
+		return bgParse(t,
+			bgToolUseLine(t, "toolu_read", "Read", ts, map[string]any{"file_path": "/repo/docs/spec.md"}),
+			bgResultLine(t, "toolu_read", shape, ts, nil),
+		)
+	}},
+	{"unrecorded", func(t *testing.T, shape, ts string) []Event {
+		// A result whose tool_use never reached this head at all.
+		return bgParse(t, bgResultLine(t, "toolu_never_seen", shape, ts, nil))
+	}},
+	{"foreground-bash", func(t *testing.T, shape, ts string) []Event {
+		// A grep/cat that printed the payload. The harness writes a
+		// toolUseResult here too — it simply has no backgroundTaskId.
+		return bgParse(t,
+			bgToolUseLine(t, "toolu_grep", "Bash", ts, map[string]any{
+				"command": "grep -r 'background with ID' docs/",
+			}),
+			bgResultLine(t, "toolu_grep", shape, ts, map[string]any{
+				"stdout": shape, "stderr": "", "interrupted": false,
+				"isImage": false, "noOutputExpected": false,
+			}),
+		)
+	}},
+	{"agent", func(t *testing.T, shape, ts string) []Event {
+		// A FOREGROUND agent whose final report quotes the payload — it read
+		// the spec, or reviewed this very diff. The harness records nothing
+		// async: real foreground Agent results write a plain string here.
+		return bgParse(t,
+			bgToolUseLine(t, "toolu_agent", "Agent", ts, map[string]any{
+				"subagent_type": "general-purpose", "description": "Review the diff",
+			}),
+			bgResultLine(t, "toolu_agent", shape, ts, shape),
+		)
+	}},
+}
+
+// The whole class of false positive, closed at the root: a tool_result's text
+// cannot start background work, because the decision is made from the harness's
+// own record on the result rather than from anything the result says. Every
+// shape below is text ABOUT a launch, under every carrier it can arrive on.
+func TestBgLaunchesInertUnderEveryCarrier(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	const ts = "2026-08-11T10:00:00Z"
-	var prefixed string
-	for _, shape := range bgQuotingShapes(t) {
-		if shape.name == "a grep -n style prefixed line quoting the shell example" {
-			prefixed = shape.content
+	for _, carrier := range bgCarriers {
+		for _, shape := range bgQuotingShapes(t) {
+			t.Run(carrier.name+"/"+shape.name, func(t *testing.T) {
+				b := newBgTracker()
+				b.observe(carrier.events(t, shape.content, ts), now)
+				if n, _ := b.outstanding(now); n != 0 {
+					t.Errorf("outstanding = %d, want 0: %s carried text about a launch, it did not launch anything", n, carrier.name)
+				}
+			})
 		}
 	}
-	if prefixed == "" {
-		t.Fatal("the prefixed-shell shape went missing from bgQuotingShapes")
-	}
+}
 
+// The proof that the harness's field, not the text, is what registers: a result
+// whose text quotes one id while the harness records another must track the
+// harness's. Under the old text rules this read the quoted id — the wrong one.
+func TestBgLaunchIDComesFromHarnessNotText(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	const ts = "2026-08-11T10:00:00Z"
 	b := newBgTracker()
-	b.observe([]Event{
-		bgToolUseEvent("toolu_bash", "Bash", ts, map[string]interface{}{
-			"command":           "sleep 300",
-			"run_in_background": true,
+	b.observe(bgParse(t,
+		bgToolUseLine(t, "toolu_bash", "Bash", ts, map[string]any{
+			"command": "sleep 300", "run_in_background": true,
 		}),
-		bgResultEvent("toolu_bash", prefixed, ts),
-	}, now)
+		// The text names a stale id copied out of a document; the harness
+		// names the one that is actually running.
+		bgResultLine(t, "toolu_bash", "Command running in background with ID: quotedid. Output is being written to: /tmp/x",
+			ts, bgShellResult("realtaskid")),
+	), now)
 	if n, _ := b.outstanding(now); n != 1 {
-		t.Fatalf("outstanding = %d, want 1: the same text a Read cannot launch with must launch under a background Bash", n)
+		t.Fatalf("outstanding = %d, want 1", n)
 	}
-	b.observe([]Event{bgDoneEvent("boigiwsir")}, now)
+	b.observe([]Event{bgDoneEvent("quotedid")}, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: the id quoted in the text is not what is running", n)
+	}
+	b.observe([]Event{bgDoneEvent("realtaskid")}, now)
 	if n, _ := b.outstanding(now); n != 0 {
-		t.Errorf("outstanding = %d, want 0: the id from the launch text should retire it", n)
+		t.Errorf("outstanding = %d, want 0: the harness's own id must be the one tracked", n)
 	}
 }
 
-// A Bash tool_use without run_in_background is not a launch, whatever its
-// output says — that is exactly the grep/sed/cat case that quotes the sentence.
-func TestBgForegroundBashDoesNotRegister(t *testing.T) {
+// An ordinary Bash result: the harness wrote a toolUseResult, it simply records
+// no background task. This is the overwhelmingly common case and it must stay
+// silent.
+func TestBgOrdinaryBashResultDoesNotRegister(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	const ts = "2026-08-11T10:00:00Z"
 	b := newBgTracker()
-	b.observe([]Event{
-		bgToolUseEvent("toolu_grep", "Bash", ts, map[string]interface{}{
-			"command": "grep -r 'background with ID' docs/",
-		}),
-		bgResultEvent("toolu_grep", "Command running in background with ID: boigiwsir. Output is being written to: /tmp/x", ts),
-	}, now)
+	b.observe(bgParse(t,
+		bgToolUseLine(t, "toolu_bash", "Bash", ts, map[string]any{"command": "ls -la"}),
+		bgResultLine(t, "toolu_bash", "total 0\ndrwxr-xr-x  2 michael  staff  64 Aug 11 10:00 .", ts,
+			map[string]any{
+				"stdout": "total 0", "stderr": "", "interrupted": false,
+				"isImage": false, "noOutputExpected": false,
+			}),
+	), now)
 	if n, _ := b.outstanding(now); n != 0 {
-		t.Errorf("outstanding = %d, want 0: a foreground Bash quoting the sentence launched nothing", n)
+		t.Errorf("outstanding = %d, want 0: an ordinary shell result launched nothing", n)
 	}
 }
 
-// The agent tool dispatches foreground agents too, and their result is the
-// agent's final report rather than a launch acknowledgement. Tool identity says
-// "agent dispatch"; the sentence is what says "and it was an async one".
-func TestBgForegroundAgentDoesNotRegister(t *testing.T) {
+// toolUseResult is not always an object — plenty of tools write a bare string
+// there, and some write an array. A shape the launch decode cannot read must
+// leave the event otherwise intact rather than fail parseEvent or drop the
+// event: the same line still carries the timestamp and tool_result the rest of
+// the head classifies from.
+func TestBgNonObjectToolUseResultIsHarmless(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	const ts = "2026-08-11T10:00:00Z"
-	b := newBgTracker()
-	b.observe([]Event{
-		bgToolUseEvent("toolu_agent", "Agent", ts, map[string]interface{}{
-			"subagent_type": "general-purpose",
-			"description":   "Review the diff",
-		}),
-		bgResultEvent("toolu_agent", "STATUS: DONE\nReviewed the diff; no findings. agentId: notalaunch", ts),
-	}, now)
-	if n, _ := b.outstanding(now); n != 0 {
-		t.Errorf("outstanding = %d, want 0: a foreground agent's report is not a launch", n)
+	shapes := []struct {
+		name  string
+		value any
+	}{
+		{"a plain string", "Error: this command is too complex to verify"},
+		{"an array of content blocks", []any{map[string]any{"type": "text", "text": "hi"}}},
+		{"a number", 42},
+		{"null", nil}, // written explicitly below, not omitted
+		{"an object whose id field has the wrong type", map[string]any{"backgroundTaskId": 123}},
+		{"an object whose isAsync has the wrong type", map[string]any{"isAsync": "yes", "agentId": "a1"}},
+		{"an object with an empty id", map[string]any{"backgroundTaskId": ""}},
 	}
-}
-
-// A tool_use whose result never arrives — the session was killed mid-tool, or
-// the head rotated — must not sit in the pending map forever. It expires on the
-// same sweep that expires outstanding tasks, and a late result then finds
-// nothing to resolve.
-func TestBgTrackerPendingToolUseExpires(t *testing.T) {
-	launched := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
-	const ts = "2026-08-11T10:00:00Z"
-	b := newBgTracker()
-	b.observe([]Event{bgToolUseEvent("toolu_bash", "Bash", ts, map[string]interface{}{
-		"command":           "sleep 300",
-		"run_in_background": true,
-	})}, launched)
-
-	late := launched.Add(bgMaxAge + time.Minute)
-	if n, _ := b.outstanding(late); n != 0 {
-		t.Fatalf("outstanding = %d, want 0", n)
-	}
-	b.observe([]Event{bgResultEvent("toolu_bash", "Command running in background with ID: aaa", late.Format(time.RFC3339))}, late)
-	if n, _ := b.outstanding(late); n != 0 {
-		t.Errorf("outstanding = %d, want 0: a pending tool_use past the cap must have been dropped", n)
+	for _, s := range shapes {
+		t.Run(s.name, func(t *testing.T) {
+			line := bgMarshalLine(t, map[string]any{
+				"type":      "user",
+				"timestamp": ts,
+				"message": map[string]any{
+					"role": "user",
+					"content": []any{map[string]any{
+						"type": "tool_result", "tool_use_id": "toolu_x", "content": "some output",
+					}},
+				},
+				"toolUseResult": s.value,
+			})
+			e, ok := parseEvent(line)
+			if !ok {
+				t.Fatalf("parseEvent dropped the event; a toolUseResult it cannot read must not cost the line")
+			}
+			if e.Timestamp != ts {
+				t.Errorf("Timestamp = %q, want %q: the rest of the event must survive", e.Timestamp, ts)
+			}
+			if len(e.ToolResults) != 1 || e.ToolResults[0].Content != "some output" {
+				t.Errorf("ToolResults = %+v, want the tool_result intact", e.ToolResults)
+			}
+			b := newBgTracker()
+			b.observe([]Event{e}, now)
+			if n, _ := b.outstanding(now); n != 0 {
+				t.Errorf("outstanding = %d, want 0: an unreadable toolUseResult is not a launch", n)
+			}
+		})
 	}
 }
 
@@ -398,7 +549,7 @@ func TestBgCompletions(t *testing.T) {
 func TestBgTrackerPairsLaunchAndCompletion(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
-	b.observe(bgShellLaunch("aaa", "2026-08-11T10:00:00Z"), now)
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
 	if n, _ := b.outstanding(now); n != 1 {
 		t.Fatalf("outstanding = %d, want 1 after a launch", n)
 	}
@@ -412,8 +563,8 @@ func TestBgTrackerCountsAndOldest(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
 	b := newBgTracker()
 	b.observe(append(
-		bgShellLaunch("aaa", "2026-08-11T10:00:00Z"),
-		bgShellLaunch("bbb", "2026-08-11T10:05:00Z")...,
+		bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"),
+		bgShellLaunch(t, "bbb", "2026-08-11T10:05:00Z")...,
 	), now)
 	n, oldest := b.outstanding(now)
 	if n != 2 {
@@ -433,7 +584,7 @@ func TestBgTrackerCountsAndOldest(t *testing.T) {
 // would make the conductor refuse to ever visit it.
 func TestBgTrackerExpiresStaleLaunches(t *testing.T) {
 	b := newBgTracker()
-	b.observe(bgShellLaunch("aaa", "2026-08-11T10:00:00Z"), time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
 	late := time.Date(2026, 8, 11, 10, 31, 0, 0, time.UTC)
 	if n, _ := b.outstanding(late); n != 0 {
 		t.Errorf("outstanding = %d, want 0: a launch past the cap stops counting", n)
@@ -444,7 +595,7 @@ func TestBgTrackerExpiresStaleLaunches(t *testing.T) {
 func TestBgTrackerClearedByGenuinePrompt(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
-	b.observe(bgShellLaunch("aaa", "2026-08-11T10:00:00Z"), now)
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
 	b.observe([]Event{{Type: "user", UserText: "what's up?"}}, now)
 	if n, _ := b.outstanding(now); n != 0 {
 		t.Errorf("outstanding = %d, want 0 after a real prompt", n)
@@ -457,8 +608,8 @@ func TestBgTrackerNotificationTurnIsNotAPrompt(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
 	b.observe(append(
-		bgShellLaunch("aaa", "2026-08-11T10:00:00Z"),
-		bgShellLaunch("bbb", "2026-08-11T10:00:00Z")...,
+		bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"),
+		bgShellLaunch(t, "bbb", "2026-08-11T10:00:00Z")...,
 	), now)
 	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>"}}, now)
 	if n, _ := b.outstanding(now); n != 1 {
@@ -473,7 +624,7 @@ func TestBgTrackerNotificationTurnIsNotAPrompt(t *testing.T) {
 func TestBgTrackerIdempotentAcrossCompletionForms(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
-	b.observe(bgShellLaunch("aaa", "2026-08-11T10:00:00Z"), now)
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
 	b.observe([]Event{bgDoneEvent("aaa")}, now)                                                                                  // queue-operation form
 	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>"}}, now) // delivered form, same id
 	if n, _ := b.outstanding(now); n != 0 {
@@ -498,8 +649,8 @@ func TestBgTrackerCompletionForUnknownIDIsHarmless(t *testing.T) {
 func TestBgTrackerSameIDLaunchedTwice(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
-	b.observe(bgShellLaunch("aaa", "2026-08-11T10:00:00Z"), now)
-	b.observe(bgShellLaunch("aaa", "2026-08-11T10:05:00Z"), now)
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:05:00Z"), now)
 	if n, _ := b.outstanding(now); n != 1 {
 		t.Errorf("outstanding = %d, want 1: relaunching the same id must not double-count", n)
 	}

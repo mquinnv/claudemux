@@ -86,37 +86,42 @@ the pairing exact.
 
 ## Detection rules
 
-**Launch** — decided by the **tool that produced the `tool_result`**, never by the
-result's text. A `tool_result` carries `tool_use_id`; the `tool_use` it names carries
-`name` and `input`. Text inside a tool_result cannot fabricate a matching `tool_use`
-block, so this is structural in the same way completion recognition is.
+**Launch** — read from the harness's own record, never from the result's text and never
+from the tool that produced it. The transcript entry carrying a `tool_result` also carries
+a top-level **`toolUseResult`** — a sibling of `message`, read exactly like the
+`queue-operation` `content` field:
 
-| Launch kind | Gate (structural) | Then extract the id from the result text |
+| Launch kind | Signal | The id |
 |---|---|---|
-| background shell | the `tool_use` is `Bash` with `input.run_in_background == true` | `running in background with ID: ([A-Za-z0-9]+)` |
-| async agent | the `tool_use` is `Agent` **and** the result contains `Async agent launched` | `agentId: ([A-Za-z0-9]+)` |
+| background shell | `toolUseResult.backgroundTaskId` is a non-empty string | that string |
+| async agent | `toolUseResult.isAsync == true` | `toolUseResult.agentId` |
 
-`Agent` is the tool's verified name: of every transcript under `~/.claude/projects` on
-this machine, all 1648 results carrying the async-launch sentence came from a `tool_use`
-named exactly `Agent`, out of 1696 dispatches. The agent case still needs its text check
-for a real reason — the **same tool** dispatches foreground agents, whose result is the
-agent's final report rather than a launch acknowledgement, and no input flag distinguishes
-them. Tool identity says "this is an agent dispatch"; the sentence says "and it was an
-async one". That is a semantic distinction the structure genuinely does not carry.
+Verified across all 1915 transcripts under `~/.claude/projects` on this machine:
 
-The id patterns are unanchored on purpose. With the gate guarding, anchors buy nothing and
-cost real launches: a sweep of this machine's transcripts found 40 of 803 genuine shell
-launch payloads that do not begin at byte 0.
+- `backgroundTaskId` — string, present and non-empty on **821** entries, **all** of them
+  genuine shell backgroundings, **all** produced by a `Bash` tool_use, zero false
+  positives (including the foreground greps whose output quotes the launch sentence).
+- `isAsync` — bool, present on **1596** entries and true on every one of them; each pairs
+  with a non-empty string `agentId`. All 1596 came from an `Agent` tool_use, zero false
+  positives. A **foreground** agent writes no `isAsync` at all — its `toolUseResult` is a
+  plain string — so `isAsync` is what separates the two dispatches the same tool makes.
+- Every notified `<task-id>` matches either a `backgroundTaskId` or an `agentId`, so the
+  launch id and the completion id are the same string.
 
-Correlation lives in `bgTracker.pending`, a `toolUseID → kind` map holding **only**
-launch-capable tool_uses — recording every tool_use would grow without bound for no gain.
-It must persist across `observe` calls, because the assistant turn calling the tool and
-the user turn carrying its result routinely land in different polls. Each entry is stamped
-with its event's timestamp and expires after `bgMaxAge` in the same sweep that expires
-outstanding tasks, so a session killed mid-tool cannot leak entries. A result whose
-`tool_use_id` is absent from the map is ignored entirely, whatever its text says.
+This is structural in a way no text rule can be: a command's stdout lands *inside*
+`toolUseResult.stdout` and cannot add a key beside it, so no output — no matter what it
+quotes — can forge a launch.
 
-### Why not text-only detection
+**`toolUseResult` is frequently not an object.** 4035 entries write a bare string there
+and 2728 an array. Decode it as `json.RawMessage` and attempt the object decode, ignoring
+failure: a non-object leaves the event unchanged and must never fail `parseEvent` or drop
+the entry, which still carries the timestamp and `tool_result` the rest of the head reads.
+
+No correlation state is needed. There is no pending-tool_use map, no launch-capable tool
+list and no id regexes: the entry that announces the launch is the entry that carries the
+id, so `bgLaunches` is a plain function of one event.
+
+### Why not text detection
 
 It was tried twice and cannot work. No pattern distinguishes *a launch happened* from
 *text about a launch*: a session that reads or greps a document quoting a launch payload
@@ -127,14 +132,32 @@ prefix, so the spec's own quoted example landed at byte 0. Each round narrowed t
 patterns and each was defeated by a different quoting shape — the shapes are unbounded,
 so the class cannot be closed from the text side. Do not reintroduce it.
 
-The gate errs toward missing launches, and that is the correct side. A false negative
-degrades to the pre-branch bug this feature fixes. A false positive publishes `Background`
-for a genuinely idle session, hiding it from the conductor for up to `bgMaxAge`,
-undetectably — strictly worse than not having the feature. The one known false negative
-this buys is a Bash command Claude Code *auto*-backgrounds after it exceeds its timeout:
-that carries no `run_in_background` flag (40 of 803 observed launches), and it is
-indistinguishable, structurally, from the foreground `grep` whose output quotes the same
-sentence.
+Gating on the identity of the tool that produced the result closed that class for shells,
+but not for agents: the same `Agent` tool dispatches foreground and async agents, so it
+still needed an `Async agent launched` substring — and a foreground agent that merely read
+this repo's own spec reported a phantom launch. Tool identity also **missed** roughly 100
+real launches, because it keyed on `input.run_in_background`: of the 821 observed shell
+launches, **102** carry no such flag. Claude Code backgrounds a Bash on its own, in three
+wordings, and the harness field is written for all of them:
+
+| Wording | Count |
+|---|---|
+| `Command running in background with ID: …` | 755 |
+| `Command did not complete within its Ns timeout and was moved to the background (ID: …)` | 64 |
+| `Command was manually backgrounded by user with ID: …` | 2 |
+
+An earlier version of this spec claimed the auto-backgrounded Bash was structurally
+indistinguishable from a foreground `grep` quoting the same sentence. **That was false**,
+and it is the sentence that would send the next reader back down the text path: the two
+differ by `toolUseResult.backgroundTaskId`, which the harness writes for one and not the
+other regardless of how the backgrounding was triggered.
+
+**The remaining limitation** is that this depends on Claude Code continuing to write these
+fields. If it stops, no launch is ever detected and every session reports `Idle` at the
+end of its turn — the pre-branch bug, and the safe direction to fail. A false negative
+costs the feature; a false positive would publish `Background` for a genuinely idle
+session and hide it from the conductor for up to `bgMaxAge`, undetectably, which is
+strictly worse than not having the feature at all.
 
 **Completion** — a `<task-id>` extracted from a notification, recognized **structurally**:
 a `queue-operation` whose top-level content, or a `user` turn whose text, *starts with*
