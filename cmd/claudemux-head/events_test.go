@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -193,5 +194,56 @@ func TestUpgradeFirstPrompt(t *testing.T) {
 				t.Errorf("FirstPrompt() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A background shell's launch result is a bare string; an async agent's is an
+// array of text blocks. Both carry the id the tracker pairs on, so both shapes
+// must survive parsing.
+func TestParseEventToolResultContent(t *testing.T) {
+	line := `{"type":"user","timestamp":"2026-08-11T10:00:00Z","message":{"content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"Command running in background with ID: boigiwsir. Output is being written to: /tmp/x"}` +
+		`]}}`
+	ev, ok := parseEvent(line)
+	if !ok || len(ev.ToolResults) != 1 {
+		t.Fatalf("parse failed: ok=%v results=%d", ok, len(ev.ToolResults))
+	}
+	if !strings.Contains(ev.ToolResults[0].Content, "boigiwsir") {
+		t.Errorf("Content = %q, want the string payload", ev.ToolResults[0].Content)
+	}
+}
+
+func TestParseEventToolResultBlockContent(t *testing.T) {
+	line := `{"type":"user","timestamp":"2026-08-11T10:00:00Z","message":{"content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: afbbf7a8f9ee52e81 (internal ID)"}]}` +
+		`]}}`
+	ev, ok := parseEvent(line)
+	if !ok || len(ev.ToolResults) != 1 {
+		t.Fatalf("parse failed: ok=%v results=%d", ok, len(ev.ToolResults))
+	}
+	if !strings.Contains(ev.ToolResults[0].Content, "afbbf7a8f9ee52e81") {
+		t.Errorf("Content = %q, want the flattened block text", ev.ToolResults[0].Content)
+	}
+}
+
+// A finished background task's notification lands FIRST as a queue-operation
+// carrying its payload at the top level, not under message.content.
+func TestParseEventQueueText(t *testing.T) {
+	line := `{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-11T10:00:00Z",` +
+		`"content":"<task-notification>\n<task-id>boigiwsir</task-id>\n<status>completed</status>\n</task-notification>"}`
+	ev, ok := parseEvent(line)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if !strings.HasPrefix(ev.QueueText, "<task-notification>") {
+		t.Errorf("QueueText = %q, want the top-level notification payload", ev.QueueText)
+	}
+}
+
+// Ordinary events must not grow a QueueText.
+func TestParseEventNoQueueTextForOtherTypes(t *testing.T) {
+	ev, _ := parseEvent(`{"type":"user","timestamp":"2026-08-11T10:00:00Z","message":{"content":"hello"}}`)
+	if ev.QueueText != "" {
+		t.Errorf("QueueText = %q, want empty for a user event", ev.QueueText)
 	}
 }

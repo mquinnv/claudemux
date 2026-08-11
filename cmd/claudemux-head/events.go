@@ -39,6 +39,33 @@ func cleanCommandText(s string) string {
 	return name
 }
 
+// flattenText renders a content field that may be a bare string or an array of
+// blocks into one string. Both shapes occur on tool_result: a background shell
+// launch returns a string, an async agent launch returns a text block array.
+func flattenText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 type Usage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
@@ -68,7 +95,12 @@ type Event struct {
 	ToolResults []ToolResult
 	Usage       *Usage
 	Cwd         string // transcript's per-entry cwd; tracks worktree moves
-	IsSidechain bool   // true for subagent (Task) entries — excluded from the worktree chip
+	// QueueText is the top-level `content` of a queue-operation event, which
+	// is where a finished background task's notification arrives first — the
+	// delivered user turn only follows when the session next runs. Empty for
+	// every other event type.
+	QueueText   string
+	IsSidechain bool // true for subagent (Task) entries — excluded from the worktree chip
 	RawLine     string
 }
 
@@ -228,6 +260,7 @@ func parseEvent(line string) (Event, bool) {
 		Cwd         string          `json:"cwd"`
 		IsSidechain bool            `json:"isSidechain"`
 		Message     json.RawMessage `json:"message"`
+		Content     json.RawMessage `json:"content"`    // top level; queue-operation only
 		LastPrompt  string          `json:"lastPrompt"` // present on type=last-prompt events
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
@@ -238,6 +271,10 @@ func parseEvent(line string) (Event, bool) {
 
 	if raw.Type == "last-prompt" && raw.LastPrompt != "" {
 		ev.UserText = cleanCommandText(raw.LastPrompt)
+	}
+
+	if raw.Type == "queue-operation" {
+		ev.QueueText = flattenText(raw.Content)
 	}
 
 	if len(raw.Message) > 0 {
@@ -292,6 +329,14 @@ func extractContent(ev *Event, content json.RawMessage) {
 		case "tool_result":
 			var tr ToolResult
 			if err := json.Unmarshal(raw, &tr); err == nil {
+				// Content is tagged `json:"-"` because the payload is not
+				// always a string — flatten whichever shape arrived.
+				var body struct {
+					Content json.RawMessage `json:"content"`
+				}
+				if json.Unmarshal(raw, &body) == nil {
+					tr.Content = flattenText(body.Content)
+				}
 				ev.ToolResults = append(ev.ToolResults, tr)
 			}
 		}
