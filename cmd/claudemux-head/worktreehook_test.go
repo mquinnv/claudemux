@@ -28,7 +28,11 @@ func runWorktreeHook(t *testing.T, payload string, env ...string) string {
 	t.Helper()
 	cmd := exec.Command("bash", worktreeHookPath(t))
 	cmd.Stdin = strings.NewReader(payload)
-	cmd.Env = env
+	// append to an empty slice, not `cmd.Env = env`: a variadic call with no
+	// entries passes a NIL slice, and os/exec reads nil as "inherit the
+	// parent's environment" — which handed the no-marker case the marker from
+	// a claudemux-launched shell and failed the test it was meant to isolate.
+	cmd.Env = append([]string{}, env...)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("hook exited non-zero: %v (stdout %q)", err, out)

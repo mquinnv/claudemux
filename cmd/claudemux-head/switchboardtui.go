@@ -19,6 +19,50 @@ import (
 
 const swPollInterval = time.Second
 
+// Lobby row column widths. Every row lays line 1 out on this fixed grid so the
+// context meters — and the topics after them — stack in a column instead of
+// drifting with each session's name, state string, and age. Fields wider than
+// their column are truncated rather than allowed to push the grid.
+const (
+	swNameColW  = 24
+	swStateColW = 14 // "Tool:AskUserQuestion" and friends get clipped here
+	swAgeColW   = 6  // widest formatDuration output in practice ("23h59m")
+	swCtxBarW   = 5
+	swCtxColW   = swCtxBarW + 5 // bar + " 100%"
+)
+
+// swPad right-pads s to w display cells, measuring with lipgloss so ANSI
+// styling and wide runes are counted correctly. Content wider than w is
+// returned unchanged — callers truncate first when the column must hold.
+func swPad(s string, w int) string {
+	if n := w - lipgloss.Width(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+// swCell renders text as a fixed-width column cell: truncated to w, styled,
+// then padded to w. The padding is applied outside the style so a cell's
+// color (or a reverse highlight) stops at the text rather than smearing
+// across the gap to the next column. An empty text yields a blank cell of the
+// same width, keeping the columns to its right aligned.
+func swCell(text string, w int, st lipgloss.Style, right bool) string {
+	if text == "" {
+		return strings.Repeat(" ", w)
+	}
+	text = truncateRunes(text, w)
+	pad := ""
+	// Guard the width, not the rune count: a cell of wide (CJK) runes is
+	// clipped to w runes above but can still measure past w cells.
+	if n := w - lipgloss.Width(text); n > 0 {
+		pad = strings.Repeat(" ", n)
+	}
+	if right {
+		return pad + st.Render(text)
+	}
+	return st.Render(text) + pad
+}
+
 type swTickMsg time.Time
 
 type swSnapshotMsg struct {
@@ -181,24 +225,34 @@ func (m swModel) View() string {
 		}
 		age := ""
 		if !sess.Since.IsZero() {
-			age = " " + swUnknownStyle.Render(formatDuration(now.Sub(sess.Since)))
+			age = formatDuration(now.Sub(sess.Since))
 		}
-		// Unset context (-1, pre-publish head or unparseable) renders nothing
-		// rather than a misleading "-1%".
+		// Unset context (-1, pre-publish head or unparseable) renders a blank
+		// cell rather than a misleading "-1%" — and a blank of the same width,
+		// so one contextless session doesn't shift the rows under it.
 		ctx := ""
 		if sess.Context >= 0 {
 			pct := float64(sess.Context)
-			ctx = "  " + renderBar(5, pct, thresholdColor(pct)) + fmt.Sprintf(" %d%%", sess.Context)
+			ctx = renderBar(swCtxBarW, pct, thresholdColor(pct)) + fmt.Sprintf(" %3d%%", sess.Context)
 		}
 		topic := ""
 		if sess.Topic != "" {
 			topic = "  " + swUnknownStyle.Render(sess.Topic)
 		}
-		name := fmt.Sprintf("%-24s", sess.Name)
+		// The name cell is padded before styling so the selection highlight
+		// covers the whole column, not just the name's own runes.
+		name := swPad(truncateRunes(sess.Name, swNameColW), swNameColW)
 		if i == m.sel {
 			name = swSelStyle.Render(name)
 		}
-		fmt.Fprintf(&b, " %s%s %s%s%s%s\n", marker, name, style.Render(state), age, ctx, topic)
+		line := fmt.Sprintf(" %s%s %s%s  %s%s", marker, name,
+			swCell(state, swStateColW, style, false),
+			swCell(age, swAgeColW, swUnknownStyle, true),
+			swPad(ctx, swCtxColW), topic)
+		if m.width > 0 {
+			line = clipLine(line, m.width)
+		}
+		b.WriteString(line + "\n")
 
 		// Line 2: summary falls back to prompt, both falls back to
 		// "summary · prompt"; omitted entirely when both are empty.

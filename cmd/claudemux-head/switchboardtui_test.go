@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func swTestModel() swModel {
@@ -116,6 +118,63 @@ func TestSwModelViewOmitsUnsetContext(t *testing.T) {
 	m := swTestModel()
 	if view := m.View(); strings.Contains(view, "-1%") {
 		t.Errorf("unset context must be omitted, not rendered:\n%s", view)
+	}
+}
+
+// Every line-1 field sits in a fixed-width column, so the context meters (and
+// the topics after them) stack instead of drifting with each row's name,
+// state, and age. Asserting on the topic's start column catches drift
+// anywhere to its left; asserting the meter cell's own span catches a bar or
+// a percentage that grew past its column.
+func TestSwModelViewAlignsColumns(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 100, 24
+	m.snap = swSnapshot{Sessions: []swSession{
+		{Name: "api", State: "Idle", Since: now.Add(-2 * time.Minute), Context: 7, Topic: "one-digit ctx"},
+		{Name: "a-very-long-session-name-that-overflows", State: "Tool:AskUserQuestion",
+			Since: now.Add(-3 * time.Hour), Context: 100, Topic: "long name, long state"},
+		{Name: "web", State: "Thinking", Since: now, Context: -1, Topic: "no context yet"},
+		{Name: "scratch", Context: -1, Topic: "no state, no age"},
+	}}
+
+	const (
+		ctxCol   = 1 + 2 + swNameColW + 1 + swStateColW + swAgeColW + 2
+		topicCol = ctxCol + swCtxColW + 2
+	)
+	view := m.View()
+	for _, sess := range m.snap.Sessions {
+		line := ""
+		for _, l := range strings.Split(view, "\n") {
+			if strings.Contains(ansi.Strip(l), sess.Topic) {
+				line = ansi.Strip(l)
+			}
+		}
+		if line == "" {
+			t.Fatalf("no row rendered for %q:\n%s", sess.Name, view)
+		}
+		r := []rune(line)
+		if got := string(r[topicCol:]); got != sess.Topic {
+			t.Errorf("%s: topic starts at the wrong column; from %d got %q, want %q\n%s",
+				sess.Name, topicCol, got, sess.Topic, view)
+		}
+		wantCtx := strings.Repeat(" ", swCtxColW)
+		if sess.Context >= 0 {
+			wantCtx = fmt.Sprintf("%d%%", sess.Context)
+		}
+		if got := string(r[ctxCol : ctxCol+swCtxColW]); !strings.HasSuffix(got, wantCtx) {
+			t.Errorf("%s: context cell = %q, want it to end in %q\n%s", sess.Name, got, wantCtx, view)
+		}
+	}
+}
+
+// A name wider than its column is clipped rather than allowed to push every
+// column to its right — the one case where alignment costs information.
+func TestSwModelViewClipsLongName(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions[0].Name = strings.Repeat("x", swNameColW+10)
+	if view := ansi.Strip(m.View()); strings.Contains(view, strings.Repeat("x", swNameColW+1)) {
+		t.Errorf("over-long name must be truncated to %d cells:\n%s", swNameColW, view)
 	}
 }
 
