@@ -3203,3 +3203,35 @@ func TestSwitchSessionResetsBackgroundWork(t *testing.T) {
 		t.Errorf("outstanding = %d, want 0: a rotated session starts clean", n)
 	}
 }
+
+// The trigger wiring, not just the predicate: TestModelBackgroundStateFromPoll
+// calls bg.observe and recomputeFromEvents directly, so it would still pass if
+// the dataMsg case fed observe the wrong slice or the observe call moved after
+// the ring trim. This drives the real entry point instead.
+func TestUpdateDataMsgFeedsBackgroundTracker(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
+	m := model{bg: newBgTracker()}
+
+	got, _ := m.Update(dataMsg{
+		time: now,
+		newEvents: []Event{
+			bgLaunchEvent("aaa", "2026-08-11T10:00:00Z"),
+			{Type: "assistant", Timestamp: "2026-08-11T10:01:00Z", UserText: "Kicked that off in the background."},
+		},
+		rateLimitErr: errors.New("no rate limits in this test"),
+	})
+	next := got.(model)
+	if next.state.Kind != StateBackground || next.state.BgCount != 1 {
+		t.Fatalf("state = %v count=%d, want StateBackground count=1", next.state.Kind, next.state.BgCount)
+	}
+
+	got, _ = next.Update(dataMsg{
+		time:         now,
+		newEvents:    []Event{bgDoneEvent("aaa")},
+		rateLimitErr: errors.New("no rate limits in this test"),
+	})
+	next = got.(model)
+	if next.state.Kind != StateIdle {
+		t.Errorf("state = %v, want StateIdle once the task finished", next.state.Kind)
+	}
+}
