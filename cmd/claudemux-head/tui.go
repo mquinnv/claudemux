@@ -166,8 +166,12 @@ type model struct {
 	lastTopic string
 
 	// Persistent state
-	reader         *EventReader
-	allEvents      []Event     // bounded ring (cap 1000)
+	reader    *EventReader
+	allEvents []Event // bounded ring (cap 1000)
+	// bg holds background tasks this session launched and has not seen finish.
+	// Accumulated from new events as they arrive — see bgTracker for why it
+	// cannot be recomputed from allEvents.
+	bg             bgTracker
 	rateLimitsPath string      // ~/.claude/abtop-rate-limits.json or override
 	pctSamples     []pctSample // 5h-window snapshots over time, for burn-rate
 
@@ -332,6 +336,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		publishedContext: -1,
 		reader:           r,
 		allEvents:        seeded,
+		bg:               newBgTracker(),
 		rateLimitsPath:   defaultRateLimitsPath(),
 		firstPrompt:      r.FirstPrompt(),
 		// Init always issues the first poll itself (see Init below), so the
@@ -371,7 +376,8 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 }
 
 func (m *model) recomputeFromEvents(now time.Time) {
-	m.state = classifyState(m.allEvents, 0, time.Time{}, now)
+	bgCount, bgOldest := m.bg.outstanding(now)
+	m.state = classifyState(m.allEvents, bgCount, bgOldest, now)
 	for i := len(m.allEvents) - 1; i >= 0; i-- {
 		// Skip placeholder models like "<synthetic>" (error/bookkeeping
 		// events) — show the last real API model instead.
@@ -463,6 +469,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// here, which is exactly the same no-floor-at-all failure this comment
 	// warns against.
 	m.summary = Summary{}
+	m.bg = newBgTracker()
 	m.worktreeTab = ""
 	m.sawNonWorktreeCwd = false
 	m.tabHaikuWins = false
@@ -892,6 +899,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if len(msg.newEvents) > 0 {
+			m.bg.observe(msg.newEvents, msg.time)
 			m.allEvents = append(m.allEvents, msg.newEvents...)
 			if len(m.allEvents) > 1000 {
 				m.allEvents = m.allEvents[len(m.allEvents)-1000:]

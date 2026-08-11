@@ -3164,3 +3164,42 @@ func TestWorktreeTabNotAdoptedForPreExistingWorktreeThroughNewModel(t *testing.T
 		t.Errorf("worktreeTab = %q, want empty: a worktree observed on the very first recompute must not be adopted as a transition", m.worktreeTab)
 	}
 }
+
+// End to end through the model: a launch arriving on a poll, with the turn
+// already ended, must publish Background rather than Idle.
+func TestModelBackgroundStateFromPoll(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 10, 0, 0, time.UTC)
+	m := model{bg: newBgTracker()}
+	events := []Event{
+		bgLaunchEvent("aaa", "2026-08-11T10:00:00Z"),
+		{Type: "assistant", Timestamp: "2026-08-11T10:01:00Z", UserText: "Kicked that off in the background."},
+	}
+	m.bg.observe(events, now)
+	m.allEvents = events
+	m.recomputeFromEvents(now)
+	if m.state.Kind != StateBackground || m.state.BgCount != 1 {
+		t.Errorf("state = %v count=%d, want StateBackground count=1", m.state.Kind, m.state.BgCount)
+	}
+
+	m.bg.observe([]Event{bgDoneEvent("aaa")}, now)
+	m.recomputeFromEvents(now)
+	if m.state.Kind != StateIdle {
+		t.Errorf("state = %v, want StateIdle once the task finished", m.state.Kind)
+	}
+}
+
+// A rotated session must not inherit the previous session's outstanding work.
+func TestSwitchSessionResetsBackgroundWork(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "new.jsonl")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := model{bg: newBgTracker()}
+	m.bg.observe([]Event{bgLaunchEvent("aaa", "2026-08-11T10:00:00Z")}, now)
+	m.switchSession(path, now)
+	if n, _ := m.bg.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: a rotated session starts clean", n)
+	}
+}
