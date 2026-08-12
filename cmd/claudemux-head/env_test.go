@@ -199,29 +199,56 @@ func TestEnvFileValueRetriesTransientlyEmptyFIFO(t *testing.T) {
 	}
 	t.Setenv("CLAUDEMUX_ENV", path)
 
-	// Raise the per-attempt bound for the duration of this test. The scenario
-	// needs the reader's FIRST attempt to complete with EOF, because a timeout
-	// means "no writer ever showed up" and envFileValue then breaks WITHOUT
-	// retrying — which is correct in production and fatal to this test. At the
-	// production 2s bound that made this flaky at roughly 1 run in 10 (reproduce
-	// with `go test ./cmd/claudemux-head/ -count=10`): under load the writer
-	// goroutine below is not always scheduled to its first open inside 2s, the
-	// first attempt times out, and the assertion sees "".
-	//
-	// This does not weaken what is under test. The retry path still has to work
-	// for the test to pass — a longer bound only stops the setup from racing.
+	// Raise the per-attempt bound for the duration of this test, purely as
+	// slack for the first attempt's writer goroutine below to get scheduled
+	// to its initial open under load — the production 2s bound occasionally
+	// wasn't enough for that alone. This does not paper over either race this
+	// test used to have (see the two comments below): both are now closed by
+	// construction, not by winning against a longer clock.
 	defer func(orig time.Duration) { envFileTimeout = orig }(envFileTimeout)
 	envFileTimeout = 30 * time.Second
 
-	// First open is served an empty pipe (the "lost the race" case); the second is
-	// served the real content.
+	// Race #1: opening-then-closing a writer and immediately opening a second
+	// one used to race envFileValue's own retry timing. readEnvFileValue
+	// signals an attempt's outcome (via its result channel) before its
+	// (formerly deferred) f.Close() necessarily ran, so a second writer
+	// opened right after the first one closed could pair with that
+	// still-registered first reader instead of blocking for the retry's
+	// fresh one — silently orphaning the write, after which the retry's
+	// reader had no writer left to pair with and blocked until envFileTimeout.
+	//
+	// envFileReadAttemptDone (env.go) closes this gap: it fires only once an
+	// attempt's fd is actually closed (readEnvFileValue now closes it before
+	// signaling, specifically to make this hook meaningful), so waiting on it
+	// before opening the second writer guarantees zero readers are registered
+	// at that point — the second writer's open() then has no choice but to
+	// block for the retry's reader, which is the pairing this test requires.
+	readerFDClosed := make(chan struct{}, 1)
+	origHook := envFileReadAttemptDone
+	envFileReadAttemptDone = func() { readerFDClosed <- struct{}{} }
+	defer func() { envFileReadAttemptDone = origHook }()
+
+	// Race #2 (found via a -count=300 in-process repro after fixing #1 alone
+	// still left a ~1-in-40 flake): when the first writer opened and closed
+	// with ZERO bytes ever written, the reader's blocked read occasionally
+	// never observed EOF and hung for the full envFileTimeout — a missed
+	// read-ready/hangup notification for a FIFO whose writer closes within
+	// microseconds of the open rendezvous, reproducible independent of any
+	// Go-level goroutine scheduling. Writing a real (non-matching) line
+	// before closing avoids that zero-byte-transfer edge case entirely,
+	// while still exercising the same "attempt finds no key" scenario
+	// envFileValue must retry.
 	go func() {
-		if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
-			f.Close() // empty: reader gets EOF, finds no key
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err == nil {
+			f.WriteString("OTHER_KEY=noise\n")
+			f.Close() // no matching key: reader scans to EOF, finds nothing
 		}
-		if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
-			f.WriteString("ANTHROPIC_API_KEY=sk-retried\n")
-			f.Close()
+		<-readerFDClosed
+		f2, err2 := os.OpenFile(path, os.O_WRONLY, 0)
+		if err2 == nil {
+			f2.WriteString("ANTHROPIC_API_KEY=sk-retried\n")
+			f2.Close()
 		}
 	}()
 
