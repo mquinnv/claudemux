@@ -123,8 +123,12 @@ func TestComputePreviewLayout(t *testing.T) {
 		{"a small lobby hits the floor", 24, false, swLayout{Show: true, Content: 6, ListRows: 10}},
 		// avail 94 -> 31 clamped to 16, list 94-18 = 76.
 		{"a tall lobby hits the ceiling", 100, false, swLayout{Show: true, Content: 16, ListRows: 76}},
-		// avail 10 -> 6 content, list 2: the last height that fits both.
-		{"the smallest lobby with a preview", 16, false, swLayout{Show: true, Content: 6, ListRows: 2}},
+		// avail 11 -> 6 content, list 3: the last height that fits both
+		// (list=3 -> budget 2 -> one 2-row session + the more line).
+		{"the smallest lobby with a preview", 17, false, swLayout{Show: true, Content: 6, ListRows: 3}},
+		// avail 10 -> list would be 2, one short of a full session row
+		// surviving the cap: fleet wins, preview is dropped.
+		{"one row short: fleet wins", 16, false, swLayout{}},
 		// avail 9 -> list would be 1: fleet wins, preview is dropped.
 		{"too short for both", 15, false, swLayout{}},
 		{"no size yet", 0, false, swLayout{}},

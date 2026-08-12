@@ -64,16 +64,26 @@ capped to fit around it.
 All heights below are **content rows, excluding the box border**, which costs 2 more.
 
 ```
-chrome  = 5                                  // title + blank, blank + status + hints
-                                             // 6 when a tmux error line is showing
+chrome  = 6                                  // title, blank, blank-above-box,
+                                             // blank-above-status, status, hints
+                                             // 7 when a tmux error line is showing
 avail   = m.height - chrome
 preview = clamp(avail / 3, 6, 16)
 list    = avail - (preview + 2)
 ```
 
-- When `list` would fall below 2 rows — one session — the preview is **omitted
-  entirely** and the lobby renders exactly as it does today, uncapped. A pane that can
-  show either the fleet or a preview, but not both, should show the fleet.
+Two tests catch a wrong value here (`TestComputePreviewLayout` and the row-count
+assertions in `TestSwModelViewCapsListForPreview`), so if this constant and the code
+ever disagree, the code is not the thing to change — fix this comment instead.
+
+- When `list` would fall below 3 rows, the preview is **omitted entirely** and the
+  lobby renders exactly as it does today, uncapped. The floor is 3, not 2: a session
+  occupies up to 2 rows once it carries a summary or prompt, and View holds back one
+  more row of the list budget for the "… +N more" line whenever anything is dropped —
+  so `list == 2` leaves only a 1-row budget, which fits no session at all. `list == 3`
+  is the smallest value that guarantees one full session row survives the cap
+  (budget 2 → one 2-row session + the more line). A pane that can show either the
+  fleet or a preview, but not both, should show the fleet.
 - Otherwise the fleet list is capped to `list` rows, with a `… +N more` line when
   sessions are dropped.
 
@@ -131,10 +141,14 @@ the lobby row already summarizes.
 
 ## Rendering the capture
 
-`capture-pane -e` emits **only** SGR sequences (`ESC[38;5;NNNm`, `ESC[0m`, `ESC[9m`) —
-verified against a live claude pane. No cursor motion, no OSC. That makes it safe to
-embed in a rendered view and correctly clippable by `ansi.Truncate`, which `clipLine`
-already uses.
+`capture-pane -e` emits SGR sequences (`ESC[38;5;NNNm`, `ESC[0m`, `ESC[9m`) — verified
+against a live claude pane. It is not cursor-motion-free, though: tmux 3.2+ also emits
+OSC 8 hyperlink sequences, and claude panes do produce them. That's fine as-is —
+`ansi.Truncate` (which `clipLine` already uses) measures OSC 8 sequences as zero-width
+and emits a closing `\x1b]8;;\x1b\\` at the truncation point, so a captured line stays
+safe to embed and correctly clippable without any extra handling. The code is correct
+here; this section previously overclaimed "only SGR," which is inaccurate but was never
+something the implementation depended on.
 
 Two pure steps:
 

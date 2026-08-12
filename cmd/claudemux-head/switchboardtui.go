@@ -214,7 +214,15 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// flag set would wedge the preview for the rest of the session.
 		m.previewInFlight = false
 		if msg.pane != m.selectedPane() {
-			return m, nil
+			// The selection moved on before this capture landed. Re-issue for
+			// wherever the cursor is NOW rather than dropping it entirely:
+			// previewCmd clears previewOut on a pane change, so without this
+			// the box goes blank until the next poll — up to a full second
+			// behind a fast j/k, exactly the lag the selection-change
+			// trigger exists to remove. This terminates: previewCmd returns
+			// nil once the selection settles (or has no claude pane), and
+			// the in-flight guard still allows only one capture at a time.
+			return m, m.previewCmd()
 		}
 		m.previewPane = msg.pane
 		m.previewErr = msg.err != nil
@@ -236,12 +244,19 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
 				m.sel++
-				return m, m.previewCmd()
+				// Two-line form, not `return m, m.previewCmd()`: Go orders
+				// function calls relative to each other, not relative to a
+				// plain operand, so a single-expression return would rely on
+				// evaluation order the language spec doesn't guarantee for
+				// the pointer-receiver mutation inside previewCmd.
+				cmd := m.previewCmd()
+				return m, cmd
 			}
 		case "k", "up":
 			if m.sel > 0 {
 				m.sel--
-				return m, m.previewCmd()
+				cmd := m.previewCmd()
+				return m, cmd
 			}
 		case "enter":
 			// A manual jump; the conductor notices the client moved on the
@@ -378,7 +393,6 @@ func (m swModel) View() string {
 	}
 
 	if lay.Show && len(m.snap.Sessions) > 0 {
-		b.WriteString("\n")
 		var lines []string
 		switch {
 		case m.selectedPane() == "":
@@ -388,14 +402,23 @@ func (m swModel) View() string {
 		default:
 			lines = previewTail(m.previewOut, lay.Content)
 		}
-		// Same bound as the row's own name column: the box title identifies
-		// the same session the row does, so it is truncated to the same
-		// width rather than spilling a long name across the border.
-		title := ansi.Truncate(m.snap.Sessions[m.sel].Name, swNameColW, "…")
+		// The box is full pane width, not the row's swNameColW column, so its
+		// title gets the box's own room to breathe — renderPreview clips it
+		// (display-width aware) to whatever previewTopBorder has left after
+		// the frame. Real session names cross swNameColW (24) in normal use,
+		// so passing the untruncated name here means the box can show more
+		// of it than the row can.
+		title := m.snap.Sessions[m.sel].Name
 		// renderPreview's lines are already exactly m.width display cells (or
-		// nil for a box too small to draw), so no clipLine call is needed here.
-		for _, l := range renderPreview(title, lines, m.width, lay.Content) {
-			b.WriteString(l + "\n")
+		// nil for a box too small to draw). Emit the separator only when the
+		// box will actually render — otherwise a sub-8-column pane gets a
+		// blank row where the box would have been.
+		box := renderPreview(title, lines, m.width, lay.Content)
+		if box != nil {
+			b.WriteString("\n")
+			for _, l := range box {
+				b.WriteString(l + "\n")
+			}
 		}
 	}
 

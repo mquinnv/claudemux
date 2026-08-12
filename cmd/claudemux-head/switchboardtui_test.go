@@ -91,6 +91,16 @@ func TestSwModelStorePreview(t *testing.T) {
 // pane, not against the pane the request was issued for: the two happen to be
 // the same value at request time, so the selection has to move between
 // request and reply for a test to tell those comparisons apart.
+//
+// Finding 3 changed what happens next: a dropped result now re-issues a
+// capture for the current selection (session 1, pane "%5") instead of just
+// clearing the flag and waiting for the next poll. That re-issue goes through
+// previewCmd, which clears previewOut/previewPane whenever the pane being
+// requested differs from what's currently held — so the sentinel "current"
+// value (deliberately parked under the OLD pane, "%2", to prove it isn't the
+// thing a same-pane comparison would keep) gets wiped rather than kept. What
+// must still hold is the actual invariant: the stale reply's own payload
+// ("stale") is never the thing painted.
 func TestSwModelDropsStalePreview(t *testing.T) {
 	m := swPreviewModel()
 	if cmd := m.previewCmd(); cmd == nil {
@@ -101,11 +111,35 @@ func TestSwModelDropsStalePreview(t *testing.T) {
 	m.sel = 1 // user moves to session 1 ("%5") before the capture lands
 	next, _ := m.Update(swPreviewMsg{pane: "%2", out: "stale"})
 	got := next.(swModel)
-	if got.previewOut != "current" {
-		t.Errorf("previewOut = %q, want the current capture kept", got.previewOut)
+	if got.previewOut == "stale" || got.previewPane == "%2" {
+		t.Errorf("the stale reply must never be painted: out=%q pane=%q", got.previewOut, got.previewPane)
 	}
-	if got.previewInFlight {
-		t.Error("even a dropped capture must clear the in-flight flag, or the preview wedges")
+	// A dropped capture with a claude pane still selected re-issues (Finding
+	// 3), so the flag goes back to true here rather than staying cleared.
+	if !got.previewInFlight {
+		t.Error("a dropped capture with a claude pane still selected must re-issue, leaving the flag set")
+	}
+}
+
+// Finding 3: without a re-issue, a stale-dropped capture leaves the preview
+// blank until the next 1s poll — up to a full second behind a fast j/k, the
+// exact lag the selection-change trigger exists to remove. previewCmd clears
+// previewOut on a pane change (see previewCmd), so "blank" not "wrong" is
+// what a fast scroll used to show.
+func TestSwModelStalePreviewReissuesForCurrentSelection(t *testing.T) {
+	m := swPreviewModel()
+	if cmd := m.previewCmd(); cmd == nil {
+		t.Fatal("request against session 0 (%2) must fire")
+	}
+	m.previewOut = "current"
+	m.previewPane = "%2"
+	m.sel = 1 // user moves to session 1 ("%5") before the capture lands
+	next, cmd := m.Update(swPreviewMsg{pane: "%2", out: "stale"})
+	if cmd == nil {
+		t.Fatal("a stale result must re-issue a capture for the current selection, not just drop it")
+	}
+	if !next.(swModel).previewInFlight {
+		t.Error("the re-issued capture must be marked in flight")
 	}
 }
 
@@ -283,8 +317,15 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 func TestSwModelViewClipsLongName(t *testing.T) {
 	m := swTestModel()
 	m.snap.Sessions[0].Name = strings.Repeat("x", swNameColW+10)
-	if view := ansi.Strip(m.View()); strings.Contains(view, strings.Repeat("x", swNameColW+1)) {
-		t.Errorf("over-long name must be truncated to %d cells:\n%s", swNameColW, view)
+	// Scoped to the fleet row itself (line index 2: title, blank, then the
+	// first session's row) rather than the whole view. This test's intent is
+	// "the name COLUMN truncates" — it must not also constrain the preview
+	// box title, which is full pane width and free to show more of a long
+	// name than the row's fixed swNameColW allows.
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	row := lines[2]
+	if strings.Contains(row, strings.Repeat("x", swNameColW+1)) {
+		t.Errorf("over-long name must be truncated to %d cells in the fleet row:\n%s", swNameColW, row)
 	}
 }
 
@@ -428,6 +469,41 @@ func TestSwModelViewPreviewOmittedWhenShort(t *testing.T) {
 	}
 }
 
+// Finding 1 regression: under the old `list < 2` guard, height 16 admitted
+// the box (list=2) but left only a 1-row budget after View's own "+N more"
+// reservation — not enough for even one session, which has a 2-row floor
+// once it carries a summary or prompt. The lobby rendered a box and ZERO
+// session rows. With the guard raised to `list < 3`, height 16 now falls
+// below the floor and the box is omitted, so the fleet renders exactly as
+// it does with no preview at all.
+func TestSwModelViewOneRowShortDropsBoxAndShowsFleet(t *testing.T) {
+	m := swPreviewModel()
+	m.height = 16
+	view := ansi.Strip(m.View())
+	if strings.Contains(view, "┌") {
+		t.Errorf("height 16 is below the preview floor; the box must not render:\n%s", view)
+	}
+	if !strings.Contains(view, "fixing the build") {
+		t.Errorf("the fleet must still render at least one full session row:\n%s", view)
+	}
+}
+
+// Finding 1: at the smallest height where computePreviewLayout now shows a
+// box (list=3, budget 2 after the "+N more" reservation), the fleet must
+// still render at least one full session row alongside it — not the
+// zero-rows-plus-box the old `list < 2` floor allowed one row lower.
+func TestSwModelViewSmallestPreviewHeightStillShowsASessionRow(t *testing.T) {
+	m := swPreviewModel()
+	m.height = 17
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "┌") {
+		t.Errorf("height 17 should be tall enough to show the preview box:\n%s", view)
+	}
+	if !strings.Contains(view, "fixing the build") {
+		t.Errorf("even at the smallest height that shows a box, a session row must render:\n%s", view)
+	}
+}
+
 func TestSwModelViewPreviewPlaceholders(t *testing.T) {
 	m := swPreviewModel()
 	m.sel = 2 // scratch has no claude pane
@@ -454,15 +530,37 @@ func TestSwModelViewCapsListForPreview(t *testing.T) {
 		})
 	}
 	m.snap.Sessions = sessions
-	view := ansi.Strip(m.View())
+	raw := m.View()
+	view := ansi.Strip(raw)
 	if !strings.Contains(view, "more") {
 		t.Errorf("a capped list must say how many it dropped:\n%s", view)
 	}
 	if strings.Contains(view, "sess-29") {
 		t.Errorf("the list must be capped, not rendered in full:\n%s", view)
 	}
-	if lines := strings.Count(view, "\n"); lines > m.height {
-		t.Errorf("view is %d lines, want at most %d", lines, m.height)
+	// The box must have actually rendered — a regression that dropped it
+	// while keeping the row cap would otherwise pass this test silently.
+	if !strings.Contains(view, "┌") {
+		t.Errorf("the preview box must still render when the list is capped:\n%s", view)
+	}
+	// strings.Count counts SEPARATORS: an N-line view (the footer has no
+	// trailing newline) contains N-1 of them, so Count permits m.height+1
+	// lines and would not have caught a one-row overflow here.
+	// len(strings.Split(...)) counts the lines themselves. Proven by
+	// mutation: deleting `budget--` in View's row-budget computation lets a
+	// 6th session row through at this height, producing 21 lines in this
+	// 20-row pane — Count(view, "\n") stays at 20 (<= m.height) and the old
+	// assertion would have stayed green.
+	rawLines := strings.Split(raw, "\n")
+	if len(rawLines) > m.height {
+		t.Errorf("view is %d lines, want at most %d", len(rawLines), m.height)
+	}
+	// Every line must also fit within the pane's width — a row-count check
+	// alone would miss a box or row that overflows sideways.
+	for i, l := range rawLines {
+		if w := lipgloss.Width(l); w > m.width {
+			t.Errorf("line %d is %d cells wide, want at most %d: %q", i, w, m.width, l)
+		}
 	}
 }
 

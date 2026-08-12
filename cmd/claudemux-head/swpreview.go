@@ -138,10 +138,15 @@ func computePreviewLayout(height int, hasErr bool) swLayout {
 	if content > swPreviewMaxRows {
 		content = swPreviewMaxRows
 	}
-	// +2 for the box's own borders. Under two rows there is not even one
-	// session row left, so the box is not worth its cost.
+	// +2 for the box's own borders. A session occupies up to swSessionRows
+	// (2) rows, and View holds back one more of the list budget for the
+	// "… +N more" line whenever anything is dropped — so 3 is the floor
+	// that guarantees at least one full session row still renders (list=3
+	// -> budget 2 -> exactly one 2-row session + the more line). Below
+	// that, the box would crowd out the fleet entirely: a pane that can
+	// show either the fleet or a preview, but not both, shows the fleet.
 	list := avail - (content + 2)
-	if list < 2 {
+	if list < 3 {
 		return swLayout{}
 	}
 	return swLayout{Show: true, Content: content, ListRows: list}

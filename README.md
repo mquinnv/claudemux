@@ -71,6 +71,14 @@ live Haiku-generated topic on the first, and a dimmer second line underneath
 with the running summary and last prompt (`summary · prompt`, either half
 omitted if empty, the whole line omitted if both are).
 
+Below the fleet list, a bordered box previews the selected session's `claude`
+pane — the same thing `tmux choose-tree -Zs` does for the session under the
+cursor, so you can see what's actually happening before you jump to it. It
+follows the selection (`j`/`k` refreshes it immediately, not just on the next
+poll) and is read-only — nothing about previewing a session touches it. On a
+pane too short to show both the box and the fleet, the box is dropped and the
+lobby renders exactly as it would with no preview at all.
+
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `q` quits.
 
