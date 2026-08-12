@@ -59,6 +59,11 @@ func TestRenderPreviewGeometry(t *testing.T) {
 	if !strings.HasPrefix(stripped, "│") || !strings.HasSuffix(stripped, "│") {
 		t.Errorf("unused row must have borders: %q", stripped)
 	}
+	// After removing "│ " and " │", the remainder should be empty (only spaces).
+	content := strings.TrimPrefix(strings.TrimSuffix(stripped, " │"), "│ ")
+	if strings.TrimSpace(content) != "" {
+		t.Errorf("unused row has content between borders: %q", content)
+	}
 }
 
 // A colored capture must not overflow the box or leak its color past the
@@ -82,6 +87,17 @@ func TestRenderPreviewTruncatesTitle(t *testing.T) {
 	box := renderPreview(strings.Repeat("x", 100), nil, 20, 1)
 	if w := lipgloss.Width(box[0]); w != 20 {
 		t.Errorf("top border is %d cells, want 20: %q", w, ansi.Strip(box[0]))
+	}
+}
+
+// CJK titles must be truncated by display width, not rune count. 囲 is 1 rune
+// but 2 cells wide; truncating by rune count (the incorrect way) would clip
+// to 15 runes (30 cells) and overflow the 20-cell box. ansi.Truncate clips
+// by display width and keeps the border width-correct.
+func TestRenderPreviewCJKTitleWidth(t *testing.T) {
+	box := renderPreview(strings.Repeat("囲", 40), nil, 20, 1)
+	if w := lipgloss.Width(box[0]); w != 20 {
+		t.Errorf("top border with CJK title is %d cells, want 20: %q", w, ansi.Strip(box[0]))
 	}
 }
 
