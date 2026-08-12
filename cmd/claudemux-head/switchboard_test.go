@@ -80,6 +80,42 @@ func TestBuildSwSnapshotMalformedLines(t *testing.T) {
 	}
 }
 
+// The preview needs the claude pane, not the head pane: swPaneOut gives api
+// both, web only a head pane.
+func TestBuildSwSnapshotRecordsClaudePane(t *testing.T) {
+	s := buildSwSnapshot(swSessOut, swPaneOut, swClientOut, "%9")
+	api, ok := s.session("api")
+	if !ok || api.ClaudePane != "%2" {
+		t.Errorf("api.ClaudePane = %q, want %%2", api.ClaudePane)
+	}
+	web, ok := s.session("web")
+	if !ok || web.ClaudePane != "" {
+		t.Errorf("web.ClaudePane = %q, want empty: it has no claude pane", web.ClaudePane)
+	}
+}
+
+// "node" identifies claude only as a fallback. A session that has both a real
+// claude pane and some other node process must preview claude, whatever order
+// tmux lists them in.
+func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
+	paneOut := "api\t%1\tclaudemux-head\ttopic\n" +
+		"api\t%2\tnode\ttopic\n" +
+		"api\t%3\tclaude\ttopic\n" +
+		"shim\t%4\tclaudemux-head\ttopic\n" +
+		"shim\t%5\tnode\ttopic\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\n" +
+		"shim\tIdle\t1754700000\t37\t\t\n"
+	s := buildSwSnapshot(sessOut, paneOut, swClientOut, "")
+	api, _ := s.session("api")
+	if api.ClaudePane != "%3" {
+		t.Errorf("api.ClaudePane = %q, want %%3: a real claude pane outranks node", api.ClaudePane)
+	}
+	shim, _ := s.session("shim")
+	if shim.ClaudePane != "%5" {
+		t.Errorf("shim.ClaudePane = %q, want %%5: node is the fallback", shim.ClaudePane)
+	}
+}
+
 func TestIsWaiting(t *testing.T) {
 	cases := map[string]bool{
 		"Idle":                 true,

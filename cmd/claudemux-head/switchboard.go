@@ -24,6 +24,12 @@ type swSession struct {
 	Topic   string    // the head's Haiku tab label (the tmux window name)
 	Summary string    // the head's one-line summary (@claudemux_summary)
 	Prompt  string    // the last typed prompt (@claudemux_prompt)
+	// ClaudePane is the tmux pane id running claude, "" when the session has
+	// none. The lobby previews this pane rather than the session's active one:
+	// a session left focused on its shell would preview a shell prompt, and
+	// one left on its head pane would preview the four rows the lobby row
+	// already summarizes.
+	ClaudePane string
 }
 
 type swSnapshot struct {
@@ -51,6 +57,16 @@ func (s swSnapshot) session(name string) (swSession, bool) {
 	return swSession{}, false
 }
 
+// swClaudeCommand / swClaudeShimCommand are the pane_current_command values
+// that identify a claude pane. The shim is only a fallback: some runtimes
+// report "node" for claude, but plenty of unrelated processes report it too
+// (a dev server in a shell pane), so a real claude pane always wins. Same
+// preference order claudePaneCandidates uses — see panemap.go.
+const (
+	swClaudeCommand     = "claude"
+	swClaudeShimCommand = "node"
+)
+
 // buildSwSnapshot assembles a snapshot from the raw output of the three tmux
 // calls (see swPollCmd). Malformed lines are skipped, not fatal: a snapshot
 // built from whatever parsed keeps the lobby rendering through transient
@@ -64,6 +80,8 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	heads := map[string]bool{}
 	topics := map[string]string{}
+	claudePanes := map[string]string{}
+	shimPanes := map[string]string{}
 	for _, line := range strings.Split(paneOut, "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) != 4 {
@@ -72,6 +90,18 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if f[2] == swHeadCommand {
 			heads[f[0]] = true
 			topics[f[0]] = f[3]
+		}
+		// First pane of each kind wins, so the previewed pane is stable
+		// across polls even when a session has several candidates.
+		switch f[2] {
+		case swClaudeCommand:
+			if _, ok := claudePanes[f[0]]; !ok {
+				claudePanes[f[0]] = f[1]
+			}
+		case swClaudeShimCommand:
+			if _, ok := shimPanes[f[0]]; !ok {
+				shimPanes[f[0]] = f[1]
+			}
 		}
 		if f[1] == selfPane && selfPane != "" {
 			snap.Lobby = f[0]
@@ -95,6 +125,10 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 			sess.Since = time.Unix(secs, 0)
 		}
 		sess.Topic = topics[sess.Name]
+		sess.ClaudePane = claudePanes[sess.Name]
+		if sess.ClaudePane == "" {
+			sess.ClaudePane = shimPanes[sess.Name]
+		}
 		snap.Sessions = append(snap.Sessions, sess)
 	}
 
