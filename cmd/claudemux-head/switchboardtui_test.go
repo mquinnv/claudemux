@@ -87,19 +87,40 @@ func TestSwModelStorePreview(t *testing.T) {
 
 // A capture that lands after the cursor moved belongs to a session the user is
 // no longer looking at; painting it would flash the wrong screen under the
-// right title.
+// right title. The drop must compare against the CURRENTLY selected session's
+// pane, not against the pane the request was issued for: the two happen to be
+// the same value at request time, so the selection has to move between
+// request and reply for a test to tell those comparisons apart.
 func TestSwModelDropsStalePreview(t *testing.T) {
 	m := swPreviewModel()
+	if cmd := m.previewCmd(); cmd == nil {
+		t.Fatal("request against session 0 (%2) must fire")
+	}
 	m.previewOut = "current"
 	m.previewPane = "%2"
-	m.previewInFlight = true
-	next, _ := m.Update(swPreviewMsg{pane: "%99", out: "stale"})
+	m.sel = 1 // user moves to session 1 ("%5") before the capture lands
+	next, _ := m.Update(swPreviewMsg{pane: "%2", out: "stale"})
 	got := next.(swModel)
 	if got.previewOut != "current" {
 		t.Errorf("previewOut = %q, want the current capture kept", got.previewOut)
 	}
 	if got.previewInFlight {
 		t.Error("even a dropped capture must clear the in-flight flag, or the preview wedges")
+	}
+}
+
+// The poll and the key handler are two independent triggers for a capture;
+// nothing else exercises the poll path landing a request, so a regression
+// that dropped the previewCmd() call from the swSnapshotMsg case would leave
+// the preview refreshing only on j/k and no test would notice.
+func TestSwModelSnapshotRequestsPreview(t *testing.T) {
+	m := swPreviewModel()
+	next, cmd := m.Update(swSnapshotMsg{snap: m.snap})
+	if cmd == nil {
+		t.Fatal("a snapshot must always schedule the next tick")
+	}
+	if !next.(swModel).previewInFlight {
+		t.Error("a snapshot poll must also request a capture for the selected session")
 	}
 }
 
