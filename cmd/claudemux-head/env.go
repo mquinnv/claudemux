@@ -106,16 +106,17 @@ func envFileValue(keyFile, key string) string {
 	return ""
 }
 
-// envFileReadAttemptDone, when non-nil, is called immediately after a single
-// read attempt's file descriptor is guaranteed closed (i.e. after an explicit
-// f.Close(), not merely after the attempt's result is known). Left nil in
-// production — it exists solely so a test can learn precisely when an
-// attempt's reader has released the FIFO, rather than inferring it from
-// timing. Without this seam, a test simulating a transiently-empty FIFO has
-// no way to know when it is safe for a second writer to open the same path:
-// opening too early pairs with the still-registered (but logically finished)
-// first reader instead of the retry's fresh one, silently orphaning the
-// write. See TestEnvFileValueRetriesTransientlyEmptyFIFO.
+// envFileReadAttemptDone, when non-nil, is called exactly once per completed
+// attempt — one signal per attempt, whatever its outcome, whether that means
+// an explicit f.Close() (key found, or scan reached EOF with no match) or the
+// open itself failing (nothing to close). Left nil in production — it exists
+// solely so a test can learn precisely when an attempt has finished and
+// released whatever fd it held, rather than inferring it from timing.
+// Without this seam, a test simulating a transiently-empty FIFO has no way to
+// know when it is safe for a second writer to open the same path: opening
+// too early pairs with the still-registered (but logically finished) first
+// reader instead of the retry's fresh one, silently orphaning the write. See
+// TestEnvFileValueRetriesTransientlyEmptyFIFO.
 var envFileReadAttemptDone func()
 
 // readEnvFileValue reads key from path, bounded by timeout. It returns
@@ -137,6 +138,9 @@ func readEnvFileValue(path, key string, timeout time.Duration) (value string, ti
 	go func() {
 		f, err := os.Open(path)
 		if err != nil {
+			if envFileReadAttemptDone != nil {
+				envFileReadAttemptDone()
+			}
 			ch <- ""
 			return
 		}
