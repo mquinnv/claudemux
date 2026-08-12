@@ -109,3 +109,33 @@ func TestRenderPreviewRefusesTinyBoxes(t *testing.T) {
 		t.Errorf("height 0 must render nothing, got %q", got)
 	}
 }
+
+func TestComputePreviewLayout(t *testing.T) {
+	tests := []struct {
+		name   string
+		height int
+		hasErr bool
+		want   swLayout
+	}{
+		// avail 40 -> 40/3 = 13 content, list 40-15 = 25.
+		{"a full-screen lobby", 46, false, swLayout{Show: true, Content: 13, ListRows: 25}},
+		// avail 18 -> 6 content (floor), list 18-8 = 10.
+		{"a small lobby hits the floor", 24, false, swLayout{Show: true, Content: 6, ListRows: 10}},
+		// avail 94 -> 31 clamped to 16, list 94-18 = 76.
+		{"a tall lobby hits the ceiling", 100, false, swLayout{Show: true, Content: 16, ListRows: 76}},
+		// avail 10 -> 6 content, list 2: the last height that fits both.
+		{"the smallest lobby with a preview", 16, false, swLayout{Show: true, Content: 6, ListRows: 2}},
+		// avail 9 -> list would be 1: fleet wins, preview is dropped.
+		{"too short for both", 15, false, swLayout{}},
+		{"no size yet", 0, false, swLayout{}},
+		// An error line costs a row: avail 39 -> 13 content, list 39-15 = 24.
+		{"an error line shifts the budget", 46, true, swLayout{Show: true, Content: 13, ListRows: 24}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := computePreviewLayout(tt.height, tt.hasErr); got != tt.want {
+				t.Errorf("computePreviewLayout(%d, %v) = %+v, want %+v", tt.height, tt.hasErr, got, tt.want)
+			}
+		})
+	}
+}

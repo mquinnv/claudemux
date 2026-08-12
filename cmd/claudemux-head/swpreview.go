@@ -91,3 +91,55 @@ func previewTopBorder(title string, width int) string {
 	}
 	return swPreviewBorderStyle.Render("┌─ " + title + " " + strings.Repeat("─", fill) + "┐")
 }
+
+// Preview sizing. The box claims its share BEFORE the fleet list rather than
+// taking the leftovers: giving the list what it wants first would let a large
+// fleet squeeze the preview out, which is exactly when a preview is most
+// useful.
+const (
+	swPreviewMinRows = 6
+	swPreviewMaxRows = 16
+	// swChromeRows is what View spends on things that are neither list nor
+	// preview: title, the blank under it, the blank above the box, the blank
+	// above the status line, and the hints line. A tmux error line costs one
+	// more.
+	swChromeRows = 6
+)
+
+// swLayout is the row budget for one View pass. ListRows is a CAP, and 0 means
+// uncapped — the state the lobby is in today and stays in whenever the preview
+// is not drawn.
+type swLayout struct {
+	Show     bool
+	Content  int
+	ListRows int
+}
+
+// computePreviewLayout divides the pane's rows between the fleet list and the
+// preview box. A pane that can show the fleet or a preview but not both shows
+// the fleet: the lobby's job is ferrying clients, and the preview is decoration
+// on top of that.
+func computePreviewLayout(height int, hasErr bool) swLayout {
+	chrome := swChromeRows
+	if hasErr {
+		chrome++
+	}
+	avail := height - chrome
+	if avail < 1 {
+		return swLayout{}
+	}
+	content := avail / 3
+	if content < swPreviewMinRows {
+		content = swPreviewMinRows
+	}
+	if content > swPreviewMaxRows {
+		content = swPreviewMaxRows
+	}
+	// +2 for the box's own borders. Under two rows there is not even one
+	// session row left, so the box is not worth its cost.
+	list := avail - (content + 2)
+	if list < 2 {
+		return swLayout{}
+	}
+	return swLayout{Show: true, Content: content, ListRows: list}
+}
