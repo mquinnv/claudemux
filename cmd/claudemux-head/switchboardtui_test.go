@@ -405,3 +405,71 @@ func TestSwModelStandbyStatusLine(t *testing.T) {
 		t.Errorf("view must show standby state:\n%s", v)
 	}
 }
+
+func TestSwModelViewShowsPreview(t *testing.T) {
+	m := swPreviewModel()
+	m.previewPane = "%2"
+	m.previewOut = "● Bash(git push)\n⎿  pushed\n"
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"● Bash(git push)", "⎿  pushed", "api"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestSwModelViewPreviewOmittedWhenShort(t *testing.T) {
+	m := swPreviewModel()
+	m.height = 15 // below the floor: fleet wins
+	m.previewPane = "%2"
+	m.previewOut = "captured content here\n"
+	if view := ansi.Strip(m.View()); strings.Contains(view, "captured content here") {
+		t.Errorf("a short pane must drop the preview, not squeeze it:\n%s", view)
+	}
+}
+
+func TestSwModelViewPreviewPlaceholders(t *testing.T) {
+	m := swPreviewModel()
+	m.sel = 2 // scratch has no claude pane
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "no claude pane") {
+		t.Errorf("a session with no claude pane needs a reason in the box:\n%s", view)
+	}
+
+	m = swPreviewModel()
+	m.previewErr = true
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "preview unavailable") {
+		t.Errorf("a failed capture needs a reason in the box:\n%s", view)
+	}
+}
+
+// The preview must not be pushed off the bottom by a long fleet: the list is
+// capped and says so.
+func TestSwModelViewCapsListForPreview(t *testing.T) {
+	m := swPreviewModel()
+	m.height = 20
+	var sessions []swSession
+	for i := 0; i < 30; i++ {
+		sessions = append(sessions, swSession{
+			Name: fmt.Sprintf("sess-%02d", i), State: "Idle", Context: -1, ClaudePane: "%2",
+		})
+	}
+	m.snap.Sessions = sessions
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "more") {
+		t.Errorf("a capped list must say how many it dropped:\n%s", view)
+	}
+	if strings.Contains(view, "sess-29") {
+		t.Errorf("the list must be capped, not rendered in full:\n%s", view)
+	}
+	if lines := strings.Count(view, "\n"); lines > m.height {
+		t.Errorf("view is %d lines, want at most %d", lines, m.height)
+	}
+}
+
+func TestSwModelViewEmptyFleetHasNoPreview(t *testing.T) {
+	m := newSwModel("%9")
+	m.width, m.height = 80, 46
+	if view := ansi.Strip(m.View()); strings.Contains(view, "┌") {
+		t.Errorf("an empty fleet must not draw a preview box:\n%s", view)
+	}
+}

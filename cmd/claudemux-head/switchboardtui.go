@@ -254,14 +254,52 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// swSessionRows is how many lines a session's row occupies: two when it has a
+// summary or prompt to show under it, one when it has neither. Kept next to
+// View's own detail-line logic, which must agree with it — if they disagree,
+// the list cap below is wrong by one row per session.
+func swSessionRows(sess swSession) int {
+	if sess.Summary != "" || sess.Prompt != "" {
+		return 2
+	}
+	return 1
+}
+
 func (m swModel) View() string {
 	var b strings.Builder
 	b.WriteString(swTitleStyle.Render("claudemux switchboard") + "\n\n")
 	if len(m.snap.Sessions) == 0 {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
+
+	lay := computePreviewLayout(m.height, m.lastErr != "")
+
+	// Rows each session wants on screen. Only when the fleet's total need
+	// EXCEEDS the cap is anything dropped — and then one row is held back so
+	// the "+N more" line announcing the truncation doesn't itself push the
+	// preview box off the bottom.
+	budget := lay.ListRows
+	if budget > 0 {
+		want := 0
+		for _, sess := range m.snap.Sessions {
+			want += swSessionRows(sess)
+		}
+		if want <= budget {
+			budget = 0 // everything fits; no cap needed
+		} else {
+			budget--
+		}
+	}
+
 	now := time.Now()
+	used, shown := 0, 0
 	for i, sess := range m.snap.Sessions {
+		// budget == 0 means uncapped (no preview drawn, or the fleet already
+		// fits) — the loop then runs to completion exactly as it did before
+		// this task.
+		if budget > 0 && used+swSessionRows(sess) > budget {
+			break
+		}
 		marker := "  "
 		if isWaiting(sess.State) {
 			marker = swWaitStyle.Render("● ")
@@ -325,7 +363,42 @@ func (m swModel) View() string {
 			}
 			b.WriteString(line2 + "\n")
 		}
+		used += swSessionRows(sess)
+		shown++
 	}
+	if shown < len(m.snap.Sessions) {
+		// Same width guard as every other line here: this text is short, but
+		// consistency is cheaper to maintain than a special case.
+		moreLine := fmt.Sprintf("    %s", swStatusStyle.Render(
+			fmt.Sprintf("… +%d more", len(m.snap.Sessions)-shown)))
+		if m.width > 0 {
+			moreLine = clipLine(moreLine, m.width)
+		}
+		b.WriteString(moreLine + "\n")
+	}
+
+	if lay.Show && len(m.snap.Sessions) > 0 {
+		b.WriteString("\n")
+		var lines []string
+		switch {
+		case m.selectedPane() == "":
+			lines = []string{swStatusStyle.Render("no claude pane")}
+		case m.previewErr:
+			lines = []string{swStatusStyle.Render("preview unavailable")}
+		default:
+			lines = previewTail(m.previewOut, lay.Content)
+		}
+		// Same bound as the row's own name column: the box title identifies
+		// the same session the row does, so it is truncated to the same
+		// width rather than spilling a long name across the border.
+		title := ansi.Truncate(m.snap.Sessions[m.sel].Name, swNameColW, "…")
+		// renderPreview's lines are already exactly m.width display cells (or
+		// nil for a box too small to draw), so no clipLine call is needed here.
+		for _, l := range renderPreview(title, lines, m.width, lay.Content) {
+			b.WriteString(l + "\n")
+		}
+	}
+
 	status := m.cond.statusLine(m.snap)
 	if m.standby {
 		status = fmt.Sprintf("standby · %d waiting — space to conduct",
