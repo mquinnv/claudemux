@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -26,6 +27,93 @@ func swTestModel() swModel {
 	}
 	m.cond.client = "/dev/ttys001"
 	return m
+}
+
+// swPreviewModel is swTestModel with claude panes attached — the preview needs
+// something to capture.
+func swPreviewModel() swModel {
+	m := swTestModel()
+	m.height = 46
+	m.snap.Sessions[0].ClaudePane = "%2"
+	m.snap.Sessions[1].ClaudePane = "%5"
+	// Sessions[2] ("scratch") deliberately keeps none.
+	return m
+}
+
+func TestSwModelSelectionRequestsPreview(t *testing.T) {
+	m := swPreviewModel()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if cmd == nil {
+		t.Fatal("moving the selection must request a capture")
+	}
+	if !next.(swModel).previewInFlight {
+		t.Error("a requested capture must be marked in flight")
+	}
+}
+
+func TestSwModelNoPreviewWithoutClaudePane(t *testing.T) {
+	m := swPreviewModel()
+	m.sel = 2 // scratch: no claude pane
+	if cmd := m.previewCmd(); cmd != nil {
+		t.Error("a session with no claude pane must not request a capture")
+	}
+}
+
+func TestSwModelPreviewInFlightGuard(t *testing.T) {
+	m := swPreviewModel()
+	if cmd := m.previewCmd(); cmd == nil {
+		t.Fatal("the first request must fire")
+	}
+	if cmd := m.previewCmd(); cmd != nil {
+		t.Error("a second request must be dropped while one is in flight")
+	}
+}
+
+func TestSwModelStorePreview(t *testing.T) {
+	m := swPreviewModel()
+	m.previewInFlight = true
+	next, _ := m.Update(swPreviewMsg{pane: "%2", out: "hello\n"})
+	got := next.(swModel)
+	if got.previewOut != "hello\n" || got.previewPane != "%2" {
+		t.Errorf("preview not stored: out=%q pane=%q", got.previewOut, got.previewPane)
+	}
+	if got.previewInFlight {
+		t.Error("a landed capture must clear the in-flight flag")
+	}
+	if got.previewErr {
+		t.Error("a successful capture must not be flagged as an error")
+	}
+}
+
+// A capture that lands after the cursor moved belongs to a session the user is
+// no longer looking at; painting it would flash the wrong screen under the
+// right title.
+func TestSwModelDropsStalePreview(t *testing.T) {
+	m := swPreviewModel()
+	m.previewOut = "current"
+	m.previewPane = "%2"
+	m.previewInFlight = true
+	next, _ := m.Update(swPreviewMsg{pane: "%99", out: "stale"})
+	got := next.(swModel)
+	if got.previewOut != "current" {
+		t.Errorf("previewOut = %q, want the current capture kept", got.previewOut)
+	}
+	if got.previewInFlight {
+		t.Error("even a dropped capture must clear the in-flight flag, or the preview wedges")
+	}
+}
+
+func TestSwModelPreviewErrorFlagged(t *testing.T) {
+	m := swPreviewModel()
+	m.previewInFlight = true
+	next, _ := m.Update(swPreviewMsg{pane: "%2", err: errors.New("no such pane")})
+	got := next.(swModel)
+	if !got.previewErr {
+		t.Error("a failed capture must be flagged")
+	}
+	if got.lastErr != "" {
+		t.Errorf("lastErr = %q: a preview failure must not claim the fleet-poll error line", got.lastErr)
+	}
 }
 
 func TestSwModelSelectionKeys(t *testing.T) {

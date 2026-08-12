@@ -93,6 +93,13 @@ type swModel struct {
 	// showing live states but the conductor is never stepped, so the user
 	// can sit and look at the fleet without being dispatched.
 	standby bool
+	// The preview of the selected session's claude pane. previewPane records
+	// which pane previewOut came from; previewInFlight serializes captures so
+	// a slow tmux cannot queue them up behind each other.
+	previewPane     string
+	previewOut      string
+	previewErr      bool
+	previewInFlight bool
 }
 
 func newSwModel(selfPane string) swModel {
@@ -100,6 +107,31 @@ func newSwModel(selfPane string) swModel {
 }
 
 func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane) }
+
+// selectedPane returns the claude pane of the selected session — "" when there
+// is no selection, or when that session has no claude pane to capture.
+func (m swModel) selectedPane() string {
+	if m.sel < 0 || m.sel >= len(m.snap.Sessions) {
+		return ""
+	}
+	return m.snap.Sessions[m.sel].ClaudePane
+}
+
+// previewCmd requests a capture of the current selection, returning nil when
+// there is nothing to capture or one is already running. Moving off the pane
+// the held capture came from clears it, so the box never shows one session's
+// screen under another's title while the new capture is in flight.
+func (m *swModel) previewCmd() tea.Cmd {
+	pane := m.selectedPane()
+	if pane != m.previewPane {
+		m.previewOut, m.previewPane, m.previewErr = "", "", false
+	}
+	if pane == "" || m.previewInFlight {
+		return nil
+	}
+	m.previewInFlight = true
+	return swPreviewCmd(pane)
+}
 
 // swPollCmd runs the three tmux listings off the update loop. Any failure
 // returns the error instead of a snapshot — the model keeps its previous
@@ -168,12 +200,26 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sel < 0 {
 			m.sel = 0
 		}
+		// Refresh the preview on the same beat as the fleet. tea.Batch drops
+		// nil commands, so this is a no-op when there is nothing to capture.
+		pv := m.previewCmd()
 		if !m.standby {
 			if act, ok := m.cond.step(m.snap); ok {
-				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target))
+				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target), pv)
 			}
 		}
-		return m, swNextTick()
+		return m, tea.Batch(swNextTick(), pv)
+	case swPreviewMsg:
+		// Always clear the flag, stale or not: a dropped result that left the
+		// flag set would wedge the preview for the rest of the session.
+		m.previewInFlight = false
+		if msg.pane != m.selectedPane() {
+			return m, nil
+		}
+		m.previewPane = msg.pane
+		m.previewErr = msg.err != nil
+		m.previewOut = msg.out
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -190,10 +236,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
 				m.sel++
+				return m, m.previewCmd()
 			}
 		case "k", "up":
 			if m.sel > 0 {
 				m.sel--
+				return m, m.previewCmd()
 			}
 		case "enter":
 			// A manual jump; the conductor notices the client moved on the

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"strings"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -142,4 +145,25 @@ func computePreviewLayout(height int, hasErr bool) swLayout {
 		return swLayout{}
 	}
 	return swLayout{Show: true, Content: content, ListRows: list}
+}
+
+// swPreviewMsg is one finished capture. It carries the pane it came from so
+// Update can drop a result whose session is no longer selected — without that
+// check, a fast j/k paints a previous session's screen under the new title.
+type swPreviewMsg struct {
+	pane string
+	out  string
+	err  error
+}
+
+// swPreviewCmd captures a pane off the update loop. -e keeps the pane's SGR
+// colors, which is what makes a claude pane scannable at a glance; capture-pane
+// emits no cursor motion or OSC, so the result is safe to embed in a view.
+func swPreviewCmd(pane string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		out, err := swTmux(ctx, "capture-pane", "-e", "-p", "-t", pane)
+		return swPreviewMsg{pane: pane, out: out, err: err}
+	}
 }
