@@ -106,6 +106,18 @@ func envFileValue(keyFile, key string) string {
 	return ""
 }
 
+// envFileReadAttemptDone, when non-nil, is called immediately after a single
+// read attempt's file descriptor is guaranteed closed (i.e. after an explicit
+// f.Close(), not merely after the attempt's result is known). Left nil in
+// production — it exists solely so a test can learn precisely when an
+// attempt's reader has released the FIFO, rather than inferring it from
+// timing. Without this seam, a test simulating a transiently-empty FIFO has
+// no way to know when it is safe for a second writer to open the same path:
+// opening too early pairs with the still-registered (but logically finished)
+// first reader instead of the retry's fresh one, silently orphaning the
+// write. See TestEnvFileValueRetriesTransientlyEmptyFIFO.
+var envFileReadAttemptDone func()
+
 // readEnvFileValue reads key from path, bounded by timeout. It returns
 // timedOut=true when the bound was hit before the read completed (the path is
 // a FIFO with no writer), and timedOut=false for every other outcome —
@@ -128,7 +140,6 @@ func readEnvFileValue(path, key string, timeout time.Duration) (value string, ti
 			ch <- ""
 			return
 		}
-		defer f.Close()
 
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
@@ -140,8 +151,21 @@ func readEnvFileValue(path, key string, timeout time.Duration) (value string, ti
 			if !ok || strings.TrimSpace(k) != key {
 				continue
 			}
+			// Close before signaling completion (not via defer, which would
+			// only run after this goroutine returns — after the value is
+			// already on the channel and the caller may have moved on). A
+			// caller must be able to rely on the fd being released the
+			// instant it observes this attempt's outcome.
+			f.Close()
+			if envFileReadAttemptDone != nil {
+				envFileReadAttemptDone()
+			}
 			ch <- strings.TrimSpace(v)
 			return
+		}
+		f.Close()
+		if envFileReadAttemptDone != nil {
+			envFileReadAttemptDone()
 		}
 		ch <- ""
 	}()
