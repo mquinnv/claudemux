@@ -164,8 +164,12 @@ func bgAssertFixtureRegisters(t *testing.T, fixture, wantID string) {
 
 // --- launches: the harness's own record --------------------------------------
 
-// The two originally captured launches, one per kind. Both are verbatim
-// transcript lines from a claudemux session.
+// The two originally captured launches, one per kind, from claudemux's own
+// traffic (not an employer transcript, unlike the three recovered fixtures
+// below — see testdata/README.md). DERIVED from real transcript lines the
+// same way: harness structure, wording, field names, ids and key order
+// untouched; cwd, git branch, doc/session-scoped paths, and every
+// session/message/request identifier replaced with neutral placeholders.
 func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	tests := []struct {
 		fixture string
