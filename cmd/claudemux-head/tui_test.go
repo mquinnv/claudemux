@@ -3328,6 +3328,79 @@ func TestSwitchSessionResetsBackgroundWork(t *testing.T) {
 	}
 }
 
+// bgSeedTranscript writes a minimal transcript whose tail is: a background
+// shell launch, then an assistant text turn (so classifyState lands on Idle
+// and only the tracker can upgrade it to Background).
+func bgSeedTranscript(t *testing.T, dir, id string, at time.Time) string {
+	t.Helper()
+	ts := at.UTC().Format(time.RFC3339)
+	use := "toolu_" + id
+	lines := []string{
+		bgToolUseLine(t, use, "Bash", ts, map[string]any{
+			"command": "sleep 300", "run_in_background": true,
+		}),
+		bgResultLine(t, use, "Command running in background with ID: "+id, ts, bgShellResult(id)),
+		bgMarshalLine(t, map[string]any{
+			"type": "assistant", "timestamp": ts,
+			"message": map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "text", "text": "launched, waiting"},
+			}},
+		}),
+	}
+	path := filepath.Join(dir, "seedsess.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A launch already on disk when the head starts must count: heads restart
+// and sessions rotate while work is out, and an unseeded tracker calls the
+// session Idle — sending the conductor into a busy session.
+func TestNewModelSeedsBgTracker(t *testing.T) {
+	path := bgSeedTranscript(t, t.TempDir(), "seedaaa", time.Now().Add(-2*time.Minute))
+	m := newModel(Config{}, path, "seedsess", false)
+	if m.state.Kind != StateBackground {
+		t.Errorf("state = %v (%s), want StateBackground: seeded launches must count",
+			m.state.Kind, m.state.Label())
+	}
+}
+
+func TestSwitchSessionSeedsBgTracker(t *testing.T) {
+	dir := t.TempDir()
+	first := bgSeedTranscript(t, dir, "seedbbb", time.Now().Add(-2*time.Minute))
+	m := newModel(Config{}, first, "seedsess", true)
+	next := filepath.Join(dir, "rotated.jsonl")
+	// Reuse the same fixture shape under the rotated path.
+	data, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(next, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.switchSession(next, time.Now())
+	if m.state.Kind != StateBackground {
+		t.Errorf("state after rotation = %v, want StateBackground", m.state.Kind)
+	}
+}
+
+// The tracker must consult the ROTATED session's subagents dir, not the old
+// one's — otherwise agent liveness stats the wrong directory forever.
+func TestSwitchSessionRetargetsSubagentsDir(t *testing.T) {
+	dir := t.TempDir()
+	first := bgSeedTranscript(t, dir, "seedccc", time.Now().Add(-2*time.Minute))
+	m := newModel(Config{}, first, "seedsess", true)
+	next := filepath.Join(dir, "rotated.jsonl")
+	if err := os.WriteFile(next, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.switchSession(next, time.Now())
+	if want := subagentsDirFor(next); m.bg.subagentsDir != want {
+		t.Errorf("subagentsDir = %q, want %q", m.bg.subagentsDir, want)
+	}
+}
+
 // The trigger wiring, not just the predicate: TestModelBackgroundStateFromPoll
 // calls bg.observe and recomputeFromEvents directly, so it would still pass if
 // the dataMsg case fed observe the wrong slice or the observe call moved after

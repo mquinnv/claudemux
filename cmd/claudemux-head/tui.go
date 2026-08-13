@@ -376,6 +376,15 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.mainCheckout = mainCheckoutFor(wd)
 	}
 	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
+	// The tracker starts from what the transcript already shows: heads
+	// restart and rotate while background work is out, and an unseeded
+	// tracker would call such a session Idle — the conductor then escorts
+	// the user into a session that is busy. Replaying the seed is sound:
+	// completions always postdate their launches, so any launch inside the
+	// end-anchored seed window has its completion inside it too (or still
+	// pending), and expiry drops anything genuinely stale.
+	m.bg.subagentsDir = subagentsDirFor(jsonlPath)
+	m.bg.observe(seeded, time.Now())
 	m.recomputeFromEvents(time.Now())
 	return m
 }
@@ -498,6 +507,10 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// warns against.
 	m.summary = Summary{}
 	m.bg = newBgTracker()
+	// Same seeding rationale as newModel: the rotated-to session may have
+	// work out that only its transcript knows about.
+	m.bg.subagentsDir = subagentsDirFor(jsonlPath)
+	m.bg.observe(seeded, now)
 	m.worktreeTab = ""
 	m.sawNonWorktreeCwd = false
 	m.tabHaikuWins = false
