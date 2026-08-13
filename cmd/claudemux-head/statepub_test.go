@@ -20,6 +20,7 @@ func TestStatePublishValue(t *testing.T) {
 		{"awaiting", State{Kind: StateAwaiting}, "Awaiting"},
 		{"error", State{Kind: StateError}, "Error"},
 		{"compacting", State{Kind: StateCompacting}, "Compacting"},
+		{"waiting", State{Kind: StateWaiting}, "Starting"},
 		{"unknown", State{Kind: StateKind(99)}, ""},
 	}
 	for _, c := range cases {
@@ -39,6 +40,15 @@ func TestStatePublishValueBackground(t *testing.T) {
 	// what keeps switchboard.go unchanged.
 	if isWaiting(got) {
 		t.Error("a session with background work must not count as waiting")
+	}
+}
+
+// A head waiting for its project's first transcript publishes "Starting". The
+// conductor must never escort a human into it — the claude pane is still
+// booting and can't take input — so the value must stay out of isWaiting's set.
+func TestStatePublishValueWaitingIsNotEscortable(t *testing.T) {
+	if isWaiting(statePublishValue(State{Kind: StateWaiting})) {
+		t.Error("a booting session must not count as waiting on the human")
 	}
 }
 

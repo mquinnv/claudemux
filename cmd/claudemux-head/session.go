@@ -109,6 +109,18 @@ func discoverSessionsFromJSONL(projectDir string) (string, error) {
 	return strings.TrimSuffix(filepath.Base(path), ".jsonl"), nil
 }
 
+// waitingTranscript is the placeholder path a head binds to when its project
+// has no transcript yet — a brand-new project, where claudemux launches the
+// head and the claude pane in the same second and Claude Code only creates its
+// .jsonl after it finishes booting. The file never exists; it anchors the
+// follow-active scan to the right project dir (pollData globs the placeholder's
+// dir) so the first real transcript differs from it and rotation adopts it.
+// The bound model carries sessionID "" — the waiting-mode marker
+// recomputeFromEvents keys StateWaiting on.
+func waitingTranscript(projectDir string) string {
+	return filepath.Join(projectDir, "waiting-for-first-session.jsonl")
+}
+
 func resolveSession(claudeProjectsDir string, cwd string, explicitSession string) (string, error) {
 	if explicitSession != "" {
 		return explicitSession, nil
