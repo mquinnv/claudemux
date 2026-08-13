@@ -257,6 +257,20 @@ func swSwitchCmd(client, target string) tea.Cmd {
 	}
 }
 
+// swSwitchLastCmd sends a client back to its last session — tmux's own
+// per-client "last session", which is wherever the client was before it landed
+// on the lobby. Fire-and-forget like swSwitchCmd: a client with no last
+// session (attached straight to the lobby) makes tmux refuse, and the lobby
+// simply stays put.
+func swSwitchLastCmd(client string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-l").Run()
+		return nil
+	}
+}
+
 func swNextTick() tea.Cmd {
 	return tea.Tick(swPollInterval, func(t time.Time) tea.Msg { return swTickMsg(t) })
 }
@@ -423,6 +437,13 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// next poll and pauses — no special bookkeeping here.
 			if m.sel < len(m.snap.Sessions) && m.cond.client != "" {
 				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name)
+			}
+		case "esc":
+			// Back out of the lobby to wherever the client came from. Same
+			// conductor story as enter: the client moves, the next poll sees
+			// it, and the conductor pauses.
+			if m.cond.client != "" {
+				return m, swSwitchLastCmd(m.cond.client)
 			}
 		}
 	}
@@ -673,7 +694,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · n new · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}

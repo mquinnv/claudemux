@@ -206,6 +206,20 @@ func TestSwModelEnterSwitchesToSelection(t *testing.T) {
 	}
 }
 
+func TestSwModelEscReturnsToLastSession(t *testing.T) {
+	m := swTestModel()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Error("esc with a client must produce a switch-back cmd")
+	}
+	m.cond.client = ""
+	m.snap.Clients = map[string]string{}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("esc without a client must be a no-op")
+	}
+}
+
 func TestSwModelQuits(t *testing.T) {
 	m := swTestModel()
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})

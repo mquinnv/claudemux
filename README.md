@@ -95,7 +95,8 @@ carried away mid-keystroke isn't a thing. Under the hood this uses
 attaching.
 
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
-jumps to a session (and pauses conducting), `n` starts a new session, `q`
+jumps to a session (and pauses conducting), `Esc` returns to the session you
+came from (tmux's per-client last session), `n` starts a new session, `q`
 quits.
 
 ## Install
