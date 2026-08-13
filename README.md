@@ -184,6 +184,13 @@ exactly the wrong verdict for the one session that most needs your attention. Wi
 hook, the head shows **Asking**, and the switchboard marks the session as waiting (dot,
 highlight, auto-escort) just like an idle one.
 
+Two caveats. An Esc'd question can keep reading as **Asking** until you send the next
+prompt — nothing flushes to the transcript on Esc, so there's no signal available to clear
+the marker any sooner; this is inherent to what Claude Code exposes, not a bug in the
+hook. And a session that was already running when this hook was installed or upgraded
+won't pick it up until its next start — hooks are snapshotted at session startup, so a
+live session keeps running whatever it started with.
+
 `claudemux-head hook ensure` installs and repairs all three scripts together.
 
 ## Configuration

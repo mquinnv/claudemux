@@ -14,24 +14,45 @@
 # ignores markers older than the transcript's newest conversation event, so a
 # marker this script failed to remove cannot wedge the state.
 #
+# hook.go registers PreToolUse/PostToolUse with a matcher on AskUserQuestion,
+# so this process only spawns for that tool to begin with; the tool-name
+# check below is defense in depth (e.g. a hand-edited settings.json), not the
+# primary filter.
+#
 # MUST stay silent on stdout: UserPromptSubmit stdout is injected into the
 # model's context.
 set -euo pipefail
+
+# No sibling pane can be reading this session's marker outside tmux — same
+# reasoning, and same line position, as claudemux-map.sh.
+[ -n "${TMUX_PANE:-}" ] || exit 0
 
 dir="$HOME/.claude/claudemux/asking"
 
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-session_id="$(printf '%s' "$payload" | jq -r '.session_id | strings' 2>/dev/null || true)"
+# One jq call instead of three: this hook still runs on every AskUserQuestion
+# PreToolUse/PostToolUse plus every UserPromptSubmit, and each invocation was
+# a separate process spawn. `|| true` covers both "not valid JSON" and "jq is
+# not on PATH" — either way $fields comes back empty and every check below
+# exits 0 without acting.
+#
+# Joined with \x1f (ASCII unit separator), not @tsv/tab: tool_name is absent
+# on UserPromptSubmit, so the middle field is empty, and `read` with IFS set
+# to a whitespace character (tab, like space and newline) collapses adjacent
+# delimiters and eats that empty field — event="UserPromptSubmit",
+# tool="sess-1", session_id="" instead of the intended split. \x1f is not
+# IFS whitespace, so empty fields survive.
+fields="$(printf '%s' "$payload" | jq -r '[.hook_event_name // "", .tool_name // "", .session_id // ""] | join("\u001f")' 2>/dev/null || true)"
+[ -n "$fields" ] || exit 0
+IFS=$'\x1f' read -r event tool session_id <<<"$fields"
+
 [ -n "$session_id" ] || exit 0
 # session_id becomes a filename; refuse anything that could escape the dir.
 case "$session_id" in
 */* | .*) exit 0 ;;
 esac
-
-event="$(printf '%s' "$payload" | jq -r '.hook_event_name | strings' 2>/dev/null || true)"
-tool="$(printf '%s' "$payload" | jq -r '.tool_name | strings' 2>/dev/null || true)"
 
 f="$dir/$session_id.json"
 
@@ -40,7 +61,9 @@ PreToolUse)
     [ "$tool" = "AskUserQuestion" ] || exit 0
     mkdir -p "$dir"
     tmp="$f.tmp.$$"
-    printf '%s\n' "{\"session_id\":\"$session_id\"}" > "$tmp"
+    # jq -n instead of string interpolation: a session_id containing a quote
+    # or backslash would otherwise land in the file as invalid JSON.
+    jq -n --arg sid "$session_id" '{session_id: $sid}' > "$tmp"
     mv "$tmp" "$f"
     ;;
 PostToolUse)

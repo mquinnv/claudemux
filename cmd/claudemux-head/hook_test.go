@@ -74,6 +74,35 @@ func hookCommands(t *testing.T, settings map[string]any, event string) []string 
 	return out
 }
 
+// hookGroupMatcher returns the "matcher" value of the group on event that
+// contains command, and whether the group had a "matcher" key at all —
+// callers need that distinction to catch a stray `"matcher": ""`, which must
+// never be written (an absent key and an empty string are not the same thing
+// to Claude Code).
+func hookGroupMatcher(t *testing.T, settings map[string]any, event, command string) (matcher string, hasKey bool) {
+	t.Helper()
+	hooks, _ := settings["hooks"].(map[string]any)
+	groups, _ := hooks[event].([]any)
+	for _, g := range groups {
+		gm, _ := g.(map[string]any)
+		inner, _ := gm["hooks"].([]any)
+		for _, h := range inner {
+			hm, _ := h.(map[string]any)
+			if c, _ := hm["command"].(string); c != command {
+				continue
+			}
+			m, ok := gm["matcher"]
+			if !ok {
+				return "", false
+			}
+			ms, _ := m.(string)
+			return ms, true
+		}
+	}
+	t.Fatalf("no group on event %q contains command %q", event, command)
+	return "", false
+}
+
 func TestHookEnsureFreshInstall(t *testing.T) {
 	p := writeSettings(t, "") // no settings.json at all
 	script := stubScript(t)
@@ -381,6 +410,21 @@ func TestHookEnsureRegistersAllScripts(t *testing.T) {
 		cmds := hookCommands(t, settings, event)
 		if len(cmds) != 1 || filepath.Base(cmds[0]) != "claudemux-ask.sh" {
 			t.Errorf("%s = %v, want only claudemux-ask.sh", event, cmds)
+		}
+		// Without a matcher this hook would run on every tool call of every
+		// session, spawning bash+jq twice per call just to exit at the
+		// tool-name check.
+		matcher, hasKey := hookGroupMatcher(t, settings, event, cmds[0])
+		if !hasKey || matcher != "AskUserQuestion" {
+			t.Errorf("%s claudemux-ask.sh matcher = %q (present=%v), want \"AskUserQuestion\"", event, matcher, hasKey)
+		}
+	}
+
+	// UserPromptSubmit is not a tool-call event: none of the three scripts'
+	// entries there may carry a matcher key, empty or otherwise.
+	for _, c := range ups {
+		if matcher, hasKey := hookGroupMatcher(t, settings, "UserPromptSubmit", c); hasKey {
+			t.Errorf("UserPromptSubmit %s has matcher %q, want no matcher key at all", filepath.Base(c), matcher)
 		}
 	}
 }

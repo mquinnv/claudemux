@@ -12,11 +12,20 @@ import (
 	"time"
 )
 
+// hookEvent is one Claude Code event a script registers on, with an optional
+// matcher restricting which tool calls trigger it. An empty matcher means
+// "every invocation of this event" — the only mode the other two scripts
+// need, since neither is tool-specific.
+type hookEvent struct {
+	event   string
+	matcher string
+}
+
 // hookScript is one script this tool installs and the Claude Code events it
 // registers on.
 type hookScript struct {
 	name   string
-	events []string
+	events []hookEvent
 }
 
 // hookScripts are every script claudemux installs.
@@ -31,14 +40,23 @@ type hookScript struct {
 // UserPromptSubmit ONLY: at SessionStart there is no prompt yet, so there is
 // nothing to name a worktree after — which is the entire problem it exists to
 // fix.
+//
 // claudemux-ask.sh tracks pending AskUserQuestion calls. It needs all three
 // events: PreToolUse to set the marker, PostToolUse to clear it on answer,
 // and UserPromptSubmit to clear it when a question was Esc'd (no PostToolUse
-// ever fires for those).
+// ever fires for those). PreToolUse and PostToolUse carry a matcher: without
+// one, Claude Code runs this hook on EVERY tool call of EVERY session on the
+// machine, blocking each PreToolUse call on a bash+jq spawn just to discover
+// the tool isn't AskUserQuestion. UserPromptSubmit has no matcher — matchers
+// only apply to tool-call events.
 var hookScripts = []hookScript{
-	{name: "claudemux-map.sh", events: []string{"SessionStart", "UserPromptSubmit"}},
-	{name: "claudemux-worktree.sh", events: []string{"UserPromptSubmit"}},
-	{name: "claudemux-ask.sh", events: []string{"PreToolUse", "PostToolUse", "UserPromptSubmit"}},
+	{name: "claudemux-map.sh", events: []hookEvent{{event: "SessionStart"}, {event: "UserPromptSubmit"}}},
+	{name: "claudemux-worktree.sh", events: []hookEvent{{event: "UserPromptSubmit"}}},
+	{name: "claudemux-ask.sh", events: []hookEvent{
+		{event: "PreToolUse", matcher: "AskUserQuestion"},
+		{event: "PostToolUse", matcher: "AskUserQuestion"},
+		{event: "UserPromptSubmit"},
+	}},
 }
 
 // hookScriptName is the pane-map script's filename, which `--script` overrides.
@@ -200,25 +218,33 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 // It walks the generic map rather than a typed struct so that every key we do
 // not model — the user's permissions, model, statusLine, other tools' hooks —
 // round-trips untouched.
-func addHookEntries(settings map[string]any, command string, events []string) bool {
+func addHookEntries(settings map[string]any, command string, events []hookEvent) bool {
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
 
 	changed := false
-	for _, event := range events {
-		groups, _ := hooks[event].([]any)
+	for _, he := range events {
+		groups, _ := hooks[he.event].([]any)
 		if hasHookCommand(groups, command) {
 			continue
 		}
-		// Append; never replace. Another tool's hook on this event must survive.
-		groups = append(groups, map[string]any{
+		group := map[string]any{
 			"hooks": []any{
 				map[string]any{"type": "command", "command": command},
 			},
-		})
-		hooks[event] = groups
+		}
+		// Omit the key entirely rather than writing "matcher": "" — Claude
+		// Code's schema treats an empty string differently from an absent
+		// key in some versions, and an absent key is what every hook this
+		// tool shipped before claudemux-ask.sh has always produced.
+		if he.matcher != "" {
+			group["matcher"] = he.matcher
+		}
+		// Append; never replace. Another tool's hook on this event must survive.
+		groups = append(groups, group)
+		hooks[he.event] = groups
 		changed = true
 	}
 

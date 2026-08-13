@@ -60,10 +60,10 @@ siblings: `claudemux-head`, `claudemux`, `project-color-resolve.sh`,
 This matters more than a typical packaging omission: `claudemux-head hook
 ensure` resolves and validates every shipped script's source path **before
 copying any of them** (see `cmd/claudemux-head/hook.go`). One missing
-sibling — e.g. a formula that lists only four files — doesn't just fail to
-install the new script; it fails the entire hook-registration pass, so the
-already-working `claudemux-map.sh` pane-map hook is silently lost too. A
-formula that ships four files when five are needed is not "missing one
+sibling — e.g. a formula that lists all but one of the files — doesn't just
+fail to install the new script; it fails the entire hook-registration pass,
+so the already-working `claudemux-map.sh` pane-map hook is silently lost too.
+A formula that ships all but one of the files it needs is not "missing one
 feature" — it is "hook registration is a total, silent no-op for every
 Homebrew user."
 
