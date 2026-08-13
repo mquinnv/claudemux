@@ -32,6 +32,7 @@ const (
 	swAgeColW   = 6  // widest formatDuration output in practice ("23h59m")
 	swCtxBarW   = 5
 	swCtxColW   = swCtxBarW + 5 // bar + " 100%"
+	swModelColW = 13            // widest shortModel output ("sonnet 4.5 1M")
 )
 
 // swPad right-pads s to w display cells, measuring with lipgloss so ANSI
@@ -167,7 +168,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		rl, rlErr := readRateLimits(rlPath)
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}")
+			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -551,6 +552,12 @@ func (m swModel) View() string {
 		if sess.Topic != "" {
 			topic = "  " + swUnknownStyle.Render(sess.Topic)
 		}
+		// Unset model (pre-publish head) renders a blank cell of the same
+		// width, like context: the topics after it must not shift.
+		modelTxt := ""
+		if sess.Model != "" {
+			modelTxt = shortModel(sess.Model)
+		}
 		// The name cell is padded before styling so the selection highlight
 		// covers the whole column, not just the name's own runes. Truncated
 		// by display width (not rune count) for the same reason as swCell: a
@@ -560,10 +567,11 @@ func (m swModel) View() string {
 		if i == m.sel {
 			name = swSelStyle.Render(name)
 		}
-		line := fmt.Sprintf(" %s%s %s%s  %s%s", marker, name,
+		line := fmt.Sprintf(" %s%s %s%s  %s %s%s", marker, name,
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),
-			swPad(ctx, swCtxColW), topic)
+			swPad(ctx, swCtxColW),
+			swCell(modelTxt, swModelColW, swUnknownStyle, false), topic)
 		if m.width > 0 {
 			line = clipLine(line, m.width)
 		}

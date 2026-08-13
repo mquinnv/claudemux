@@ -8,11 +8,11 @@ import (
 // Raw tmux outputs as the switchboard's three -F formats produce them.
 // An unset user option renders as an empty field.
 const (
-	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\n" +
-		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\n" +
-		"scratch\t\t\t\t\t\n" +
-		"switchboard\t\t\t\t\t\n" +
-		"plain\t\t\t\t\t\n"
+	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\n" +
+		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\n" +
+		"scratch\t\t\t\t\t\t\n" +
+		"switchboard\t\t\t\t\t\t\n" +
+		"plain\t\t\t\t\t\t\n"
 	swPaneOut = "api\t%1\tclaudemux-head\tbuild fixes\n" +
 		"api\t%2\tclaude\tbuild fixes\n" +
 		"web\t%5\tclaudemux-head\tcolor picker\n" +
@@ -38,6 +38,9 @@ func TestBuildSwSnapshot(t *testing.T) {
 	if api.Context != 37 || api.Topic != "build fixes" || api.Summary != "fixing the build" || api.Prompt != "run the tests" {
 		t.Errorf("api info fields = %+v", api)
 	}
+	if api.Model != "claude-opus-4-7" {
+		t.Errorf("api.Model = %q, want claude-opus-4-7", api.Model)
+	}
 	web, _ := s.session("web")
 	if web.State != "Tool:AskUserQuestion" {
 		t.Errorf("web.State = %q", web.State)
@@ -49,7 +52,7 @@ func TestBuildSwSnapshot(t *testing.T) {
 	if scratch.Context != -1 {
 		t.Errorf("unset context must parse to -1, got %d", scratch.Context)
 	}
-	if scratch.Topic != "" || scratch.Summary != "" || scratch.Prompt != "" {
+	if scratch.Topic != "" || scratch.Summary != "" || scratch.Prompt != "" || scratch.Model != "" {
 		t.Errorf("unset info fields must be empty, got %+v", scratch)
 	}
 	if s.Clients["/dev/ttys001"] != "switchboard" || s.Clients["/dev/ttys002"] != "plain" {
@@ -73,10 +76,14 @@ func TestBuildSwSnapshotMalformedLines(t *testing.T) {
 	if len(s.Sessions) != 0 || len(s.Clients) != 0 {
 		t.Errorf("malformed lines must be skipped, got %+v", s)
 	}
-	// Old-format (3-field) session and pane lines must be skipped
+	// Old-format (3- and 6-field) session and pane lines must be skipped
 	oldFmt := buildSwSnapshot("api\tIdle\t1754700000\n", "api\t%1\tclaudemux-head\n", "", "%9")
 	if len(oldFmt.Sessions) != 0 {
 		t.Errorf("old-format lines must be skipped, got %+v", oldFmt.Sessions)
+	}
+	sixField := buildSwSnapshot("api\tIdle\t1754700000\t37\tsum\tprompt\n", "api\t%1\tclaudemux-head\tt\n", "", "%9")
+	if len(sixField.Sessions) != 0 {
+		t.Errorf("pre-model 6-field lines must be skipped, got %+v", sixField.Sessions)
 	}
 }
 
@@ -103,8 +110,8 @@ func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
 		"api\t%3\tclaude\ttopic\n" +
 		"shim\t%4\tclaudemux-head\ttopic\n" +
 		"shim\t%5\tnode\ttopic\n"
-	sessOut := "api\tIdle\t1754700000\t37\t\t\n" +
-		"shim\tIdle\t1754700000\t37\t\t\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\n" +
+		"shim\tIdle\t1754700000\t37\t\t\t\n"
 	s := buildSwSnapshot(sessOut, paneOut, swClientOut, "")
 	api, _ := s.session("api")
 	if api.ClaudePane != "%3" {

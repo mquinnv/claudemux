@@ -122,11 +122,15 @@ func TestMaybePublishInfo(t *testing.T) {
 	m.contextPct = 41.7
 	m.summary = Summary{Now: "doing things"}
 	m.lastTyped = "/done"
-	if got := len(m.maybePublishInfo()); got != 3 {
-		t.Fatalf("first publish: %d cmds, want 3", got)
+	m.modelName = "claude-opus-4-7"
+	if got := len(m.maybePublishInfo()); got != 4 {
+		t.Fatalf("first publish: %d cmds, want 4", got)
 	}
 	if m.publishedContext != 41 || m.publishedSummary != "doing things" || m.publishedPrompt != "/done" {
 		t.Errorf("guards not updated: %d %q %q", m.publishedContext, m.publishedSummary, m.publishedPrompt)
+	}
+	if m.publishedModel != "claude-opus-4-7" {
+		t.Errorf("publishedModel = %q, want claude-opus-4-7", m.publishedModel)
 	}
 	if got := len(m.maybePublishInfo()); got != 0 {
 		t.Errorf("unchanged: %d cmds, want 0", got)

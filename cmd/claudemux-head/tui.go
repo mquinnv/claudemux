@@ -115,12 +115,13 @@ type model struct {
 	// not per tick.
 	publishedState string
 
-	// publishedContext/-Summary/-Prompt are the last-published info option
-	// values (context as integer percent; -1 = never published, since 0 is a
-	// legal percent). Same publish-on-change contract as publishedState.
+	// publishedContext/-Summary/-Prompt/-Model are the last-published info
+	// option values (context as integer percent; -1 = never published, since 0
+	// is a legal percent). Same publish-on-change contract as publishedState.
 	publishedContext int
 	publishedSummary string
 	publishedPrompt  string
+	publishedModel   string
 
 	// sessionCwd is the latest cwd the *main* session recorded in its
 	// transcript (last non-sidechain entry's cwd), recomputed from the event
