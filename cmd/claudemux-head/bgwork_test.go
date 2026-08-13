@@ -115,6 +115,40 @@ func bgShellLaunch(t *testing.T, id, ts string) []Event {
 	)
 }
 
+// bgAgentResult is the harness record on an async agent launch's tool_result.
+func bgAgentResult(id string) map[string]any {
+	return map[string]any{"isAsync": true, "agentId": id}
+}
+
+// bgAgentLaunch is one complete async-agent launch: the Agent tool_use, then
+// its acknowledgement carrying the harness's isAsync/agentId record.
+func bgAgentLaunch(t *testing.T, id, ts string) []Event {
+	t.Helper()
+	use := "toolu_" + id
+	return bgParse(t,
+		bgToolUseLine(t, use, "Agent", ts, map[string]any{
+			"description": "test agent", "prompt": "do things",
+		}),
+		bgResultLine(t, use, "Async agent launched: "+id, ts, bgAgentResult(id)),
+	)
+}
+
+// bgTouchAgentFile creates/updates the agent's transcript in dir with the
+// given mtime, creating the subagents layout the way Claude Code does.
+func bgTouchAgentFile(t *testing.T, dir, id string, mtime time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "agent-"+id+".jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func bgDoneEvent(id string) Event {
 	return Event{Type: "queue-operation", QueueText: "<task-notification>\n<task-id>" + id + "</task-id>\n<status>completed</status>"}
 }
@@ -667,5 +701,81 @@ func TestBgTrackerSameIDLaunchedTwice(t *testing.T) {
 	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:05:00Z"), now)
 	if n, _ := b.outstanding(now); n != 1 {
 		t.Errorf("outstanding = %d, want 1: relaunching the same id must not double-count", n)
+	}
+}
+
+// A running agent's transcript keeps advancing; while it does, the launch
+// must keep counting far past the old 30-minute cliff.
+func TestBgAgentAliveFilePastOldCap(t *testing.T) {
+	launch := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	now := launch.Add(2 * time.Hour)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agentaaa", "2026-08-13T10:00:00Z"), launch)
+	bgTouchAgentFile(t, b.subagentsDir, "agentaaa", now.Add(-1*time.Minute))
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: a live agent must count past 30m", n)
+	}
+}
+
+// An agent whose transcript stopped advancing died without notifying; it must
+// stop counting after the stall threshold so the session isn't hidden forever.
+func TestBgAgentStalledFileExpires(t *testing.T) {
+	launch := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	now := launch.Add(2 * time.Hour)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agentbbb", "2026-08-13T10:00:00Z"), launch)
+	bgTouchAgentFile(t, b.subagentsDir, "agentbbb", now.Add(-bgAgentStallAge-time.Minute))
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: a stalled agent transcript means the agent is gone", n)
+	}
+}
+
+// No transcript file yet: normal for a just-spawned agent (grace), stale for
+// anything older — a seeded pre-restart launch whose agent is long gone.
+func TestBgAgentMissingFileGraceThenDrop(t *testing.T) {
+	launch := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agentccc", "2026-08-13T10:00:00Z"), launch)
+	if n, _ := b.outstanding(launch.Add(1 * time.Minute)); n != 1 {
+		t.Errorf("within spawn grace: outstanding = %d, want 1", n)
+	}
+	if n, _ := b.outstanding(launch.Add(bgAgentSpawnGrace + time.Minute)); n != 0 {
+		t.Errorf("past spawn grace with no file: outstanding = %d, want 0", n)
+	}
+}
+
+// With no subagentsDir configured there is no liveness source; agents must
+// fall back to the shell cap rather than counting forever.
+func TestBgAgentNoLivenessDirFallsBackToShellCap(t *testing.T) {
+	launch := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe(bgAgentLaunch(t, "agentddd", "2026-08-13T10:00:00Z"), launch)
+	if n, _ := b.outstanding(launch.Add(bgShellMaxAge + time.Minute)); n != 0 {
+		t.Errorf("outstanding = %d, want 0: no liveness dir means the old cap applies", n)
+	}
+}
+
+// The hard cap backstops a file that keeps advancing forever (e.g. a wedged
+// agent looping): even alive-looking agents stop counting after bgAgentMaxAge.
+func TestBgAgentHardCap(t *testing.T) {
+	launch := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
+	now := launch.Add(bgAgentMaxAge + time.Hour)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agenteee", "2026-08-12T10:00:00Z"), launch)
+	bgTouchAgentFile(t, b.subagentsDir, "agenteee", now.Add(-1*time.Minute))
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: the hard cap must win over liveness", n)
+	}
+}
+
+func TestSubagentsDirFor(t *testing.T) {
+	got := subagentsDirFor("/home/u/.claude/projects/-p/abc-123.jsonl")
+	want := filepath.Join("/home/u/.claude/projects/-p", "abc-123", "subagents")
+	if got != want {
+		t.Errorf("subagentsDirFor = %q, want %q", got, want)
 	}
 }

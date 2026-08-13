@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -40,15 +42,23 @@ var bgTaskIDRe = regexp.MustCompile(`<task-id>([A-Za-z0-9]+)</task-id>`)
 // tasks that are still running.
 const bgNotificationPrefix = "<task-notification>"
 
-// bgLaunches returns the ids of background work this event started, as the
-// harness itself recorded them. An entry carries at most one.
-func bgLaunches(e Event) []string {
-	var ids []string
+// bgLaunch is one background launch as the harness recorded it: the id the
+// completion notification will carry back, and which kind of work it is —
+// the kinds expire differently (see the constants below).
+type bgLaunch struct {
+	ID    string
+	Agent bool
+}
+
+// bgLaunches returns the background work this event started. An entry
+// carries at most one.
+func bgLaunches(e Event) []bgLaunch {
+	var ids []bgLaunch
 	if e.BgTaskID != "" {
-		ids = append(ids, e.BgTaskID)
+		ids = append(ids, bgLaunch{ID: e.BgTaskID})
 	}
 	if e.BgAgentID != "" {
-		ids = append(ids, e.BgAgentID)
+		ids = append(ids, bgLaunch{ID: e.BgAgentID, Agent: true})
 	}
 	return ids
 }
@@ -71,33 +81,70 @@ func bgCompletions(e Event) []string {
 	return ids
 }
 
-// bgMaxAge is how long an unfinished launch keeps counting. A task that never
-// notifies — killed, crashed, or launched before a head restart — would
-// otherwise mark the session busy forever, and the conductor would never visit
-// it again: a worse bug than the one this fixes. Thirty minutes is longer than
-// any agent this has been observed to run and short enough to self-heal within
-// one sitting.
-const bgMaxAge = 30 * time.Minute
-
-// bgTracker holds the background tasks a session has launched and not yet seen
-// finish, keyed by task id and stamped with the launch time.
+// Expiry, per kind. A task that never notifies — killed, crashed, launched
+// before a head restart — must not mark the session busy forever: the
+// conductor would never visit it again, a worse bug than a stale count.
 //
-// Accumulated from each poll's NEW events rather than recomputed from the event
-// ring: allEvents is capped at 1000, so a busy session scrolls a long-running
-// task's launch out while it is still running, and a recompute would silently
-// call the session Idle again.
+// Async agents have ground truth on disk: the harness writes each agent's own
+// transcript at <transcript dir>/<session id>/subagents/agent-<id>.jsonl and
+// its mtime advances while the agent runs (longest observed gap between
+// writes is a single long tool call, bounded by Bash's 10-minute cap).
+// bgAgentStallAge past the last write means the agent is gone however it
+// died; bgAgentMaxAge backstops a wedged agent that keeps writing forever;
+// bgAgentSpawnGrace covers the moment between the launch record and the
+// file's creation. Fleet measurement 2026-08-13: real agents run hours (max
+// observed 11h), which is why a flat 30-minute cap cannot work for them.
+//
+// Background shells leave no per-task file, so they keep the flat cap. It
+// stays at 30 minutes deliberately: a backgrounded dev server runs (and
+// stays silent) indefinitely, and a longer cap would hide its session from
+// the conductor for the whole overrun.
+const (
+	bgShellMaxAge     = 30 * time.Minute
+	bgAgentMaxAge     = 24 * time.Hour
+	bgAgentStallAge   = 15 * time.Minute
+	bgAgentSpawnGrace = 2 * time.Minute
+)
+
+// bgTask is one tracked launch: when it started and which expiry regime
+// applies to it.
+type bgTask struct {
+	at    time.Time
+	agent bool
+}
+
+// bgTracker holds the background tasks a session has launched and not yet
+// seen finish, keyed by task id.
+//
+// Accumulated from observed events rather than recomputed from the event
+// ring: allEvents is capped, so a busy session scrolls a long-running task's
+// launch out while it is still running, and a recompute would silently call
+// the session Idle again.
 type bgTracker struct {
-	tasks map[string]time.Time
+	tasks map[string]bgTask
+	// subagentsDir is where this session's async agents write their own
+	// transcripts (see subagentsDirFor). Empty means no liveness source
+	// (tests, unexpected layout): agents then fall back to the shell cap
+	// rather than counting forever.
+	subagentsDir string
+}
+
+// subagentsDirFor maps a session transcript path to the directory holding
+// that session's per-agent transcripts, as Claude Code lays them out:
+// <dir>/<session id>/subagents/.
+func subagentsDirFor(jsonlPath string) string {
+	base := strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
+	return filepath.Join(filepath.Dir(jsonlPath), base, "subagents")
 }
 
 func newBgTracker() bgTracker {
-	return bgTracker{tasks: map[string]time.Time{}}
+	return bgTracker{tasks: map[string]bgTask{}}
 }
 
 // observe folds one batch of new events into the tracker.
 func (b *bgTracker) observe(events []Event, now time.Time) {
 	if b.tasks == nil {
-		b.tasks = map[string]time.Time{}
+		b.tasks = map[string]bgTask{}
 	}
 	for _, e := range events {
 		// A prompt the human actually typed retires everything: they are
@@ -105,32 +152,52 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 		// whether it needs them. genuinePrompt already rejects the delivered
 		// notification turns (their text opens with "<").
 		if genuinePrompt(e) {
-			b.tasks = map[string]time.Time{}
+			b.tasks = map[string]bgTask{}
 			continue
 		}
 		at := parseTimestampOr(e.Timestamp, now)
 		for _, id := range bgCompletions(e) {
 			delete(b.tasks, id)
 		}
-		for _, id := range bgLaunches(e) {
-			b.tasks[id] = at
+		for _, l := range bgLaunches(e) {
+			b.tasks[l.ID] = bgTask{at: at, agent: l.Agent}
 		}
 	}
 }
 
-// outstanding reports how many launches are still counting and when the oldest
-// of them started. Entries past bgMaxAge are dropped as they are found, so a
+// outstanding reports how many launches are still counting and when the
+// oldest of them started. Dead entries are dropped as they are found, so a
 // stale tracker heals itself without a separate sweep.
 func (b *bgTracker) outstanding(now time.Time) (int, time.Time) {
 	var oldest time.Time
-	for id, at := range b.tasks {
-		if now.Sub(at) > bgMaxAge {
+	for id, task := range b.tasks {
+		if !b.alive(id, task, now) {
 			delete(b.tasks, id)
 			continue
 		}
-		if oldest.IsZero() || at.Before(oldest) {
-			oldest = at
+		if oldest.IsZero() || task.at.Before(oldest) {
+			oldest = task.at
 		}
 	}
 	return len(b.tasks), oldest
+}
+
+// alive decides whether an unfinished launch still counts — see the expiry
+// constants for the regime rationale. The os.Stat here runs per outstanding
+// agent per poll (~1/s), a handful of stats at most.
+func (b *bgTracker) alive(id string, task bgTask, now time.Time) bool {
+	if !task.agent {
+		return now.Sub(task.at) <= bgShellMaxAge
+	}
+	if now.Sub(task.at) > bgAgentMaxAge {
+		return false
+	}
+	if b.subagentsDir == "" {
+		return now.Sub(task.at) <= bgShellMaxAge
+	}
+	fi, err := os.Stat(filepath.Join(b.subagentsDir, "agent-"+id+".jsonl"))
+	if err != nil {
+		return now.Sub(task.at) <= bgAgentSpawnGrace
+	}
+	return now.Sub(fi.ModTime()) <= bgAgentStallAge
 }

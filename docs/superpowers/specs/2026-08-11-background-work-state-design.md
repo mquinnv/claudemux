@@ -178,19 +178,43 @@ running. Recomputing would silently drop it and revert to `Idle`.
 
 ### Expiry
 
-Two rules, either of which clears an entry:
+**A genuine user prompt always clears the whole set.** If the human typed at that
+session, whatever it was tracking is moot. Reuses `genuinePrompt` (`tui.go:500`), which
+already filters meta notices and injected XML — including, usefully, the delivered
+`<task-notification>` turns themselves.
 
-1. **A genuine user prompt clears the whole set.** If the human typed at that session,
-   whatever it was tracking is moot. Reuses `genuinePrompt` (`tui.go:500`), which already
-   filters meta notices and injected XML — including, usefully, the delivered
-   `<task-notification>` turns themselves.
-2. **A launch older than 30 minutes stops counting.** Catches the session nobody types at
-   — exactly the ones the conductor exists to bring you to.
+Past that, expiry is **per kind**, because a flat cap cannot fit both kinds at once.
+Fleet measurement 2026-08-13, across real launches: 19 of 109 outstanding tasks ran past
+30 minutes, and the longest-running agent ran 11 hours. A cap short enough to self-heal a
+dead background shell in one sitting is far too short for a live agent, and a cap long
+enough for a live agent hides a dead shell's session from the conductor for most of a
+day.
 
-Without these, a task that never notifies (crashed, killed, head restarted mid-task)
+1. **Background shells keep the flat 30-minute cap.** They leave no per-task file to
+   check, so age since launch is the only signal there is. 30 minutes stays deliberately
+   short: a backgrounded dev server runs — and stays silent — indefinitely, and a longer
+   cap would hide its session from the conductor for the whole overrun.
+2. **Async agents expire by transcript liveness, not age.** The harness writes each
+   agent's own transcript at `<transcript dir>/<session id>/subagents/agent-<id>.jsonl`,
+   and its mtime advances while the agent runs (the longest observed gap between writes is
+   a single long tool call, bounded by Bash's 10-minute cap). An agent counts as alive
+   while all of the following hold:
+   - its transcript file's mtime is within `bgAgentStallAge` (15 minutes) of now — past
+     that, the agent is gone however it died, notification or not;
+   - if the file does not exist yet, the launch is within `bgAgentSpawnGrace` (2 minutes)
+     of now — the ordinary gap between the launch record and the harness creating the
+     file; anything older with still no file is a launch that predates a head restart, its
+     agent long gone;
+   - the launch is within `bgAgentMaxAge` (24 hours) of now regardless of liveness — a
+     backstop against a wedged agent that keeps writing forever.
+
+   With no `subagentsDir` configured (tests, or a layout the head doesn't recognize), an
+   agent falls back to the shell's flat cap rather than counting forever.
+
+Without expiry, a task that never notifies (crashed, killed, head restarted mid-task)
 would mark the session busy forever and the conductor would never visit it again —
-turning a cosmetic bug into an unreachable session. Worst case with them is 30 minutes of
-a wrong state that then self-heals.
+turning a cosmetic bug into an unreachable session. Worst case now is `bgAgentStallAge`
+(agents) or `bgShellMaxAge` (shells) of a wrong state that then self-heals.
 
 ### Session rotation
 
