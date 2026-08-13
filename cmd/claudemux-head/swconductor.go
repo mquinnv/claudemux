@@ -190,8 +190,19 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 // statusLine summarizes the conductor for the lobby's bottom row.
 func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	n := len(s.waitingQueue(c.snoozed, now))
+	// Counted live against the snapshot rather than len(c.snoozed): pruning
+	// only runs inside step(), which the lobby skips while standby is on, so
+	// the raw map size can be stale (TTL elapsed, or Since moved on) for a
+	// render or two. This keeps the suffix exactly matching what
+	// waitingQueue excluded at this instant.
 	suffix := ""
-	if z := len(c.snoozed); z > 0 {
+	z := 0
+	for _, sess := range s.Sessions {
+		if c.isSnoozed(sess, now) {
+			z++
+		}
+	}
+	if z > 0 {
 		suffix = fmt.Sprintf(" · %d snoozed", z)
 	}
 	switch c.phase {

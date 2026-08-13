@@ -258,3 +258,16 @@ func TestStatusLineOmitsZeroSnoozed(t *testing.T) {
 		t.Errorf("statusLine = %q, want %q", got, want)
 	}
 }
+
+// The snoozed count must be computed live against the snapshot, not from
+// len(c.snoozed): pruning only runs inside step(), which standby skips, so a
+// stale (TTL-expired) map entry must not inflate the suffix.
+func TestStatusLineOmitsExpiredSnoozeFromCount(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.snoozed["a"] = swSnooze{since: time.Unix(100, 0), at: now.Add(-swSnoozeTTL - time.Minute)}
+	got := c.statusLine(snapAt("switchboard", waiting("a", 100)), now)
+	if want := "conducting · 1 waiting"; got != want {
+		t.Errorf("statusLine = %q, want %q (expired snooze must not count)", got, want)
+	}
+}
