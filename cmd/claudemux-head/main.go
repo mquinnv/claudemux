@@ -48,6 +48,11 @@ func main() {
 		os.Exit(runSwitchboard(os.Stderr))
 	}
 
+	// `banner` runs inside the switchboard's display-popup (see banner.go).
+	if len(os.Args) > 1 && os.Args[1] == "banner" {
+		os.Exit(runBanner(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	sessionFlag := flag.String("session", "", "Use a specific session ID instead of auto-detecting")
 	flag.Parse()
 

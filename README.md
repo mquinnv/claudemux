@@ -52,6 +52,11 @@ It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
 until it starts waiting again for a new reason.
 
+Every escorted arrival is announced: a small popup names the session you just
+landed in (`⇥ remix-2 · escorted by claudemux`) and closes after two seconds or
+on your first keypress, so a switch is never a silent teleport. Manual jumps
+(`Enter` on the lobby) skip the banner — you chose where you were going.
+
 The iTerm2 tab color follows you as you're carried between sessions — each
 session paints its project color, and sessions without one (the lobby included)
 reset the tab to the terminal default.

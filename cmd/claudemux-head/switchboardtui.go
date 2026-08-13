@@ -248,11 +248,25 @@ func swCreateCmd(query string) tea.Cmd {
 
 // swSwitchCmd moves a client. Fire-and-forget: if tmux refuses (client went
 // away mid-tick), the next poll sees reality and the conductor re-decides.
-func swSwitchCmd(client, target string) tea.Cmd {
+// With banner set, a successful switch is followed by the arrival popup on the
+// target session (see banner.go) — only successful, so a vanished client
+// doesn't get a banner announcing a move that never happened.
+func swSwitchCmd(client, target string, banner bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run()
+		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run(); err != nil || !banner {
+			return nil
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return nil
+		}
+		// The popup blocks for up to swBannerHold by design; give it its own
+		// timeout with headroom rather than sharing the switch's 2s budget.
+		bctx, bcancel := context.WithTimeout(context.Background(), swBannerHold+3*time.Second)
+		defer bcancel()
+		_ = exec.CommandContext(bctx, "tmux", swBannerPopupArgs(self, client, target)...).Run()
 		return nil
 	}
 }
@@ -326,7 +340,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pv := m.previewCmd()
 		if !m.standby && !m.creating && !m.createBusy {
 			if act, ok := m.cond.step(m.snap); ok {
-				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target), pv)
+				return m, tea.Batch(swNextTick(),
+					swSwitchCmd(act.Client, act.Target, swWantsBanner(act.Target, m.snap.Lobby)), pv)
 			}
 		}
 		return m, tea.Batch(swNextTick(), pv)
@@ -358,9 +373,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.createErr = ""
 		// Jump straight to the new session; the next poll adds it to the
 		// list. Same shape as an enter-jump: the conductor sees the client
-		// moved and pauses until the user returns to the lobby.
+		// moved and pauses until the user returns to the lobby — and like an
+		// enter-jump, no arrival banner: the user asked to go there.
 		if m.cond.client != "" {
-			return m, swSwitchCmd(m.cond.client, msg.name)
+			return m, swSwitchCmd(m.cond.client, msg.name, false)
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -434,9 +450,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			// A manual jump; the conductor notices the client moved on the
-			// next poll and pauses — no special bookkeeping here.
+			// next poll and pauses — no special bookkeeping here. No banner
+			// either: the user chose this destination themselves.
 			if m.sel < len(m.snap.Sessions) && m.cond.client != "" {
-				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name)
+				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name, false)
 			}
 		case "esc":
 			// Back out of the lobby to wherever the client came from. Same
