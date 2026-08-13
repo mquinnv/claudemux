@@ -1152,7 +1152,8 @@ func (m model) View() string {
 	// Pin the status block to the TOP of the pane: state and meters lead,
 	// prompt context follows as room allows. Below height 2 there's no room
 	// for a split state/meters view, so fall back to today's single packed
-	// statusbar (worktree chip included, truncated to 24 runes).
+	// statusbar (branch and worktree chips included, capped at
+	// packedChipCells display cells).
 	now := time.Now()
 	var lines []string
 	switch {
@@ -1310,9 +1311,7 @@ func (m model) statusChip(now time.Time) string {
 // worktree name, if non-empty) for the worktree half — capped to
 // packedChipCells display cells, since this packed layout has no real width
 // budget to hand chipSegment (the right-hand gauges are sized after this
-// point). Callers pass chip == "" once a prompt line is rendering the
-// worktree name instead (see View); the branch half still renders from
-// m.sessionBranch regardless.
+// point).
 func renderStatusbar(m model, now time.Time, chip string) string {
 	dot := stateDot(m.state.Kind)
 	durStr := "0:00"
@@ -1492,9 +1491,9 @@ func chipSegment(branch, worktree string, avail int) string {
 	case b == "" && w == "":
 		return ""
 	case w == "":
-		return fitChip(b, "", avail)
+		return fitChip(b, branchGlyph, "", avail)
 	case b == "":
-		return fitChip(w, worktreeGlyphBare, avail)
+		return fitChip(w, worktreeGlyph, worktreeGlyphBare, avail)
 	}
 
 	sepW := lipgloss.Width(chipSep)
@@ -1506,22 +1505,18 @@ func chipSegment(branch, worktree string, avail int) string {
 		return b + chipSep + w
 	}
 	// Rung 2: truncate the worktree name, so long as a real character of it
-	// survives. room must cover the glyph+space (bareW+1), one letter, and
-	// the ellipsis — room==bareW+2 fits only "glyph, space, ellipsis" with
-	// no name at all, which is worse than Rung 3's honest bare glyph.
-	if room := avail - bw - sepW; room > bareW+2 {
-		return b + chipSep + ansi.Truncate(w, room, "…")
+	// survives; otherwise fall through to Rung 3's honest bare glyph.
+	if t, ok := truncNamed(w, worktreeGlyph, avail-bw-sepW); ok {
+		return b + chipSep + t
 	}
 	// Rung 3: the worktree down to its bare glyph.
 	if bw+sepW+bareW <= avail {
 		return b + chipSep + worktreeGlyphBare
 	}
-	// Rung 4: truncate the branch, still keeping the worktree glyph. Same
-	// shape as Rung 2's guard: room must cover the branch glyph, one letter,
-	// and the ellipsis, or fall through to Rung 5 rather than emit a glyph
-	// plus an ellipsis with no branch name behind it.
-	if room := avail - sepW - bareW; room > lipgloss.Width(branchGlyph)+1 {
-		return ansi.Truncate(b, room, "…") + chipSep + worktreeGlyphBare
+	// Rung 4: truncate the branch, still keeping the worktree glyph — and, as
+	// in Rung 2, only if a real character of the branch name survives.
+	if t, ok := truncNamed(b, branchGlyph, avail-sepW-bareW); ok {
+		return t + chipSep + worktreeGlyphBare
 	}
 	// Rung 5: the worktree glyph alone.
 	if bareW <= avail {
@@ -1530,21 +1525,37 @@ func chipSegment(branch, worktree string, avail int) string {
 	return ""
 }
 
+// truncNamed fits chip (glyph + space + name) into room cells and reports
+// whether any character of the NAME survived. Measuring the truncated result
+// is the whole point: computing "will a character fit" from room alone is
+// rune-count logic in disguise, and a two-cell first character defeats it.
+// When it reports false the caller must degrade a rung rather than emit the
+// result, which would be a glyph plus an ellipsis claiming elided content that
+// never had room to exist.
+func truncNamed(chip, glyph string, room int) (string, bool) {
+	if room < 1 {
+		return "", false
+	}
+	if lipgloss.Width(chip) <= room {
+		return chip, true
+	}
+	t := ansi.Truncate(chip, room, "…")
+	return t, lipgloss.Width(t) > lipgloss.Width(glyph)+1
+}
+
 // fitChip renders a lone chip within avail. bare is what remains when not even
 // a truncated name fits — callers pass the worktree's glyph, which means
 // something on its own, and "" for the branch, whose glyph does not.
-func fitChip(chip, bare string, avail int) string {
-	if lipgloss.Width(chip) <= avail {
-		return chip
+func fitChip(chip, glyph, bare string, avail int) string {
+	if t, ok := truncNamed(chip, glyph, avail); ok {
+		return t
 	}
-	if bareW := lipgloss.Width(bare); bare != "" && avail <= bareW+1 {
-		if bareW <= avail {
-			return bare
-		}
-		return ""
-	}
-	if avail >= 2 {
-		return ansi.Truncate(chip, avail, "…")
+	// No character of the name survives, so fall back to bare. At avail == 2
+	// this leaves a cell unspent for the worktree, and that is correct, not an
+	// optimization waiting to happen: the only way to fill both cells is "⌂…",
+	// the very nameless-ellipsis form this ladder exists to prevent.
+	if lipgloss.Width(bare) <= avail {
+		return bare
 	}
 	return ""
 }
@@ -1764,10 +1775,11 @@ func (m model) observedWorktree() string {
 }
 
 // noWorktreeWarning is the exact text the spec requires the chip slot to
-// show when a marked session's first turn ends without a worktree. Unlike a
-// real worktree name, it is not prefixed with the "⎇ " branch glyph (a
-// branch glyph on a message about having NO worktree reads oddly), and
-// renderStatusbar/renderStateLine give it priority over being clipped —
+// show when a marked session's first turn ends without a worktree. It carries
+// its own "⚠" and takes no chip glyph — it is not a worktree name, so "⌂ "
+// would be a lie. The branch chip is unaffected and still renders beside it:
+// which branch a worktree-less session sits on is exactly what you need to
+// act. renderStatusbar/renderStateLine give the warning priority over clipping —
 // unlike a worktree name, it is not "merely descriptive": it is the entire
 // user-visible mitigation for the risk this design accepts.
 const noWorktreeWarning = "⚠ no worktree"

@@ -391,10 +391,17 @@ func TestRenderStateLineShowsFullWorktreeChip(t *testing.T) {
 
 // Only when the assembled state line doesn't fit does the chip truncate —
 // nothing else shrinks.
+//
+// The width is chosen to leave the chip slot real room. At width 30 the slot
+// works out to 3 cells, where the honest render is the bare "⌂": an ellipsis
+// there would be claiming elided content that never fit. Asserting only on
+// "…" at that width passed for the wrong reason, pinning the nameless-ellipsis
+// defect in place. Assert instead that a character of the NAME survived
+// alongside the ellipsis, which is what "truncated" is supposed to mean.
 func TestRenderStateLineTruncatesChipWhenNarrow(t *testing.T) {
 	name := strings.Repeat("x", 60)
 	m := model{
-		width:     30,
+		width:     40,
 		state:     State{Kind: StateIdle, Since: time.Now()},
 		modelName: "claude-opus-4-7",
 		jsonlPath: "/proj--claude-worktrees-" + name + "/abc.jsonl",
@@ -407,15 +414,27 @@ func TestRenderStateLineTruncatesChipWhenNarrow(t *testing.T) {
 	if !strings.Contains(got, "…") {
 		t.Errorf("renderStateLine = %q, want the truncated chip to contain an ellipsis", got)
 	}
+	if !strings.Contains(got, "⌂ x") {
+		t.Errorf("renderStateLine = %q, want part of the worktree name to survive the truncation", got)
+	}
+	if strings.Contains(got, "⌂ …") {
+		t.Errorf("renderStateLine = %q, want no glyph-plus-ellipsis with no name behind it", got)
+	}
 }
 
 // The "no worktree" warning is not a worktree name: it must render without
-// the "⎇ " branch glyph (which would read as "here is a branch" on a message
-// that means the opposite), and — unlike a real worktree name, which is
-// merely descriptive and re-derivable from the session — it must survive at
-// a width that would truncate away a same-length worktree chip, since it is
-// the entire user-visible mitigation for the design risk this session
-// carries.
+// the "⎇ " branch glyph in front of IT (which would read as "here is a branch"
+// on a message that means the opposite), and — unlike a real worktree name,
+// which is merely descriptive and re-derivable from the session — it must
+// survive at a width that would truncate away a same-length worktree chip,
+// since it is the entire user-visible mitigation for the design risk this
+// session carries.
+//
+// The fixture carries a branch on purpose. "⎇" appears nowhere in the line is
+// no longer the property under test — it only ever held because the fixture
+// had no branch, and it would now forbid the coexistence the spec requires
+// (warning in the never-shrunk left group, branch chip rendering beside it).
+// The real property is that the warning is not the thing the glyph prefixes.
 func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
 	warningModel := func(width int) model {
 		return model{
@@ -424,6 +443,7 @@ func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
 			modelName:       "claude-opus-4-7",
 			worktreePending: true,
 			firstPrompt:     "do the thing",
+			sessionBranch:   "main",
 			// jsonlPath deliberately NOT a worktree path, and sessionCwd unset:
 			// observedWorktree() must be "" so worktreeChip() falls through to
 			// the warning.
@@ -437,8 +457,11 @@ func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
 		if !strings.Contains(got, "⚠ no worktree") {
 			t.Fatalf("renderStateLine = %q, want it to contain the warning", got)
 		}
-		if strings.Contains(got, "⎇") {
-			t.Errorf("renderStateLine = %q, want no branch glyph on the warning", got)
+		if strings.Contains(got, branchGlyph+noWorktreeWarning) {
+			t.Errorf("renderStateLine = %q, want the warning not prefixed by the branch glyph", got)
+		}
+		if !strings.Contains(got, "⎇ main") {
+			t.Errorf("renderStateLine = %q, want the branch chip beside the warning", got)
 		}
 
 		// Narrow enough that even a short worktree chip would already be the
@@ -460,8 +483,11 @@ func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
 		if !strings.Contains(got, "⚠ no worktree") {
 			t.Fatalf("renderStatusbar = %q, want it to contain the warning", got)
 		}
-		if strings.Contains(got, "⎇") {
-			t.Errorf("renderStatusbar = %q, want no branch glyph on the warning", got)
+		if strings.Contains(got, branchGlyph+noWorktreeWarning) {
+			t.Errorf("renderStatusbar = %q, want the warning not prefixed by the branch glyph", got)
+		}
+		if !strings.Contains(got, "⎇ main") {
+			t.Errorf("renderStatusbar = %q, want the branch chip beside the warning", got)
 		}
 	})
 }
@@ -3389,15 +3415,167 @@ func TestChipSegmentSingleChips(t *testing.T) {
 	}
 }
 
-// Wide runes measure two cells each. Truncating by rune count would overrun
-// the budget — the regression this file has had twice.
+// The single-chip paths degrade too, and at widths a real pane reaches: a
+// plain checkout (branch, no worktree) narrows into the branch-only ladder,
+// and EVERY session takes the worktree-only path on its first poll after a
+// rotation, because switchSession clears sessionBranch. Exercising these only
+// at avail=40, where nothing degrades, is why a nameless "⎇…" shipped.
+//
+// The floor differs by chip, for the same reason the two-chip ladder's does:
+// a bare "⌂" still says "you are in a worktree", a bare "⎇" says nothing. A
+// glyph plus an ellipsis is never right — it claims elided content that never
+// had room to exist.
+func TestChipSegmentSingleChipLadders(t *testing.T) {
+	t.Run("branch only", func(t *testing.T) {
+		const b = "lobby-preview" // "⎇ lobby-preview" is 15 cells
+		tests := []struct {
+			avail int
+			want  string
+		}{
+			{40, "⎇ lobby-preview"},
+			{15, "⎇ lobby-preview"}, // exact fit, no ellipsis
+			{14, "⎇ lobby-previ…"},
+			{5, "⎇ lo…"},
+			{4, "⎇ l…"}, // last width holding one real character
+			{3, ""},     // "⎇ …" would be a nameless ellipsis
+			{2, ""},     // "⎇…" likewise
+			{1, ""},     // no bare branch glyph: it carries no information
+			{0, ""},
+		}
+		for _, tt := range tests {
+			got := chipSegment(b, "", tt.avail)
+			if got != tt.want {
+				t.Errorf("chipSegment(branch only, avail=%d) = %q, want %q", tt.avail, got, tt.want)
+			}
+			if lipgloss.Width(got) > tt.avail {
+				t.Errorf("chipSegment(branch only, avail=%d) = %q measures %d cells", tt.avail, got, lipgloss.Width(got))
+			}
+		}
+	})
+
+	t.Run("worktree only", func(t *testing.T) {
+		const w = "align-context-meters" // "⌂ align-context-meters" is 22 cells
+		tests := []struct {
+			avail int
+			want  string
+		}{
+			{40, "⌂ align-context-meters"},
+			{22, "⌂ align-context-meters"},
+			{21, "⌂ align-context-mete…"},
+			{5, "⌂ al…"},
+			{4, "⌂ a…"}, // last width holding one real character
+			{3, "⌂"},    // "⌂ …" degrades to the honest bare glyph
+			{2, "⌂"},    // the spare cell is deliberate; "⌂…" is the forbidden form
+			{1, "⌂"},
+			{0, ""},
+		}
+		for _, tt := range tests {
+			got := chipSegment("", w, tt.avail)
+			if got != tt.want {
+				t.Errorf("chipSegment(worktree only, avail=%d) = %q, want %q", tt.avail, got, tt.want)
+			}
+			if lipgloss.Width(got) > tt.avail {
+				t.Errorf("chipSegment(worktree only, avail=%d) = %q measures %d cells", tt.avail, got, lipgloss.Width(got))
+			}
+		}
+	})
+}
+
+// Wide runes measure two cells each, so "one more cell of room" does not mean
+// "one more character fits". Line width is NOT the property that breaks here —
+// it holds even with the rung guards computing survival from the remaining
+// room by integer arithmetic — so asserting only on width passes with the bug
+// fully present at exactly these inputs. Assert the rendered string instead,
+// rung by rung, and forbid every nameless-ellipsis form outright.
 func TestChipSegmentWideRunes(t *testing.T) {
-	for _, avail := range []int{6, 10, 20, 40} {
-		got := chipSegment(strings.Repeat("囲", 12), strings.Repeat("宽", 12), avail)
+	// 12 wide runes each: the branch chip and the worktree chip both measure
+	// 26 cells (2 for "glyph + space" + 24 for the name).
+	branch, worktree := strings.Repeat("囲", 12), strings.Repeat("宽", 12)
+
+	forbidden := []string{"⎇ …", "⌂ …", "⎇…", "⌂…"}
+	check := func(t *testing.T, label string, avail int, got, want string) {
+		t.Helper()
+		if got != want {
+			t.Errorf("%s(avail=%d) = %q, want %q", label, avail, got, want)
+		}
 		if lipgloss.Width(got) > avail {
-			t.Errorf("avail=%d: %q measures %d cells", avail, got, lipgloss.Width(got))
+			t.Errorf("%s(avail=%d) = %q measures %d cells", label, avail, got, lipgloss.Width(got))
+		}
+		for _, f := range forbidden {
+			if strings.Contains(got, f) {
+				t.Errorf("%s(avail=%d) = %q contains the nameless-ellipsis form %q", label, avail, got, f)
+			}
 		}
 	}
+
+	t.Run("both chips", func(t *testing.T) {
+		tests := []struct {
+			avail int
+			want  string
+		}{
+			// Rung 2: the worktree name truncates. A two-cell first character
+			// needs one cell more than "glyph + space + one letter + ellipsis".
+			{40, "⎇ 囲囲囲囲囲囲囲囲囲囲囲囲 · ⌂ 宽宽宽宽…"},
+			{30, "⎇ 囲囲囲囲囲囲囲囲囲囲囲囲 · ⌂"}, // Rung 3
+			{20, "⎇ 囲囲囲囲囲囲… · ⌂"},      // Rung 4
+			{10, "⎇ 囲… · ⌂"},
+			// room is 4 here: enough for "glyph, space, ellipsis" but not for a
+			// two-cell character, so Rung 4 must yield to Rung 5.
+			{8, "⌂"},
+			{6, "⌂"},
+			{1, "⌂"},
+			{0, ""},
+		}
+		for _, tt := range tests {
+			check(t, "chipSegment", tt.avail, chipSegment(branch, worktree, tt.avail), tt.want)
+		}
+	})
+
+	// Rung 2 in isolation: an ASCII branch short enough that the worktree half
+	// is the one under pressure. room is 4 at avail 13 — "⌂ " plus an ellipsis
+	// with a cell to spare, but not enough for a two-cell name character — so
+	// the worktree must fall to its bare glyph.
+	t.Run("wide worktree beside a narrow branch", func(t *testing.T) {
+		for _, tt := range []struct {
+			avail int
+			want  string
+		}{
+			{20, "⎇ main · ⌂ 宽宽宽宽…"},
+			{14, "⎇ main · ⌂ 宽…"},
+			{13, "⎇ main · ⌂"},
+			{10, "⎇ main · ⌂"},
+		} {
+			check(t, "chipSegment", tt.avail, chipSegment("main", worktree, tt.avail), tt.want)
+		}
+	})
+
+	t.Run("branch only", func(t *testing.T) {
+		for _, tt := range []struct {
+			avail int
+			want  string
+		}{
+			{7, "⎇ 囲囲…"},
+			{5, "⎇ 囲…"},
+			{4, ""}, // room for "⎇ …" only — no branch chip at all
+			{3, ""},
+		} {
+			check(t, "chipSegment(branch only)", tt.avail, chipSegment(branch, "", tt.avail), tt.want)
+		}
+	})
+
+	t.Run("worktree only", func(t *testing.T) {
+		for _, tt := range []struct {
+			avail int
+			want  string
+		}{
+			{7, "⌂ 宽宽…"},
+			{5, "⌂ 宽…"},
+			{4, "⌂"}, // room for "⌂ …" only — degrade to the bare glyph
+			{3, "⌂"},
+		} {
+			check(t, "chipSegment(worktree only)", tt.avail, chipSegment("", worktree, tt.avail), tt.want)
+		}
+	})
 }
 
 // The point of the feature: branch and worktree are different facts and the
@@ -3411,6 +3589,64 @@ func TestStateLineShowsBothChips(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("state line missing %q: %q", want, line)
 		}
+	}
+}
+
+// End-to-end, across every pane width: no line ever exceeds the pane, and no
+// line ever shows a glyph followed by an ellipsis with no name behind it.
+//
+// The nameless form was reachable in pure ASCII from ordinary fixtures — a
+// plain checkout at width 27/28, and the same session's first poll after a
+// rotation, when switchSession has cleared sessionBranch and only the worktree
+// chip remains. Sweeping the widths is what catches the handful of columns
+// where the chip slot is 2 or 3 cells wide.
+func TestStateLineNeverRendersNamelessChip(t *testing.T) {
+	now := time.Now()
+	fixtures := map[string]model{
+		"plain checkout": {
+			state:     State{Kind: StateIdle, Since: now.Add(-30 * time.Second)},
+			modelName: "claude-opus-5", sessionBranch: "lobby-preview",
+			jsonlPath: "/proj/abc.jsonl",
+		},
+		"worktree, branch not yet polled": {
+			state:      State{Kind: StateIdle, Since: now.Add(-30 * time.Second)},
+			modelName:  "claude-opus-5",
+			sessionCwd: "/tmp/repo/.claude/worktrees/align-context-meters",
+		},
+		"branch and worktree": {
+			state:     State{Kind: StateIdle, Since: now.Add(-30 * time.Second)},
+			modelName: "claude-opus-5", sessionBranch: "lobby-preview",
+			sessionCwd: "/tmp/repo/.claude/worktrees/align-context-meters",
+		},
+		"no worktree warning": {
+			state:     State{Kind: StateIdle, Since: now.Add(-30 * time.Second)},
+			modelName: "claude-opus-5", sessionBranch: "lobby-preview",
+			worktreePending: true, firstPrompt: "do the thing",
+			jsonlPath: "/proj/abc.jsonl",
+		},
+		"wide-rune names": {
+			state:     State{Kind: StateIdle, Since: now.Add(-30 * time.Second)},
+			modelName: "claude-opus-5", sessionBranch: strings.Repeat("囲", 12),
+			sessionCwd: "/tmp/repo/.claude/worktrees/" + strings.Repeat("宽", 12),
+		},
+	}
+	forbidden := []string{"⎇ …", "⌂ …", "⎇…", "⌂…"}
+	for name, base := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			for width := 1; width <= 200; width++ {
+				m := base
+				m.width = width
+				got := ansi.Strip(renderStateLine(m, now))
+				if w := lipgloss.Width(got); w != width {
+					t.Fatalf("width=%d: renderStateLine = %q measures %d cells", width, got, w)
+				}
+				for _, f := range forbidden {
+					if strings.Contains(got, f) {
+						t.Fatalf("width=%d: renderStateLine = %q contains the nameless-ellipsis form %q", width, got, f)
+					}
+				}
+			}
+		})
 	}
 }
 
