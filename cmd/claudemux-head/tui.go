@@ -442,6 +442,40 @@ func lastGitBranch(events []Event, prev string) string {
 	return prev
 }
 
+// transcriptSessionID is the session id a transcript path names — Claude Code
+// writes every transcript as <session-id>.jsonl, so it is the base name minus
+// the extension.
+func transcriptSessionID(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+
+// moveSession re-binds the reader when the SAME session's transcript shows up
+// at a new path. Claude Code homes a transcript under the project slug of the
+// session's cwd, so EnterWorktree and ExitWorktree both move the file
+// mid-session — same session id, different directory.
+//
+// Everything session-scoped survives, because it is the same conversation:
+// the summary, the context gauge, and above all an armed teardown watch.
+// Routing a move through switchSession instead killed the watch at exactly
+// the wrong moment — a /done wrap-up's own ExitWorktree step moved the
+// transcript, the false "rotation" aborted the watch, and the worktree
+// removal seconds later went unobserved, so the gate never opened.
+//
+// The ring is reseeded from the new path rather than kept: the old reader may
+// have missed events written between its last successful tail and the move,
+// and the file at the new path carries them all.
+func (m *model) moveSession(jsonlPath string, now time.Time) {
+	teardownLogf("move phase=%v from=%s to=%s", m.teardown, m.jsonlPath, jsonlPath)
+	r := newEventReader(jsonlPath)
+	r.SeedFromEnd(500)
+	seeded, _ := r.Seeded()
+	m.jsonlPath = jsonlPath
+	m.reader = r
+	m.allEvents = seeded
+	m.firstPrompt = r.FirstPrompt()
+	m.recomputeFromEvents(now)
+}
+
 // switchSession re-binds the monitor to a different session .jsonl: it opens a
 // fresh reader, re-seeds from the end, and recomputes all derived state.
 // Called when the active session rotates and the monitor is in follow-active
@@ -461,7 +495,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 		*m = m.abortTeardown("session rotated", now)
 	}
 
-	sessionID := strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
+	sessionID := transcriptSessionID(jsonlPath)
 	r := newEventReader(jsonlPath)
 	r.SeedFromEnd(500)
 	seeded, _ := r.Seeded()
@@ -935,6 +969,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// events (they were tailed from the old reader). They refresh on the
 		// next poll.
 		if msg.activeJSONL != "" && msg.activeJSONL != m.jsonlPath {
+			// Same session id at a new path is a move, not a rotation — see
+			// moveSession. The auto-arm edge and the ready-phase resume check
+			// are mirrored from the normal path below: the reseed can carry a
+			// prompt the old reader never delivered, and a wrap-up in it must
+			// still arm just as a post-ready prompt must still disarm.
+			if transcriptSessionID(msg.activeJSONL) == m.sessionID {
+				prevTyped := m.lastTyped
+				m.moveSession(msg.activeJSONL, msg.time)
+				m.autoArmTeardown(prevTyped, msg.time)
+				if m.teardown == teardownReady && m.lastTyped != prevTyped &&
+					!teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
+					m = m.abortTeardown("session resumed", msg.time)
+				}
+				m.lastUpdate = msg.time
+				return m, nil
+			}
 			cmd := m.switchSession(msg.activeJSONL, msg.time)
 			m.lastUpdate = msg.time
 			return m, cmd
