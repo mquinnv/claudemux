@@ -110,6 +110,10 @@ type model struct {
 	selfPane string
 	paneDir  string
 
+	// askDir is where hooks/claudemux-ask.sh drops pending-AskUserQuestion
+	// markers. Tests point it at a temp dir; "" disables the override.
+	askDir string
+
 	// publishedState is the last @claudemux_state value pushed to tmux, so the
 	// poll loop republishes only on change — one subprocess per transition,
 	// not per tick.
@@ -344,6 +348,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		followActive: followActive,
 		selfPane:     os.Getenv("TMUX_PANE"),
 		paneDir:      paneMapDir(),
+		askDir:       askMarkerDir(),
 		// -1: 0 is a legal context percent, so it can't double as "unset".
 		publishedContext: -1,
 		reader:           r,
@@ -399,6 +404,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 func (m *model) recomputeFromEvents(now time.Time) {
 	bgCount, bgOldest := m.bg.outstanding(now)
 	m.state = classifyState(m.allEvents, bgCount, bgOldest, now)
+	m.state = askOverride(m.state, m.allEvents, askMarkerTime(m.askDir, m.sessionID))
 	for i := len(m.allEvents) - 1; i >= 0; i-- {
 		// Skip placeholder models like "<synthetic>" (error/bookkeeping
 		// events) — show the last real API model instead.
@@ -1475,6 +1481,9 @@ func stateDot(kind StateKind) string {
 		return dotTool
 	case StateAwaiting, StateError:
 		return dotError
+	case StateAsking:
+		// Blocked on the human, like Idle — same green "come look" dot.
+		return dotIdle
 	case StateCompacting:
 		return dotCompact
 	case StateBackground:

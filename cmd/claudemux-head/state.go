@@ -19,6 +19,14 @@ const (
 	// from Idle because Idle means "waiting on the human", and this session
 	// is not.
 	StateBackground
+	// StateAsking: an AskUserQuestion is on screen, blocked on the human.
+	// This can NEVER be derived from the transcript: Claude Code flushes the
+	// assistant tool_use event only when the question is answered, so while
+	// one is pending the transcript just ends at the preceding thinking/text
+	// event and classifyState honestly reads Idle or Thinking. The signal
+	// comes from the marker hooks/claudemux-ask.sh writes at PreToolUse —
+	// see askOverride.
+	StateAsking
 )
 
 type State struct {
@@ -116,6 +124,37 @@ func bgOverride(s State, count int, oldest time.Time) State {
 	return State{Kind: StateBackground, Since: since, BgCount: count, Anchored: anchored}
 }
 
+// askOverride upgrades s to Asking when the ask-marker says an
+// AskUserQuestion is pending and the transcript has produced nothing newer.
+// markerTime is the marker file's mtime (zero when there is no marker).
+//
+// The freshness comparison against the newest conversation event is what
+// makes a leftover marker harmless: an answered question flushes its
+// tool_result with a newer timestamp, and an Esc'd one flushes the
+// interrupted turn — either way the transcript overtakes the marker and the
+// override stops applying, even if the hook's cleanup never ran.
+//
+// Only the not-actively-working verdicts are overridden. An unresolved
+// foreground tool_use (StateTool) means the marker is stale by construction —
+// a question can't be pending while another tool runs — and Error/Compacting
+// are more specific truths.
+func askOverride(s State, events []Event, markerTime time.Time) State {
+	if markerTime.IsZero() {
+		return s
+	}
+	switch s.Kind {
+	case StateIdle, StateThinking, StateBackground:
+	default:
+		return s
+	}
+	if last, ok := lastConversationEvent(events); ok {
+		if t := parseTimestamp(last.Timestamp); !t.IsZero() && t.After(markerTime) {
+			return s
+		}
+	}
+	return State{Kind: StateAsking, Since: markerTime}
+}
+
 // lastConversationEvent returns the newest user or assistant event,
 // skipping bookkeeping types.
 func lastConversationEvent(events []Event) (Event, bool) {
@@ -163,6 +202,8 @@ func (s State) Label() string {
 		return "Compacting"
 	case StateBackground:
 		return "Working " + strconv.Itoa(s.BgCount)
+	case StateAsking:
+		return "Asking"
 	}
 	return "Unknown"
 }

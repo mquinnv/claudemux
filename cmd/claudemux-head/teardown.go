@@ -201,6 +201,10 @@ const teardownBlockedProbeInterval = 5 * time.Second
 // false-positive-prone (see state.go, "Just report Tool"). The mapping is kept
 // because it is the right answer if the classification ever returns, but today
 // that branch is unreachable in production — only the table test drives it.
+// StateAsking (the hook-driven pending-AskUserQuestion state) counts as ended
+// for the same reason Awaiting does: the wrap-up's own confirmation question
+// is a resting point, and the worktree-gone condition still gates the second
+// press until it is answered.
 func teardownTurnEnded(kind StateKind) bool {
 	switch kind {
 	case StateThinking, StateTool, StateCompacting:

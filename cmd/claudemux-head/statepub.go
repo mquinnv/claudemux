@@ -37,6 +37,8 @@ func statePublishValue(s State) string {
 		return "Compacting"
 	case StateBackground:
 		return "Background:" + strconv.Itoa(s.BgCount)
+	case StateAsking:
+		return "Asking"
 	}
 	return ""
 }
