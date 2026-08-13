@@ -319,7 +319,7 @@ func TestLastUserPromptSkipsMetaAndXML(t *testing.T) {
 
 // At height <= 1 there's no room for anything but the single packed
 // statusbar — same line renderStatusbar has always produced, worktree chip
-// included (truncated to 24 runes).
+// included (capped to packedChipCells display cells via chipSegment).
 func TestViewHeightOnePacksSingleStatusbar(t *testing.T) {
 	m := model{
 		ready:     true,
@@ -3425,6 +3425,20 @@ func TestStateLineWarningKeepsBranch(t *testing.T) {
 	}
 	if !strings.Contains(line, "⎇ main") {
 		t.Errorf("branch missing alongside the warning: %q", line)
+	}
+}
+
+// The packed single-line layout gets its chip segment from two independent
+// sources — m.sessionBranch and the chip argument — same as renderStateLine.
+// Names that comfortably fit packedChipCells must show both, not just one.
+func TestStatusbarShowsBothChips(t *testing.T) {
+	m := model{ready: true, width: 120, height: 1, state: State{Kind: StateIdle},
+		sessionBranch: "main"}
+	line := ansi.Strip(renderStatusbar(m, time.Now(), "feature-branch"))
+	for _, want := range []string{"⎇ main", "⌂ feature-branch"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("statusbar missing %q: %q", want, line)
+		}
 	}
 }
 

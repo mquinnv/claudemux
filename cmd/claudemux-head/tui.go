@@ -1304,10 +1304,15 @@ func (m model) statusChip(now time.Time) string {
 }
 
 // renderStatusbar packs state and budget info onto a single
-// background-filled line at the bottom of the pane. chip, if non-empty, is
-// the worktree name to show (truncated to 24 runes) between the model and
-// ctx segments — callers pass "" once a prompt line is rendering it instead
-// (see View).
+// background-filled line at the bottom of the pane. Between the model and
+// ctx segments it shows a chip segment assembled by chipSegment from two
+// independent sources — m.sessionBranch for the branch half and chip (the
+// worktree name, if non-empty) for the worktree half — capped to
+// packedChipCells display cells, since this packed layout has no real width
+// budget to hand chipSegment (the right-hand gauges are sized after this
+// point). Callers pass chip == "" once a prompt line is rendering the
+// worktree name instead (see View); the branch half still renders from
+// m.sessionBranch regardless.
 func renderStatusbar(m model, now time.Time, chip string) string {
 	dot := stateDot(m.state.Kind)
 	durStr := "0:00"
@@ -1545,11 +1550,12 @@ func fitChip(chip, bare string, avail int) string {
 }
 
 // renderStateLine renders the top line of the new split layout: the state
-// dot, label, duration, model name, and (when the session runs in a
-// worktree) the full worktree chip — never truncated to 24 runes the way
-// the old single-line statusbar's chip was. Only if the assembled line
-// still doesn't fit the pane width does the chip itself shrink (via
-// truncateRunes); the state/model text never does.
+// dot, label, duration, model name, and (when the session has a branch
+// and/or runs in a worktree) the branch and worktree chips assembled by
+// chipSegment — given a real, computed width budget here, unlike the packed
+// single-line statusbar's fixed cell cap. Only if the assembled line still
+// doesn't fit the pane width does the chip segment itself shrink, via
+// chipSegment's own degradation ladder; the state/model text never does.
 func renderStateLine(m model, now time.Time) string {
 	dot := stateDot(m.state.Kind)
 	durStr := "0:00"
