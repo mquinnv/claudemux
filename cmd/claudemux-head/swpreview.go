@@ -105,7 +105,7 @@ const (
 	// swChromeRows is what View spends on things that are neither list nor
 	// preview: title, the blank under it, the blank above the box, the blank
 	// above the status line, and the hints line. A tmux error line costs one
-	// more.
+	// more, and so does the meters line when rate-limit data is available.
 	swChromeRows = 6
 )
 
@@ -127,9 +127,12 @@ type swLayout struct {
 // The min/max clamp governs only the share the preview CLAIMS from the list;
 // rows the fleet was never going to fill go to the preview past the cap,
 // because the alternative is rendering them blank.
-func computePreviewLayout(height int, hasErr bool, listWant int) swLayout {
+func computePreviewLayout(height int, hasErr, hasMeters bool, listWant int) swLayout {
 	chrome := swChromeRows
 	if hasErr {
+		chrome++
+	}
+	if hasMeters {
 		chrome++
 	}
 	avail := height - chrome

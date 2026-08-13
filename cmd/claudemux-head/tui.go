@@ -1427,22 +1427,29 @@ func rateGaugeParts(m model, now time.Time, barW int) []string {
 	if !m.rateOK {
 		return nil
 	}
-	fhPct := float64(m.rateLimits.FiveHour.UsedPercent)
-	wkPct := float64(m.rateLimits.SevenDay.UsedPercent)
+	return rateGauges(m.rateLimits, m.pctSamples, now, barW)
+}
+
+// rateGauges is the model-independent core of rateGaugeParts, shared with the
+// switchboard (swMetersLine) so both panels build the identical gauge text
+// from the same raw rate-limit data.
+func rateGauges(rl RateLimits, samples []pctSample, now time.Time, barW int) []string {
+	fhPct := float64(rl.FiveHour.UsedPercent)
+	wkPct := float64(rl.SevenDay.UsedPercent)
 	parts := []string{
 		fmt.Sprintf("5h %s %d%%→%s",
 			renderBar(barW, fhPct, thresholdColor(fhPct)),
-			m.rateLimits.FiveHour.UsedPercent,
-			m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
+			rl.FiveHour.UsedPercent,
+			rl.FiveHour.ResetsAt.Local().Format("3:04p")),
 		fmt.Sprintf("wk %s %d%%→%s",
 			renderBar(barW, wkPct, thresholdColor(wkPct)),
-			m.rateLimits.SevenDay.UsedPercent,
-			m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
+			rl.SevenDay.UsedPercent,
+			rl.SevenDay.ResetsAt.Local().Format("Mon")),
 	}
-	rate := burnRatePctPerMin(m.pctSamples, now)
+	rate := burnRatePctPerMin(samples, now)
 	if rate > 0 {
-		eta := etaToEmptyPct(m.rateLimits.FiveHour.UsedPercent, rate)
-		if eta > 0 && now.Add(eta).Before(m.rateLimits.FiveHour.ResetsAt) {
+		eta := etaToEmptyPct(rl.FiveHour.UsedPercent, rate)
+		if eta > 0 && now.Add(eta).Before(rl.FiveHour.ResetsAt) {
 			parts = append(parts, "empty in "+formatDuration(eta))
 		}
 	}

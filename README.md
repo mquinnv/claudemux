@@ -66,6 +66,11 @@ you get carried to it. To sit and watch the fleet instead, press `Space` — it
 toggles **standby**, which keeps the states live but never dispatches, until you
 press `Space` again.
 
+Under the title, the lobby shows the same account budget meters as the head:
+the 5-hour and weekly rate-limit gauges with their reset times (and an
+"empty in X" projection when usage is climbing), so you can see the account's
+headroom without jumping into a session.
+
 Each session gets two lines: state, timer, a context-usage meter, and its
 live Haiku-generated topic on the first, and a dimmer second line underneath
 with the running summary and last prompt (`summary · prompt`, either half

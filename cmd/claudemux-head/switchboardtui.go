@@ -72,6 +72,12 @@ type swTickMsg time.Time
 type swSnapshotMsg struct {
 	snap swSnapshot
 	err  error
+	// Account rate limits ride along on every poll, tmux error or not: the
+	// meters are about the account, not the fleet, so a wedged tmux should
+	// not blank them.
+	at    time.Time
+	rl    RateLimits
+	rlErr error
 }
 
 var (
@@ -91,6 +97,13 @@ type swModel struct {
 	width    int
 	height   int
 	lastErr  string
+	// Account budget meters, same source and shape as the head's: the abtop
+	// rate-limits cache re-read on every poll, plus the recent five-hour
+	// samples that feed the "empty in X" burn-rate ETA.
+	rateLimitsPath string
+	rateLimits     RateLimits
+	rateOK         bool
+	pctSamples     []pctSample
 	// standby stops all conducting (space toggles it): the lobby keeps
 	// showing live states but the conductor is never stepped, so the user
 	// can sit and look at the fleet without being dispatched.
@@ -113,10 +126,10 @@ type swModel struct {
 }
 
 func newSwModel(selfPane string) swModel {
-	return swModel{selfPane: selfPane, cond: newConductor()}
+	return swModel{selfPane: selfPane, cond: newConductor(), rateLimitsPath: defaultRateLimitsPath()}
 }
 
-func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane) }
+func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane, m.rateLimitsPath) }
 
 // selectedPane returns the claude pane of the selected session — "" when there
 // is no selection, or when that session has no claude pane to capture.
@@ -145,27 +158,34 @@ func (m *swModel) previewCmd() tea.Cmd {
 
 // swPollCmd runs the three tmux listings off the update loop. Any failure
 // returns the error instead of a snapshot — the model keeps its previous
-// data on screen and simply tries again next tick.
-func swPollCmd(selfPane string) tea.Cmd {
+// data on screen and simply tries again next tick. The rate-limits cache is
+// read up front so every message carries it, even the tmux-error ones.
+func swPollCmd(selfPane, rlPath string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
+		rl, rlErr := readRateLimits(rlPath)
+		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
 			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}")
 		if err != nil {
-			return swSnapshotMsg{err: err}
+			msg.err = err
+			return msg
 		}
 		paneOut, err := swTmux(ctx, "list-panes", "-a", "-F",
 			"#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_name}")
 		if err != nil {
-			return swSnapshotMsg{err: err}
+			msg.err = err
+			return msg
 		}
 		clientOut, err := swTmux(ctx, "list-clients", "-F",
 			"#{client_name}\t#{client_session}")
 		if err != nil {
-			return swSnapshotMsg{err: err}
+			msg.err = err
+			return msg
 		}
-		return swSnapshotMsg{snap: buildSwSnapshot(sessOut, paneOut, clientOut, selfPane)}
+		msg.snap = buildSwSnapshot(sessOut, paneOut, clientOut, selfPane)
+		return msg
 	}
 }
 
@@ -245,8 +265,29 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case swTickMsg:
-		return m, swPollCmd(m.selfPane)
+		return m, swPollCmd(m.selfPane, m.rateLimitsPath)
 	case swSnapshotMsg:
+		// Rate limits first, before the tmux-error early return: the meters
+		// track the account and stay fresh even when tmux is misbehaving.
+		// Sample bookkeeping mirrors the head's dataMsg handling — record a
+		// sample only when the percentage moves, trim to the last hour.
+		if msg.rlErr == nil {
+			m.rateLimits = msg.rl
+			m.rateOK = true
+			if len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != msg.rl.FiveHour.UsedPercent {
+				m.pctSamples = append(m.pctSamples, pctSample{at: msg.at, pct: msg.rl.FiveHour.UsedPercent})
+			}
+			cutoff := msg.at.Add(-1 * time.Hour)
+			trimmed := m.pctSamples[:0]
+			for _, s := range m.pctSamples {
+				if s.at.After(cutoff) {
+					trimmed = append(trimmed, s)
+				}
+			}
+			m.pctSamples = trimmed
+		} else {
+			m.rateOK = false
+		}
 		// Schedule the next tick from here, not from swTickMsg: polls never
 		// overlap, and a slow tmux stretches the interval instead of queueing.
 		if msg.err != nil {
@@ -398,9 +439,59 @@ func swSessionRows(sess swSession) int {
 	return 1
 }
 
+// swMetersLine renders the account budget gauges as a full-width line — the
+// head's renderMetersLine minus the per-session ctx gauge, since the lobby
+// has no session of its own. Same degradation and growth rules: when the
+// line overflows the pane width, gauges drop from the end in the head's
+// order (eta, then wk; 5h always stays), and the surviving bars then widen
+// past defaultBarW to consume the leftover columns.
+func swMetersLine(m swModel, now time.Time) string {
+	build := func(barW int) []string {
+		return rateGauges(m.rateLimits, m.pctSamples, now, barW)
+	}
+	if m.width <= 0 {
+		// No size yet: emit the baseline gauges unstyle rather than fitting
+		// to a width we don't know.
+		return " " + strings.Join(build(defaultBarW), " · ")
+	}
+	avail := m.width - 2 // columns inside the " "..." " padding below
+	if avail < 1 {
+		avail = 1
+	}
+	parts := build(defaultBarW)
+	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
+		parts = parts[:len(parts)-1]
+	}
+
+	// Only 5h and wk carry bars — the trailing eta segment is plain text — so
+	// the slack splits across those two, or the eta's share would just become
+	// trailing blank space. Integer division leaves a few columns unspent
+	// rather than risking an overflow that clipLine would then chop.
+	barCount := len(parts)
+	if barCount > 2 {
+		barCount = 2
+	}
+	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
+		wide := build(defaultBarW + grow)[:len(parts)]
+		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
+			parts = wide
+		}
+	}
+	return statusbarStyle.Width(m.width).Render(clipLine(" "+strings.Join(parts, " · ")+" ", m.width))
+}
+
 func (m swModel) View() string {
+	now := time.Now()
 	var b strings.Builder
-	b.WriteString(swTitleStyle.Render("claudemux switchboard") + "\n\n")
+	b.WriteString(swTitleStyle.Render("claudemux switchboard") + "\n")
+	// The account budget meters sit under the title, where the head keeps its
+	// meters line: full-width 5h/wk gauges with reset times, plus the ETA when
+	// there's burn-rate signal. Omitted entirely (no blank placeholder) when
+	// the cache is unreadable — computePreviewLayout is told either way.
+	if m.rateOK {
+		b.WriteString(swMetersLine(m, now) + "\n")
+	}
+	b.WriteString("\n")
 	if len(m.snap.Sessions) == 0 {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
@@ -411,7 +502,7 @@ func (m swModel) View() string {
 	for _, sess := range m.snap.Sessions {
 		want += swSessionRows(sess)
 	}
-	lay := computePreviewLayout(m.height, m.lastErr != "", want)
+	lay := computePreviewLayout(m.height, m.lastErr != "", m.rateOK, want)
 
 	// Only when the fleet's total need EXCEEDS the cap is anything dropped —
 	// and then one row is held back so the "+N more" line announcing the
@@ -425,7 +516,6 @@ func (m swModel) View() string {
 		}
 	}
 
-	now := time.Now()
 	used, shown := 0, 0
 	for i, sess := range m.snap.Sessions {
 		// budget == 0 means uncapped (no preview drawn, or the fleet already
