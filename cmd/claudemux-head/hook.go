@@ -31,9 +31,14 @@ type hookScript struct {
 // UserPromptSubmit ONLY: at SessionStart there is no prompt yet, so there is
 // nothing to name a worktree after — which is the entire problem it exists to
 // fix.
+// claudemux-ask.sh tracks pending AskUserQuestion calls. It needs all three
+// events: PreToolUse to set the marker, PostToolUse to clear it on answer,
+// and UserPromptSubmit to clear it when a question was Esc'd (no PostToolUse
+// ever fires for those).
 var hookScripts = []hookScript{
 	{name: "claudemux-map.sh", events: []string{"SessionStart", "UserPromptSubmit"}},
 	{name: "claudemux-worktree.sh", events: []string{"UserPromptSubmit"}},
+	{name: "claudemux-ask.sh", events: []string{"PreToolUse", "PostToolUse", "UserPromptSubmit"}},
 }
 
 // hookScriptName is the pane-map script's filename, which `--script` overrides.

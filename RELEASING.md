@@ -53,9 +53,9 @@ every file it copies out of the tarball, independent of `install.sh` and
 those — it is a separate, hand-maintained list that must be kept in sync by
 hand, every time a shipped script is added, renamed, or removed here.
 
-As of this writing that list must name exactly these **five** files, kept as
+As of this writing that list must name exactly these **six** files, kept as
 siblings: `claudemux-head`, `claudemux`, `project-color-resolve.sh`,
-`claudemux-map.sh`, `claudemux-worktree.sh`.
+`claudemux-map.sh`, `claudemux-worktree.sh`, `claudemux-ask.sh`.
 
 This matters more than a typical packaging omission: `claudemux-head hook
 ensure` resolves and validates every shipped script's source path **before

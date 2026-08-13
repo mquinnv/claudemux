@@ -92,12 +92,12 @@ func TestHookEnsureFreshInstall(t *testing.T) {
 		t.Errorf("SessionStart = %v, want exactly claudemux-map.sh", start)
 	}
 
-	// UserPromptSubmit carries both scripts, and only both scripts: an exact
+	// UserPromptSubmit carries all three scripts, and only those: an exact
 	// count catches a duplicate-registration bug that a "contains" check
 	// would miss.
 	ups := hookCommands(t, s, "UserPromptSubmit")
-	if len(ups) != 2 {
-		t.Fatalf("UserPromptSubmit commands = %v, want exactly 2 entries", ups)
+	if len(ups) != 3 {
+		t.Fatalf("UserPromptSubmit commands = %v, want exactly 3 entries", ups)
 	}
 	sawMap := false
 	for _, c := range ups {
@@ -215,9 +215,20 @@ func TestHookEnsurePreservesUnrelatedKeysAndHooks(t *testing.T) {
 		t.Error("our hook was not registered on SessionStart")
 	}
 
-	// An unrelated EVENT must survive untouched.
-	if got := hookCommands(t, s, "PreToolUse"); len(got) != 1 || got[0] != "/unrelated/event.sh" {
-		t.Errorf("PreToolUse = %v, want the unrelated hook preserved", got)
+	// An unrelated hook on an event we also register on must survive
+	// alongside ours (the ask hook now claims PreToolUse too).
+	pre := hookCommands(t, s, "PreToolUse")
+	var sawUnrelated, sawAsk bool
+	for _, c := range pre {
+		if c == "/unrelated/event.sh" {
+			sawUnrelated = true
+		}
+		if filepath.Base(c) == "claudemux-ask.sh" {
+			sawAsk = true
+		}
+	}
+	if !sawUnrelated || !sawAsk || len(pre) != 2 {
+		t.Errorf("PreToolUse = %v, want the unrelated hook preserved beside claudemux-ask.sh", pre)
 	}
 }
 
@@ -328,7 +339,7 @@ func TestHookEnsureBacksUpBeforeWriting(t *testing.T) {
 	}
 }
 
-func TestHookEnsureRegistersBothScripts(t *testing.T) {
+func TestHookEnsureRegistersAllScripts(t *testing.T) {
 	settingsPath := writeSettings(t, "")
 	script := stubScript(t)
 
@@ -339,20 +350,22 @@ func TestHookEnsureRegistersBothScripts(t *testing.T) {
 
 	settings := readSettings(t, settingsPath)
 	ups := hookCommands(t, settings, "UserPromptSubmit")
-	if len(ups) != 2 {
-		t.Fatalf("UserPromptSubmit commands = %v, want 2 entries", ups)
+	if len(ups) != 3 {
+		t.Fatalf("UserPromptSubmit commands = %v, want 3 entries", ups)
 	}
-	var sawMap, sawWorktree bool
+	var sawMap, sawWorktree, sawAsk bool
 	for _, c := range ups {
 		switch filepath.Base(c) {
 		case "claudemux-map.sh":
 			sawMap = true
 		case "claudemux-worktree.sh":
 			sawWorktree = true
+		case "claudemux-ask.sh":
+			sawAsk = true
 		}
 	}
-	if !sawMap || !sawWorktree {
-		t.Errorf("UserPromptSubmit = %v, want both scripts", ups)
+	if !sawMap || !sawWorktree || !sawAsk {
+		t.Errorf("UserPromptSubmit = %v, want all three scripts", ups)
 	}
 
 	// The worktree hook has nothing to record at session start; registering it
@@ -360,6 +373,15 @@ func TestHookEnsureRegistersBothScripts(t *testing.T) {
 	start := hookCommands(t, settings, "SessionStart")
 	if len(start) != 1 || filepath.Base(start[0]) != "claudemux-map.sh" {
 		t.Errorf("SessionStart = %v, want only claudemux-map.sh", start)
+	}
+
+	// The ask hook needs the tool-call events, and must be alone there: no
+	// other claudemux script has business running on every tool call.
+	for _, event := range []string{"PreToolUse", "PostToolUse"} {
+		cmds := hookCommands(t, settings, event)
+		if len(cmds) != 1 || filepath.Base(cmds[0]) != "claudemux-ask.sh" {
+			t.Errorf("%s = %v, want only claudemux-ask.sh", event, cmds)
+		}
 	}
 }
 
@@ -375,8 +397,8 @@ func TestHookEnsureDoesNotDuplicateOnSecondRun(t *testing.T) {
 	}
 
 	settings := readSettings(t, settingsPath)
-	if got := hookCommands(t, settings, "UserPromptSubmit"); len(got) != 2 {
-		t.Errorf("UserPromptSubmit after two runs = %v, want 2 entries", got)
+	if got := hookCommands(t, settings, "UserPromptSubmit"); len(got) != 3 {
+		t.Errorf("UserPromptSubmit after two runs = %v, want 3 entries", got)
 	}
 }
 
@@ -466,7 +488,7 @@ func TestHookEnsureResolvesScriptsViaClaudemuxOnPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	settings := readSettings(t, filepath.Join(home, ".claude", "settings.json"))
 	ups := hookCommands(t, settings, "UserPromptSubmit")
-	if len(ups) != 2 {
-		t.Errorf("UserPromptSubmit = %v, want both scripts registered from the PATH-resolved layout", ups)
+	if len(ups) != 3 {
+		t.Errorf("UserPromptSubmit = %v, want all three scripts registered from the PATH-resolved layout", ups)
 	}
 }

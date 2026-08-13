@@ -45,8 +45,10 @@ type swSnapshot struct {
 // isWaiting reports whether a published state means "paused waiting on
 // input": Claude's turn ended, or an AskUserQuestion is pending. Exact-match
 // on statePublishValue strings — anything unknown is not waiting.
+// "Tool:AskUserQuestion" stays for heads older than the Asking state, which
+// could publish it in the brief window after a question flushed.
 func isWaiting(state string) bool {
-	return state == "Idle" || state == "Tool:AskUserQuestion"
+	return state == "Idle" || state == "Asking" || state == "Tool:AskUserQuestion"
 }
 
 func (s swSnapshot) session(name string) (swSession, bool) {

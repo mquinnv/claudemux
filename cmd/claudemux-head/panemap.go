@@ -127,6 +127,32 @@ func panePaths(listing string) map[string]string {
 	return paths
 }
 
+// askMarkerDir returns the directory where hooks/claudemux-ask.sh records
+// pending AskUserQuestion markers, keyed by session id. Empty when the home
+// dir can't be resolved.
+func askMarkerDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "claudemux", "asking")
+}
+
+// askMarkerTime returns the mtime of the ask marker for sessionID, zero when
+// there is none. mtime rather than content: the marker's only message is
+// "an AskUserQuestion was pending as of this instant", and askOverride judges
+// staleness against the transcript from exactly that instant.
+func askMarkerTime(dir, sessionID string) time.Time {
+	if dir == "" || sessionID == "" {
+		return time.Time{}
+	}
+	fi, err := os.Stat(filepath.Join(dir, sessionID+".json"))
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
+}
+
 // claudeProjectsPath is the dir under which Claude Code writes per-project
 // transcript folders. Empty when the home dir can't be resolved.
 func claudeProjectsPath() string {

@@ -154,7 +154,7 @@ they're your responsibility:
 |---|---|---|
 | `tmux` | `claudemux` | `claudemux` cannot run at all |
 | `claudemux-head` on `PATH` | `claudemux` | the head pane dies at "command not found" and is left on screen saying so; an `op_env` session shows that in place of its waiting screen, then still starts `claude` once the secrets land |
-| `jq` | `hooks/claudemux-map.sh`, `hooks/claudemux-worktree.sh` | the hook exits silently; see below |
+| `jq` | `hooks/claudemux-map.sh`, `hooks/claudemux-worktree.sh`, `hooks/claudemux-ask.sh` | the hook exits silently; see below |
 | `git` | `claudemux` (1Password org inference) | `op_account` in `.project.yml` or `onepassword.default_account` still work |
 | `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` only works for literal directories, not `z`-style queries |
 | `op` (1Password CLI) | `claudemux` (`op_env` injection) | sessions launch without injected secrets |
@@ -175,8 +175,16 @@ project directory changed most recently. That is wrong as soon as you have two C
 Code sessions open on the same project.
 
 A second hook, `hooks/claudemux-worktree.sh`, ships and is registered the same way —
-see `launch.auto_worktree` below for what it does. `claudemux-head hook ensure` installs
-and repairs both scripts together.
+see `launch.auto_worktree` below for what it does.
+
+A third hook, `hooks/claudemux-ask.sh`, tracks pending `AskUserQuestion` calls. Claude
+Code does not write the question to the transcript until it is answered, so without this
+hook a session sitting on a multiple-choice question reads as **Idle** or **Thinking** —
+exactly the wrong verdict for the one session that most needs your attention. With the
+hook, the head shows **Asking**, and the switchboard marks the session as waiting (dot,
+highlight, auto-escort) just like an idle one.
+
+`claudemux-head hook ensure` installs and repairs all three scripts together.
 
 ## Configuration
 
