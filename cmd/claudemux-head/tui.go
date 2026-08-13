@@ -1487,16 +1487,22 @@ func chipSegment(branch, worktree string, avail int) string {
 	if bw+sepW+lipgloss.Width(w) <= avail {
 		return b + chipSep + w
 	}
-	// Rung 2: truncate the worktree name, so long as a cell of it survives.
-	if room := avail - bw - sepW; room > bareW+1 {
+	// Rung 2: truncate the worktree name, so long as a real character of it
+	// survives. room must cover the glyph+space (bareW+1), one letter, and
+	// the ellipsis — room==bareW+2 fits only "glyph, space, ellipsis" with
+	// no name at all, which is worse than Rung 3's honest bare glyph.
+	if room := avail - bw - sepW; room > bareW+2 {
 		return b + chipSep + ansi.Truncate(w, room, "…")
 	}
 	// Rung 3: the worktree down to its bare glyph.
 	if bw+sepW+bareW <= avail {
 		return b + chipSep + worktreeGlyphBare
 	}
-	// Rung 4: truncate the branch, still keeping the worktree glyph.
-	if room := avail - sepW - bareW; room > lipgloss.Width(branchGlyph) {
+	// Rung 4: truncate the branch, still keeping the worktree glyph. Same
+	// shape as Rung 2's guard: room must cover the branch glyph, one letter,
+	// and the ellipsis, or fall through to Rung 5 rather than emit a glyph
+	// plus an ellipsis with no branch name behind it.
+	if room := avail - sepW - bareW; room > lipgloss.Width(branchGlyph)+1 {
 		return ansi.Truncate(b, room, "…") + chipSep + worktreeGlyphBare
 	}
 	// Rung 5: the worktree glyph alone.

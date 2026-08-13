@@ -3347,8 +3347,18 @@ func TestChipSegmentLadder(t *testing.T) {
 	}{
 		{"both in full", 40, "⎇ lobby-preview · ⌂ align-context-meters"},
 		{"worktree name truncates", 30, "⎇ lobby-preview · ⌂ align-con…"},
+		// Rung 2 boundary: room = avail(21) - bw(15) - sepW(3) = 3, which is
+		// only enough for the worktree glyph, space, and ellipsis — no real
+		// character of the name. Must fall through to Rung 3's bare glyph
+		// rather than emit "⎇ lobby-preview · ⌂ …".
+		{"worktree truncation boundary falls through to bare glyph", 21, "⎇ lobby-preview · ⌂"},
 		{"worktree down to its glyph", 19, "⎇ lobby-preview · ⌂"},
 		{"branch name truncates", 14, "⎇ lobby-p… · ⌂"},
+		// Rung 4 boundary: room = avail(7) - sepW(3) - bareW(1) = 3, which is
+		// only enough for the branch glyph, space, and ellipsis — no real
+		// character of the branch name. Must fall through to Rung 5's
+		// worktree glyph alone rather than emit "⎇ … · ⌂".
+		{"branch truncation boundary falls through to worktree glyph alone", 7, "⌂"},
 		{"worktree glyph alone", 4, "⌂"},
 		{"nothing fits", 0, ""},
 	}
