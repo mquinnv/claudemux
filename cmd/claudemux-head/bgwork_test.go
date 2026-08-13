@@ -639,20 +639,23 @@ func TestBgTrackerExpiresStaleLaunches(t *testing.T) {
 	}
 }
 
-// If the human typed at the session, whatever it was tracking is moot.
-func TestBgTrackerClearedByGenuinePrompt(t *testing.T) {
-	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+// A typed prompt does NOT retire running work. The old wipe made a session
+// with four running agents read Idle the moment the human typed once, and
+// the conductor then treated it as waiting. Completions retire tasks;
+// liveness/caps expire the stale — the wipe's safety role is gone.
+func TestBgTrackerSurvivesGenuinePrompt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
-	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-13T10:00:00Z"), now)
 	b.observe([]Event{{Type: "user", UserText: "what's up?"}}, now)
-	if n, _ := b.outstanding(now); n != 0 {
-		t.Errorf("outstanding = %d, want 0 after a real prompt", n)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: typing must not erase running work", n)
 	}
 }
 
-// The delivered notification turn is a user event, but it is not the human
-// typing — it must not be mistaken for one.
-func TestBgTrackerNotificationTurnIsNotAPrompt(t *testing.T) {
+// A completion notification retires only the task id it names, not every
+// outstanding task.
+func TestBgTrackerNotificationRetiresOnlyItsOwnTask(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
 	b.observe(append(

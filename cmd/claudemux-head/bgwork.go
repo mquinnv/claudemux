@@ -147,14 +147,6 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 		b.tasks = map[string]bgTask{}
 	}
 	for _, e := range events {
-		// A prompt the human actually typed retires everything: they are
-		// looking at the session, so what it was waiting on no longer decides
-		// whether it needs them. genuinePrompt already rejects the delivered
-		// notification turns (their text opens with "<").
-		if genuinePrompt(e) {
-			b.tasks = map[string]bgTask{}
-			continue
-		}
 		at := parseTimestampOr(e.Timestamp, now)
 		for _, id := range bgCompletions(e) {
 			delete(b.tasks, id)

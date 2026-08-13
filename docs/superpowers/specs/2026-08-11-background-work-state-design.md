@@ -180,12 +180,16 @@ running. Recomputing would silently drop it and revert to `Idle`.
 
 ### Expiry
 
-**A genuine user prompt always clears the whole set.** If the human typed at that
-session, whatever it was tracking is moot. Reuses `genuinePrompt` (`tui.go:500`), which
-already filters meta notices and injected XML — including, usefully, the delivered
-`<task-notification>` turns themselves.
+Retirement is by completion notification; staleness is handled by liveness/caps, not by
+watching for a typed prompt. A typed prompt has no effect on the tracker: an earlier
+version of `observe` cleared the whole set on any `genuinePrompt` event, on the theory
+that the human looking at the session made whatever it was tracking moot. That wipe was
+removed 2026-08-13 — it made a session with several agents still running read `Idle` the
+instant the human typed one keystroke, which sent the conductor right back into a busy
+session. Completions retire tasks reliably (harness ids plus notifications), so the wipe's
+safety role was already redundant with liveness/caps below.
 
-Past that, expiry is **per kind**, because a flat cap cannot fit both kinds at once.
+Expiry is **per kind**, because a flat cap cannot fit both kinds at once.
 Fleet measurement 2026-08-13, across real launches: 19 of 109 outstanding tasks ran past
 30 minutes, and the longest-running agent ran 11 hours. A cap short enough to self-heal a
 dead background shell in one sitting is far too short for a live agent, and a cap long
@@ -273,8 +277,8 @@ All three are additive. Nothing else reads these fields, so nothing else changes
   both (idempotent), and **skill prose containing `task-notification` mid-text, which must
   not register**.
 - **Tracker** — launch then completion nets to empty; two launches and one completion
-  leaves one; expiry at 30 minutes; a genuine user prompt clears everything; a delivered
-  `<task-notification>` user turn does not count as a genuine prompt.
+  leaves one; expiry at 30 minutes; a genuine user prompt does not retire anything; a
+  delivered `<task-notification>` user turn does not count as a genuine prompt.
 - **classifyState** — idle with outstanding work → `Background`; idle with none → `Idle`
   (unchanged); unresolved tool_use with outstanding work → `Tool` (unchanged); `Since` is
   the oldest launch.
