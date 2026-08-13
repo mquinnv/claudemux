@@ -1438,6 +1438,93 @@ func rateGaugeParts(m model, now time.Time, barW int) []string {
 	return parts
 }
 
+// Chip glyphs. "⎇" is a branch symbol and now means the branch; the worktree
+// takes "⌂". Until this change the branch glyph fronted the WORKTREE name,
+// which is how a session on `lobby-preview` inside the `align-context-meters`
+// worktree came to report only the latter.
+const (
+	branchGlyph       = "⎇ "
+	worktreeGlyph     = "⌂ "
+	worktreeGlyphBare = "⌂"
+	chipSep           = " · "
+)
+
+// chipSegment assembles the branch and worktree chips into at most avail
+// display cells.
+//
+// The degradation order is fixed: the worktree name truncates, then falls back
+// to its bare glyph, then the branch name truncates, then the branch drops
+// entirely. The asymmetry is deliberate — a bare "⌂" still carries information
+// (you are in a worktree) while a bare "⎇" carries none, since a session is
+// always on some branch. The worktree name is also recoverable elsewhere: it
+// names the tmux tab until Haiku takes over. The branch is nowhere else.
+func chipSegment(branch, worktree string, avail int) string {
+	if avail < 1 {
+		return ""
+	}
+	b, w := "", ""
+	if branch != "" {
+		b = branchGlyph + branch
+	}
+	if worktree != "" {
+		w = worktreeGlyph + worktree
+	}
+
+	switch {
+	case b == "" && w == "":
+		return ""
+	case w == "":
+		return fitChip(b, "", avail)
+	case b == "":
+		return fitChip(w, worktreeGlyphBare, avail)
+	}
+
+	sepW := lipgloss.Width(chipSep)
+	bareW := lipgloss.Width(worktreeGlyphBare)
+	bw := lipgloss.Width(b)
+
+	// Rung 1: both in full.
+	if bw+sepW+lipgloss.Width(w) <= avail {
+		return b + chipSep + w
+	}
+	// Rung 2: truncate the worktree name, so long as a cell of it survives.
+	if room := avail - bw - sepW; room > bareW+1 {
+		return b + chipSep + ansi.Truncate(w, room, "…")
+	}
+	// Rung 3: the worktree down to its bare glyph.
+	if bw+sepW+bareW <= avail {
+		return b + chipSep + worktreeGlyphBare
+	}
+	// Rung 4: truncate the branch, still keeping the worktree glyph.
+	if room := avail - sepW - bareW; room > lipgloss.Width(branchGlyph) {
+		return ansi.Truncate(b, room, "…") + chipSep + worktreeGlyphBare
+	}
+	// Rung 5: the worktree glyph alone.
+	if bareW <= avail {
+		return worktreeGlyphBare
+	}
+	return ""
+}
+
+// fitChip renders a lone chip within avail. bare is what remains when not even
+// a truncated name fits — callers pass the worktree's glyph, which means
+// something on its own, and "" for the branch, whose glyph does not.
+func fitChip(chip, bare string, avail int) string {
+	if lipgloss.Width(chip) <= avail {
+		return chip
+	}
+	if bareW := lipgloss.Width(bare); bare != "" && avail <= bareW+1 {
+		if bareW <= avail {
+			return bare
+		}
+		return ""
+	}
+	if avail >= 2 {
+		return ansi.Truncate(chip, avail, "…")
+	}
+	return ""
+}
+
 // renderStateLine renders the top line of the new split layout: the state
 // dot, label, duration, model name, and (when the session runs in a
 // worktree) the full worktree chip — never truncated to 24 runes the way

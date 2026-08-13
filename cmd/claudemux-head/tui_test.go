@@ -3333,3 +3333,59 @@ func TestUpdateDataMsgFeedsBackgroundTracker(t *testing.T) {
 		t.Errorf("state = %v, want StateIdle once the task finished", next.state.Kind)
 	}
 }
+
+// The degradation ladder from the spec, rung by rung. The worktree never
+// vanishes while one exists — it falls back to its bare glyph, which still
+// says "you are in a worktree". The branch keeps its name or goes, because a
+// bare branch glyph says nothing: a session is always on some branch.
+func TestChipSegmentLadder(t *testing.T) {
+	const b, w = "lobby-preview", "align-context-meters"
+	tests := []struct {
+		name  string
+		avail int
+		want  string
+	}{
+		{"both in full", 40, "⎇ lobby-preview · ⌂ align-context-meters"},
+		{"worktree name truncates", 30, "⎇ lobby-preview · ⌂ align-con…"},
+		{"worktree down to its glyph", 19, "⎇ lobby-preview · ⌂"},
+		{"branch name truncates", 14, "⎇ lobby-p… · ⌂"},
+		{"worktree glyph alone", 4, "⌂"},
+		{"nothing fits", 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := chipSegment(b, w, tt.avail)
+			if got != tt.want {
+				t.Errorf("chipSegment(avail=%d) = %q, want %q", tt.avail, got, tt.want)
+			}
+			if lipgloss.Width(got) > tt.avail {
+				t.Errorf("chipSegment(avail=%d) measures %d cells", tt.avail, lipgloss.Width(got))
+			}
+		})
+	}
+}
+
+func TestChipSegmentSingleChips(t *testing.T) {
+	// No worktree: the branch stands alone and truncates like any other chip.
+	if got := chipSegment("main", "", 40); got != "⎇ main" {
+		t.Errorf("branch only = %q, want ⎇ main", got)
+	}
+	// No branch (not a git directory) but inside a worktree.
+	if got := chipSegment("", "align-context-meters", 40); got != "⌂ align-context-meters" {
+		t.Errorf("worktree only = %q, want the worktree chip", got)
+	}
+	if got := chipSegment("", "", 40); got != "" {
+		t.Errorf("neither = %q, want empty", got)
+	}
+}
+
+// Wide runes measure two cells each. Truncating by rune count would overrun
+// the budget — the regression this file has had twice.
+func TestChipSegmentWideRunes(t *testing.T) {
+	for _, avail := range []int{6, 10, 20, 40} {
+		got := chipSegment(strings.Repeat("囲", 12), strings.Repeat("宽", 12), avail)
+		if lipgloss.Width(got) > avail {
+			t.Errorf("avail=%d: %q measures %d cells", avail, got, lipgloss.Width(got))
+		}
+	}
+}
