@@ -123,9 +123,20 @@ type bgTask struct {
 type bgTracker struct {
 	tasks map[string]bgTask
 	// subagentsDir is where this session's async agents write their own
-	// transcripts (see subagentsDirFor). Empty means no liveness source
-	// (tests, unexpected layout): agents then fall back to the shell cap
-	// rather than counting forever.
+	// transcripts (see subagentsDirFor). Empty means no liveness source at
+	// all (tests only — production always sets one from the transcript
+	// path): agents then fall back to the shell cap rather than counting
+	// forever.
+	//
+	// An unexpected production layout is a DIFFERENT failure and does not
+	// land here: subagentsDirFor always returns a non-empty path, so if
+	// Claude Code ever moves where it writes agent transcripts,
+	// subagentsDir stays non-empty but points at a directory whose agent
+	// files never appear. That never reaches the empty-dir fallback above —
+	// alive's os.Stat keeps erroring, so every agent expires via
+	// bgAgentSpawnGrace (~2 minutes after launch) instead. If agent
+	// detection ever seems to be quietly capping out fast, this is where to
+	// look first.
 	subagentsDir string
 }
 
