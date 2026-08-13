@@ -95,6 +95,11 @@ type Event struct {
 	ToolResults []ToolResult
 	Usage       *Usage
 	Cwd         string // transcript's per-entry cwd; tracks worktree moves
+	// GitBranch is the entry's branch, recorded by Claude Code on every line.
+	// Reading it here is what lets the head show a branch without shelling out
+	// to git on every poll. Empty when the session's directory is not a repo.
+	// A detached HEAD records the literal string "HEAD" — see lastGitBranch.
+	GitBranch string
 	// QueueText is the top-level `content` of a queue-operation event, which
 	// is where a finished background task's notification arrives first — the
 	// delivered user turn only follows when the session next runs. Empty for
@@ -266,6 +271,7 @@ func parseEvent(line string) (Event, bool) {
 		IsMeta      bool            `json:"isMeta"`
 		Timestamp   string          `json:"timestamp"`
 		Cwd         string          `json:"cwd"`
+		GitBranch   string          `json:"gitBranch"`
 		IsSidechain bool            `json:"isSidechain"`
 		Message     json.RawMessage `json:"message"`
 		Content     json.RawMessage `json:"content"`    // top level; queue-operation only
@@ -279,7 +285,8 @@ func parseEvent(line string) (Event, bool) {
 		return Event{}, false
 	}
 
-	ev := Event{Type: raw.Type, IsMeta: raw.IsMeta, Timestamp: raw.Timestamp, Cwd: raw.Cwd, IsSidechain: raw.IsSidechain, RawLine: line}
+	ev := Event{Type: raw.Type, IsMeta: raw.IsMeta, Timestamp: raw.Timestamp, Cwd: raw.Cwd,
+		GitBranch: raw.GitBranch, IsSidechain: raw.IsSidechain, RawLine: line}
 
 	if raw.Type == "last-prompt" && raw.LastPrompt != "" {
 		ev.UserText = cleanCommandText(raw.LastPrompt)

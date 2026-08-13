@@ -247,3 +247,28 @@ func TestParseEventNoQueueTextForOtherTypes(t *testing.T) {
 		t.Errorf("QueueText = %q, want empty for a user event", ev.QueueText)
 	}
 }
+
+// The branch rides along on every transcript entry, next to the cwd the
+// worktree chip already reads — which is why the head needs no git subprocess.
+func TestParseEventGitBranch(t *testing.T) {
+	line := `{"type":"assistant","timestamp":"2026-08-12T10:00:00Z",` +
+		`"cwd":"/Users/x/repo","gitBranch":"lobby-preview","message":{"content":"hi"}}`
+	ev, ok := parseEvent(line)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if ev.GitBranch != "lobby-preview" {
+		t.Errorf("GitBranch = %q, want lobby-preview", ev.GitBranch)
+	}
+}
+
+// A transcript from a directory that is not a git repo carries no branch.
+func TestParseEventGitBranchAbsent(t *testing.T) {
+	ev, ok := parseEvent(`{"type":"assistant","timestamp":"2026-08-12T10:00:00Z","cwd":"/tmp/x"}`)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if ev.GitBranch != "" {
+		t.Errorf("GitBranch = %q, want empty", ev.GitBranch)
+	}
+}
