@@ -115,6 +115,12 @@ type model struct {
 	// not per tick.
 	publishedState string
 
+	// publishedSince is the Since of the last publish. Paired with
+	// publishedState in maybePublishState's guard so a value-identical
+	// transition with a new anchored Since (Idle -> busy blip -> Idle)
+	// still republishes @claudemux_state_since.
+	publishedSince time.Time
+
 	// publishedContext/-Summary/-Prompt are the last-published info option
 	// values (context as integer percent; -1 = never published, since 0 is a
 	// legal percent). Same publish-on-change contract as publishedState.

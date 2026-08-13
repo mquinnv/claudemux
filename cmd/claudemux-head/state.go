@@ -26,6 +26,12 @@ type State struct {
 	ToolName string // populated for StateTool / StateAwaiting
 	Since    time.Time
 	BgCount  int // outstanding background tasks; populated for StateBackground
+
+	// Anchored: Since came from an event timestamp (or a launch time), not a
+	// now-fallback. Only an anchored Since is a real episode boundary the
+	// publisher may key change-detection on; an unanchored one differs every
+	// poll by construction.
+	Anchored bool
 }
 
 func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Time) State {
@@ -54,10 +60,11 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Tim
 				continue
 			}
 			since := parseTimestamp(e.Timestamp)
-			if since.IsZero() {
+			anchored := !since.IsZero()
+			if !anchored {
 				since = now
 			}
-			return State{Kind: StateTool, ToolName: tu.Name, Since: since}
+			return State{Kind: StateTool, ToolName: tu.Name, Since: since, Anchored: anchored}
 		}
 	}
 
@@ -71,15 +78,25 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Tim
 	}
 	switch last.Type {
 	case "assistant":
+		since := parseTimestamp(last.Timestamp)
+		anchored := !since.IsZero()
+		if !anchored {
+			since = now
+		}
 		if last.UserText != "" {
-			idle := State{Kind: StateIdle, Since: parseTimestampOr(last.Timestamp, now)}
+			idle := State{Kind: StateIdle, Since: since, Anchored: anchored}
 			return bgOverride(idle, bgCount, bgOldest)
 		}
-		return State{Kind: StateThinking, Since: parseTimestampOr(last.Timestamp, now)}
+		return State{Kind: StateThinking, Since: since, Anchored: anchored}
 	case "user":
 		// User turn (real prompt or tool_result with no new assistant yet) →
 		// Claude is about to think.
-		return State{Kind: StateThinking, Since: parseTimestampOr(last.Timestamp, now)}
+		since := parseTimestamp(last.Timestamp)
+		anchored := !since.IsZero()
+		if !anchored {
+			since = now
+		}
+		return State{Kind: StateThinking, Since: since, Anchored: anchored}
 	}
 	return bgOverride(State{Kind: StateIdle, Since: now}, bgCount, bgOldest)
 }
@@ -92,11 +109,11 @@ func bgOverride(s State, count int, oldest time.Time) State {
 	if s.Kind != StateIdle || count <= 0 {
 		return s
 	}
-	since := oldest
+	since, anchored := oldest, true
 	if since.IsZero() {
-		since = s.Since
+		since, anchored = s.Since, s.Anchored
 	}
-	return State{Kind: StateBackground, Since: since, BgCount: count}
+	return State{Kind: StateBackground, Since: since, BgCount: count, Anchored: anchored}
 }
 
 // lastConversationEvent returns the newest user or assistant event,

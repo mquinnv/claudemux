@@ -98,6 +98,37 @@ func TestMaybePublishStateOutsideTmux(t *testing.T) {
 	}
 }
 
+// A new waiting episode with the same value ("Idle" again after a busy blip
+// the poll never saw) must still republish _since: the conductor's snoozes
+// and queue order key on it, and a pinned stale Since starves the session.
+func TestMaybePublishStateRepublishesAnchoredSinceChange(t *testing.T) {
+	now := time.Now()
+	m := &model{selfPane: "%1"}
+	m.state = State{Kind: StateIdle, Since: time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC), Anchored: true}
+	if cmd := m.maybePublishState(now); cmd == nil {
+		t.Fatal("first publish must fire")
+	}
+	m.state.Since = m.state.Since.Add(5 * time.Minute) // same value, new episode
+	if cmd := m.maybePublishState(now); cmd == nil {
+		t.Error("anchored Since change with an unchanged value must republish")
+	}
+}
+
+// The no-flap invariant the old comment guarded: an unanchored Since is a
+// now-fallback that differs every tick, and must NOT trigger republishes.
+func TestMaybePublishStateUnanchoredSinceDoesNotFlap(t *testing.T) {
+	now := time.Now()
+	m := &model{selfPane: "%1"}
+	m.state = State{Kind: StateIdle, Since: now, Anchored: false}
+	if cmd := m.maybePublishState(now); cmd == nil {
+		t.Fatal("first publish must fire")
+	}
+	m.state.Since = now.Add(time.Second) // next tick's fallback
+	if cmd := m.maybePublishState(now.Add(time.Second)); cmd != nil {
+		t.Error("unanchored Since drift must not republish every tick")
+	}
+}
+
 func TestSanitizeOptionValue(t *testing.T) {
 	if got := sanitizeOptionValue("a\tb\nc"); got != "a b c" {
 		t.Errorf("got %q", got)

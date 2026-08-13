@@ -116,3 +116,23 @@ func TestBackgroundLabel(t *testing.T) {
 		t.Errorf("Label = %q, want %q", got, "Working 2")
 	}
 }
+
+func TestClassifyAnchoredSince(t *testing.T) {
+	now := time.Now()
+	// Event-stamped Idle: anchored.
+	events := []Event{{Type: "assistant", UserText: "done", Timestamp: "2026-08-13T10:00:00Z"}}
+	if got := classifyState(events, 0, time.Time{}, now); !got.Anchored {
+		t.Errorf("event-stamped Idle must be Anchored")
+	}
+	// Empty stream: Since is a now-fallback, not anchored — publishing it as
+	// a change every poll is exactly the flap the publish guard must avoid.
+	if got := classifyState(nil, 0, time.Time{}, now); got.Anchored {
+		t.Errorf("empty-stream Idle must not be Anchored")
+	}
+	// Background inherits anchoring from the oldest launch time.
+	events = []Event{{Type: "assistant", UserText: "launched", Timestamp: "2026-08-13T10:00:00Z"}}
+	got := classifyState(events, 2, time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC), now)
+	if got.Kind != StateBackground || !got.Anchored {
+		t.Errorf("got %v anchored=%v, want StateBackground anchored", got.Kind, got.Anchored)
+	}
+}

@@ -79,25 +79,21 @@ func publishStateCmd(selfPane string, s State, now time.Time) tea.Cmd {
 }
 
 // maybePublishState returns a cmd publishing the current state when its
-// machine form changed since the last publish, nil otherwise. Cheap enough to
-// call every poll. Outside tmux the cmd is nil every time — publishedState
-// still updates, which is harmless: there is no consumer without tmux.
-//
-// The guard compares only the value (statePublishValue), not value+since. A
-// session that rotates back to the same value (e.g. Idle -> Busy -> Idle)
-// leaves the published "_since" stale — pinned to the first Idle transition —
-// until the next real state transition republishes it. This is a deliberate
-// trade-off, not an oversight: guarding on value+since instead would
-// republish on every tick for sessions with an empty transcript, since
-// classifyState returns Since: now when there are no events, so "since"
-// would never compare equal across polls. The stale-_since case self-heals
-// on any real transition, so don't "fix" this into a per-tick republish.
+// machine form changed since the last publish — or when the state's Since
+// moved to a new ANCHORED value under the same machine form. The second
+// clause is what keeps @claudemux_state_since honest across value-identical
+// transitions (Idle -> busy blip between polls -> Idle): the conductor's
+// snooze matching and queue ordering key on _since, and a pinned stale value
+// starves the session. Anchored-only, because an unanchored Since is a
+// now-fallback that differs every tick — republishing on it would set a tmux
+// option once a second for every session with an empty transcript.
 func (m *model) maybePublishState(now time.Time) tea.Cmd {
 	v := statePublishValue(m.state)
-	if v == m.publishedState {
+	if v == m.publishedState && (!m.state.Anchored || m.state.Since.Equal(m.publishedSince)) {
 		return nil
 	}
 	m.publishedState = v
+	m.publishedSince = m.state.Since
 	return publishStateCmd(m.selfPane, m.state, now)
 }
 
