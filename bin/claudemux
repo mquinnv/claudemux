@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claudemux [-n] [-w|-W] [dir|query ...]
+# Usage: claudemux [-n] [-d] [-w|-W] [dir|query ...]
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
@@ -13,6 +13,10 @@
 # Options:
 #   -n   Create a new session even if one with the same name exists
 #        (appends -2, -3, ... to the session name).
+#   -d   Detached: create (or find) the session, print its name to stdout, and
+#        exit instead of attaching. For callers already inside tmux — the
+#        switchboard's `n` key runs `claudemux -n -d <query>` and then
+#        switch-clients to the printed name.
 #   -w   Mark this session as wanting a worktree regardless of config or repo
 #        state.
 #   -W   Never mark this session, whatever the config says.
@@ -35,6 +39,7 @@
 set -euo pipefail
 
 FORCE_NEW=false
+DETACHED=false
 WORKTREE_MODE=""   # "" = decide from config; "force"/"skip" from -w/-W
 worktree_mode_set() {
   if [ -n "$WORKTREE_MODE" ] && [ "$WORKTREE_MODE" != "$1" ]; then
@@ -43,12 +48,13 @@ worktree_mode_set() {
   fi
   WORKTREE_MODE="$1"
 }
-while getopts "nwW" opt; do
+while getopts "ndwW" opt; do
   case "$opt" in
     n) FORCE_NEW=true ;;
+    d) DETACHED=true ;;
     w) worktree_mode_set force ;;
     W) worktree_mode_set skip ;;
-    *) echo "Usage: claudemux [-n] [-w|-W] [dir|query ...]" >&2; exit 1 ;;
+    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -173,6 +179,14 @@ attach() {
   # sessions that predate this fix pick it up too.
   tmux set -t "$1" status-left-length 32
   apply_status_color "$1" "$2"
+  if [ "$DETACHED" = true ]; then
+    # The caller wants the name, not the client. Tab color is skipped too:
+    # this process's /dev/tty belongs to whatever pane invoked us (the
+    # switchboard's, typically), and painting it here would color that tab
+    # with the NEW project's color before any client has moved.
+    printf '%s\n' "$1"
+    exit 0
+  fi
   apply_tab_color "$2" || true
   # Not `exec`: running tmux as a child lets the launcher — and the shell that
   # invoked it — regain control when the session ends and read our exit code.

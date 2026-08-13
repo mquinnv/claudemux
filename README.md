@@ -79,8 +79,19 @@ poll) and is read-only — nothing about previewing a session touches it. On a
 pane too short to show both the box and the fleet, the box is dropped and the
 lobby renders exactly as it would with no preview at all.
 
+Press `n` to start a **new session** without leaving the lobby: the status
+line becomes a prompt, you type a project directory or zoxide query — the
+same thing you'd pass to `claudemux` on the command line — and `Enter` runs
+the equivalent of `claudemux -n` on it. The new session joins the list and
+you're switched straight to it; `Esc` cancels. While the prompt is open (or
+the launch is in flight) the conductor holds off dispatching you, so being
+carried away mid-keystroke isn't a thing. Under the hood this uses
+`claudemux -d`, which creates the session and prints its name instead of
+attaching.
+
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
-jumps to a session (and pauses conducting), `q` quits.
+jumps to a session (and pauses conducting), `n` starts a new session, `q`
+quits.
 
 ## Install
 

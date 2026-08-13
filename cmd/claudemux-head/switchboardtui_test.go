@@ -594,6 +594,175 @@ func TestSwModelViewPreviewGrowsIntoUnusedListRows(t *testing.T) {
 	}
 }
 
+func TestSwModelNKeyOpensCreatePrompt(t *testing.T) {
+	m := swTestModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = next.(swModel)
+	if !m.creating {
+		t.Fatal("n must open the create prompt")
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "new session:") {
+		t.Errorf("view must show the create prompt:\n%s", view)
+	}
+	if !strings.Contains(view, "esc cancel") {
+		t.Errorf("footer must switch to the input-mode keys:\n%s", view)
+	}
+}
+
+// While typing a query, every printable key is a literal character: q must
+// not quit, j/k must not move the selection, and space must not toggle
+// standby — a zoxide query can legitimately contain any of them.
+func TestSwModelCreateInputIsLiteral(t *testing.T) {
+	m := swTestModel()
+	m.creating = true
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'q'}},
+		{Type: tea.KeyRunes, Runes: []rune{'j'}},
+		{Type: tea.KeySpace},
+		{Type: tea.KeyRunes, Runes: []rune{'k'}},
+	} {
+		next, cmd := m.Update(key)
+		if cmd != nil {
+			t.Fatalf("typing %q must not produce a command", key.String())
+		}
+		m = next.(swModel)
+	}
+	if m.createInput != "qj k" {
+		t.Errorf("createInput = %q, want %q", m.createInput, "qj k")
+	}
+	if m.sel != 0 || m.standby {
+		t.Errorf("literal keys leaked into navigation: sel=%d standby=%v", m.sel, m.standby)
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := next.(swModel).createInput; got != "qj " {
+		t.Errorf("backspace must trim the last rune: %q", got)
+	}
+}
+
+func TestSwModelCreateEscCancels(t *testing.T) {
+	m := swTestModel()
+	m.creating = true
+	m.createInput = "api"
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(swModel)
+	if m.creating || m.createInput != "" {
+		t.Errorf("esc must cancel and clear: creating=%v input=%q", m.creating, m.createInput)
+	}
+	if cmd != nil || m.createBusy {
+		t.Error("a cancelled prompt must not launch anything")
+	}
+}
+
+func TestSwModelCreateEnterLaunches(t *testing.T) {
+	m := swTestModel()
+	m.creating = true
+	m.createInput = "  api  "
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(swModel)
+	if cmd == nil {
+		t.Fatal("enter with a query must launch a create command")
+	}
+	if !got.createBusy || got.creating {
+		t.Errorf("a launched create must be busy and out of input mode: busy=%v creating=%v",
+			got.createBusy, got.creating)
+	}
+}
+
+func TestSwModelCreateEnterBlankIsNoop(t *testing.T) {
+	m := swTestModel()
+	m.creating = true
+	m.createInput = "   "
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(swModel)
+	if cmd != nil || got.createBusy {
+		t.Error("a blank query must not launch anything")
+	}
+	if got.creating {
+		t.Error("enter on a blank query must still close the prompt")
+	}
+}
+
+func TestSwModelNKeyIgnoredWhileBusy(t *testing.T) {
+	m := swTestModel()
+	m.createBusy = true
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if next.(swModel).creating {
+		t.Error("n while a launch is in flight must not reopen the prompt")
+	}
+}
+
+// The conductor must sit out the create flow: dispatching mid-typing yanks
+// the user off the prompt, and dispatching mid-launch races the switch the
+// landed swCreateMsg is about to issue.
+func TestSwModelCreateSuppressesConductor(t *testing.T) {
+	snap := swSnapshot{
+		Sessions: []swSession{{Name: "api", State: "Idle", Since: time.Unix(100, 0)}},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys001": "switchboard"},
+	}
+	for _, tc := range []struct {
+		name string
+		prep func(*swModel)
+	}{
+		{"typing", func(m *swModel) { m.creating = true }},
+		{"launch in flight", func(m *swModel) { m.createBusy = true }},
+	} {
+		m := swTestModel()
+		tc.prep(&m)
+		next, _ := m.Update(swSnapshotMsg{snap: snap})
+		got := next.(swModel)
+		if got.cond.phase != swParked || got.cond.escortee != "" {
+			t.Errorf("%s: conductor dispatched: phase=%v escortee=%q",
+				tc.name, got.cond.phase, got.cond.escortee)
+		}
+	}
+}
+
+func TestSwModelCreateResultSwitchesToNewSession(t *testing.T) {
+	m := swTestModel()
+	m.createBusy = true
+	next, cmd := m.Update(swCreateMsg{name: "api-2"})
+	got := next.(swModel)
+	if got.createBusy {
+		t.Error("a landed create must clear the busy flag")
+	}
+	if cmd == nil {
+		t.Error("a created session must be switched to")
+	}
+
+	m = swTestModel()
+	m.createBusy = true
+	m.cond.client = ""
+	if _, cmd := m.Update(swCreateMsg{name: "api-2"}); cmd != nil {
+		t.Error("with no client to move, a landed create must not switch")
+	}
+}
+
+func TestSwModelCreateFailureShownOnStatusLine(t *testing.T) {
+	m := swTestModel()
+	m.createBusy = true
+	next, cmd := m.Update(swCreateMsg{err: errors.New("'nope' is not a directory and has no zoxide match")})
+	got := next.(swModel)
+	if cmd != nil {
+		t.Error("a failed create must not switch anywhere")
+	}
+	if got.createBusy {
+		t.Error("a failed create must clear the busy flag")
+	}
+	if view := ansi.Strip(got.View()); !strings.Contains(view, "create failed: 'nope' is not a directory") {
+		t.Errorf("the failure must reach the status line:\n%s", view)
+	}
+}
+
+func TestSwModelCreateBusyStatusLine(t *testing.T) {
+	m := swTestModel()
+	m.createBusy = true
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "creating session") {
+		t.Errorf("an in-flight launch must say so on the status line:\n%s", view)
+	}
+}
+
 func TestSwModelViewEmptyFleetHasNoPreview(t *testing.T) {
 	m := newSwModel("%9")
 	m.width, m.height = 80, 46

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -100,6 +102,14 @@ type swModel struct {
 	previewOut      string
 	previewErr      bool
 	previewInFlight bool
+	// New-session input mode (`n`): creating means the status line is a text
+	// prompt and every printable key is a literal character of createInput.
+	// createBusy marks a launch in flight (one at a time); createErr keeps the
+	// last failed launch's reason on the status line until the next attempt.
+	creating    bool
+	createInput string
+	createBusy  bool
+	createErr   string
 }
 
 func newSwModel(selfPane string) swModel {
@@ -164,6 +174,57 @@ func swTmux(ctx context.Context, args ...string) (string, error) {
 	return string(out), err
 }
 
+type swCreateMsg struct {
+	name string // created session's name; "" on error
+	err  error
+}
+
+// swLastLine is the last non-empty line of a command's output, trimmed —
+// claudemux -d prints exactly the session name, but taking the last line keeps
+// this robust against anything else that learns to chat on the same stream.
+func swLastLine(out string) string {
+	last := ""
+	for _, l := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(l); s != "" {
+			last = s
+		}
+	}
+	return last
+}
+
+// swCreateCmd launches a new claudemux session for query via the launcher
+// script: `claudemux -n -d` builds the session (forcing a new one on a name
+// collision, exactly like the user's own `claudemux -n`) and prints its name
+// instead of attaching — attaching is impossible from inside tmux, and the
+// caller here wants to switch-client anyway. The query resolves the same way
+// it does on the command line: a real directory, else the best zoxide match.
+// The fleet list needs no help picking the session up; the next poll sees it.
+func swCreateCmd(query string) tea.Cmd {
+	return func() tea.Msg {
+		// Generous timeout: the launcher shells out to tmux, git, and config
+		// lookups. Its ~25s op_env wait is backgrounded and doesn't hold the
+		// -d exit up.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "claudemux", "-n", "-d", "--", query)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			// The launcher's stderr says why — an unresolved query, a tmux
+			// failure — and its last line beats a bare exit status.
+			if detail := swLastLine(stderr.String()); detail != "" {
+				return swCreateMsg{err: errors.New(detail)}
+			}
+			return swCreateMsg{err: err}
+		}
+		name := swLastLine(stdout.String())
+		if name == "" {
+			return swCreateMsg{err: errors.New("claudemux -d printed no session name")}
+		}
+		return swCreateMsg{name: name}
+	}
+}
+
 // swSwitchCmd moves a client. Fire-and-forget: if tmux refuses (client went
 // away mid-tick), the next poll sees reality and the conductor re-decides.
 func swSwitchCmd(client, target string) tea.Cmd {
@@ -202,8 +263,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh the preview on the same beat as the fleet. tea.Batch drops
 		// nil commands, so this is a no-op when there is nothing to capture.
+		// The conductor also sits out the create flow: dispatching the client
+		// away mid-typing would yank the user off the prompt, and dispatching
+		// while a launch is in flight would race the switch the launch is
+		// about to issue itself.
 		pv := m.previewCmd()
-		if !m.standby {
+		if !m.standby && !m.creating && !m.createBusy {
 			if act, ok := m.cond.step(m.snap); ok {
 				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target), pv)
 			}
@@ -228,10 +293,63 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewErr = msg.err != nil
 		m.previewOut = msg.out
 		return m, nil
+	case swCreateMsg:
+		m.createBusy = false
+		if msg.err != nil {
+			m.createErr = msg.err.Error()
+			return m, nil
+		}
+		m.createErr = ""
+		// Jump straight to the new session; the next poll adds it to the
+		// list. Same shape as an enter-jump: the conductor sees the client
+		// moved and pauses until the user returns to the lobby.
+		if m.cond.client != "" {
+			return m, swSwitchCmd(m.cond.client, msg.name)
+		}
+		return m, nil
 	case tea.KeyMsg:
+		if m.creating {
+			switch msg.String() {
+			case "esc", "ctrl+c":
+				m.creating = false
+				m.createInput = ""
+			case "enter":
+				query := strings.TrimSpace(m.createInput)
+				m.creating = false
+				m.createInput = ""
+				if query != "" {
+					m.createBusy = true
+					m.createErr = ""
+					return m, swCreateCmd(query)
+				}
+			case "backspace":
+				if r := []rune(m.createInput); len(r) > 0 {
+					m.createInput = string(r[:len(r)-1])
+				}
+			default:
+				// Only literal text lands in the query — navigation chords
+				// and function keys are ignored rather than typed. Space is
+				// its own key type in Bubble Tea, and a zoxide query can
+				// legitimately contain one.
+				if msg.Type == tea.KeyRunes && !msg.Alt {
+					m.createInput += string(msg.Runes)
+				} else if msg.Type == tea.KeySpace {
+					m.createInput += " "
+				}
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "n":
+			// One launch at a time: a second prompt opened while one is in
+			// flight could race it for the client.
+			if !m.createBusy {
+				m.creating = true
+				m.createInput = ""
+				m.createErr = ""
+			}
 		case " ":
 			m.standby = !m.standby
 			if m.standby {
@@ -428,7 +546,22 @@ func (m swModel) View() string {
 		status = fmt.Sprintf("standby · %d waiting — space to conduct",
 			len(m.snap.waitingQueue(m.cond.snoozed)))
 	}
-	statusLine := swStatusStyle.Render(status)
+	// The create flow borrows the status line rather than adding one, so the
+	// layout (and computePreviewLayout's accounting of it) never shifts.
+	statusStyled := true
+	switch {
+	case m.creating:
+		status = "new session: " + m.createInput + "▌"
+		statusStyled = false // unstyled so the typed query stands out
+	case m.createBusy:
+		status = "creating session…"
+	case m.createErr != "":
+		status = "create failed: " + m.createErr
+	}
+	statusLine := status
+	if statusStyled {
+		statusLine = swStatusStyle.Render(status)
+	}
 	if m.width > 0 {
 		statusLine = clipLine(statusLine, m.width)
 	}
@@ -442,7 +575,11 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footer := swStatusStyle.Render("space conduct/standby · j/k select · enter jump · q quit")
+	footerText := "space conduct/standby · j/k select · enter jump · n new · q quit"
+	if m.creating {
+		footerText = "enter create · esc cancel"
+	}
+	footer := swStatusStyle.Render(footerText)
 	if m.width > 0 {
 		footer = clipLine(footer, m.width)
 	}
