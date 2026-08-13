@@ -171,8 +171,9 @@ contain it with no background task involved. The prefix check is the whole guard
 
 ## Tracking
 
-Outstanding tasks live in model state as `id → launch time`, updated incrementally from
-each poll's **new** events.
+Outstanding tasks live in model state as `id → {launch time, kind}`, updated incrementally
+from each poll's **new** events. The kind is what lets expiry apply a different regime to
+shells and agents (below).
 
 Not recomputed from the event ring: `allEvents` is capped at 1000 (`tui.go:170`), and a
 busy session scrolls a long-running task's launch out of the ring while it is still
@@ -214,8 +215,12 @@ day.
    - the launch is within `bgAgentMaxAge` (24 hours) of now regardless of liveness — a
      backstop against a wedged agent that keeps writing forever.
 
-   With no `subagentsDir` configured (tests, or a layout the head doesn't recognize), an
-   agent falls back to the shell's flat cap rather than counting forever.
+   With no `subagentsDir` configured at all — tests only; both construction paths below set
+   one from the transcript path in production — an agent falls back to the shell's flat cap
+   rather than counting forever. A layout the head doesn't recognize is a different failure:
+   `subagentsDir` stays non-empty but points to a directory whose agent files never appear,
+   so that case never reaches the flat-cap fallback — it expires via `bgAgentSpawnGrace`
+   instead, the same stat-error branch that covers the ordinary gap before the file exists.
 
 Without expiry, a task that never notifies (crashed, killed, head restarted mid-task)
 would mark the session busy forever and the conductor would never visit it again —
@@ -224,10 +229,18 @@ turning a cosmetic bug into an unreachable session. Worst case now is `bgAgentSt
 
 ### Session rotation
 
-`switchSession` resets the tracker along with the rest of the derived state. A head that
-starts, restarts, or rotates while a task is already outstanding never saw its launch and
-will not count it. That is graceful — it degrades to today's behavior — and is not worth
-solving by re-reading the whole transcript.
+Both construction paths — `newModel` at startup and `switchSession` at rotation — seed a
+fresh `EventReader` with `SeedFromEnd(500)` and replay that same end-anchored window through
+`m.bg.observe(seeded, now)` before anything else runs. A head that starts, restarts, or
+rotates while a task is already outstanding does see its launch, as long as the launch is
+still inside that window.
+
+The replay cannot resurrect finished work: completions always postdate their launches, so a
+launch inside the seed window either carries its completion inside the same window —
+netting to nothing, exactly as if the tracker had been running continuously — or the task
+really is still outstanding. A launch older than the seed window is still missed; that
+narrower gap is what expiry and liveness exist to tolerate, the same as any other launch the
+tracker never saw. Re-reading the whole transcript to close it is still not worth it.
 
 ## State
 
@@ -277,8 +290,10 @@ All three are additive. Nothing else reads these fields, so nothing else changes
   both (idempotent), and **skill prose containing `task-notification` mid-text, which must
   not register**.
 - **Tracker** — launch then completion nets to empty; two launches and one completion
-  leaves one; expiry at 30 minutes; a genuine user prompt does not retire anything; a
-  delivered `<task-notification>` user turn does not count as a genuine prompt.
+  leaves one; shell expiry at the flat 30-minute cap; agent expiry by liveness (spawn grace
+  before the transcript file exists, stall age once it does, the 24-hour hard cap regardless
+  of either); a genuine user prompt does not retire anything; a delivered
+  `<task-notification>` user turn does not count as a genuine prompt.
 - **classifyState** — idle with outstanding work → `Background`; idle with none → `Idle`
   (unchanged); unresolved tool_use with outstanding work → `Tool` (unchanged); `Since` is
   the oldest launch.
@@ -294,6 +309,8 @@ quoted above.
   `toolUseResult.isAsync`/`agentId`, detection sees no launch and every session reports
   `Idle` at the end of its turn — the pre-branch bug, and a graceful degradation rather
   than a silent wrong answer.
-- **Seeding.** Work launched before the head started or rotated is invisible (above).
+- **Seeding.** Work launched before the head started or rotated is recovered when the
+  launch falls inside the 500-event seed window (see Session rotation, above); a launch
+  older than that window is still invisible.
 - **Foreground agents are unaffected**, and deliberately so — they already classify
   correctly through the unresolved `tool_use` path.
