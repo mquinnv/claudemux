@@ -32,6 +32,7 @@ const (
 	swAgeColW   = 6  // widest formatDuration output in practice ("23h59m")
 	swCtxBarW   = 5
 	swCtxColW   = swCtxBarW + 5 // bar + " 100%"
+	swModelColW = 13            // widest shortModel output ("sonnet 4.5 1M")
 )
 
 // swPad right-pads s to w display cells, measuring with lipgloss so ANSI
@@ -72,6 +73,12 @@ type swTickMsg time.Time
 type swSnapshotMsg struct {
 	snap swSnapshot
 	err  error
+	// Account rate limits ride along on every poll, tmux error or not: the
+	// meters are about the account, not the fleet, so a wedged tmux should
+	// not blank them.
+	at    time.Time
+	rl    RateLimits
+	rlErr error
 }
 
 var (
@@ -91,6 +98,13 @@ type swModel struct {
 	width    int
 	height   int
 	lastErr  string
+	// Account budget meters, same source and shape as the head's: the abtop
+	// rate-limits cache re-read on every poll, plus the recent five-hour
+	// samples that feed the "empty in X" burn-rate ETA.
+	rateLimitsPath string
+	rateLimits     RateLimits
+	rateOK         bool
+	pctSamples     []pctSample
 	// standby stops all conducting (space toggles it): the lobby keeps
 	// showing live states but the conductor is never stepped, so the user
 	// can sit and look at the fleet without being dispatched.
@@ -113,10 +127,10 @@ type swModel struct {
 }
 
 func newSwModel(selfPane string) swModel {
-	return swModel{selfPane: selfPane, cond: newConductor()}
+	return swModel{selfPane: selfPane, cond: newConductor(), rateLimitsPath: defaultRateLimitsPath()}
 }
 
-func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane) }
+func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane, m.rateLimitsPath) }
 
 // selectedPane returns the claude pane of the selected session — "" when there
 // is no selection, or when that session has no claude pane to capture.
@@ -145,27 +159,34 @@ func (m *swModel) previewCmd() tea.Cmd {
 
 // swPollCmd runs the three tmux listings off the update loop. Any failure
 // returns the error instead of a snapshot — the model keeps its previous
-// data on screen and simply tries again next tick.
-func swPollCmd(selfPane string) tea.Cmd {
+// data on screen and simply tries again next tick. The rate-limits cache is
+// read up front so every message carries it, even the tmux-error ones.
+func swPollCmd(selfPane, rlPath string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
+		rl, rlErr := readRateLimits(rlPath)
+		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}")
+			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}")
 		if err != nil {
-			return swSnapshotMsg{err: err}
+			msg.err = err
+			return msg
 		}
 		paneOut, err := swTmux(ctx, "list-panes", "-a", "-F",
 			"#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_name}")
 		if err != nil {
-			return swSnapshotMsg{err: err}
+			msg.err = err
+			return msg
 		}
 		clientOut, err := swTmux(ctx, "list-clients", "-F",
 			"#{client_name}\t#{client_session}")
 		if err != nil {
-			return swSnapshotMsg{err: err}
+			msg.err = err
+			return msg
 		}
-		return swSnapshotMsg{snap: buildSwSnapshot(sessOut, paneOut, clientOut, selfPane)}
+		msg.snap = buildSwSnapshot(sessOut, paneOut, clientOut, selfPane)
+		return msg
 	}
 }
 
@@ -227,11 +248,39 @@ func swCreateCmd(query string) tea.Cmd {
 
 // swSwitchCmd moves a client. Fire-and-forget: if tmux refuses (client went
 // away mid-tick), the next poll sees reality and the conductor re-decides.
-func swSwitchCmd(client, target string) tea.Cmd {
+// With banner set, a successful switch is followed by the arrival popup on the
+// target session (see banner.go) — only successful, so a vanished client
+// doesn't get a banner announcing a move that never happened.
+func swSwitchCmd(client, target string, banner bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run()
+		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run(); err != nil || !banner {
+			return nil
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return nil
+		}
+		// The popup blocks for up to swBannerHold by design; give it its own
+		// timeout with headroom rather than sharing the switch's 2s budget.
+		bctx, bcancel := context.WithTimeout(context.Background(), swBannerHold+3*time.Second)
+		defer bcancel()
+		_ = exec.CommandContext(bctx, "tmux", swBannerPopupArgs(self, client, target)...).Run()
+		return nil
+	}
+}
+
+// swSwitchLastCmd sends a client back to its last session — tmux's own
+// per-client "last session", which is wherever the client was before it landed
+// on the lobby. Fire-and-forget like swSwitchCmd: a client with no last
+// session (attached straight to the lobby) makes tmux refuse, and the lobby
+// simply stays put.
+func swSwitchLastCmd(client string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-l").Run()
 		return nil
 	}
 }
@@ -245,8 +294,29 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case swTickMsg:
-		return m, swPollCmd(m.selfPane)
+		return m, swPollCmd(m.selfPane, m.rateLimitsPath)
 	case swSnapshotMsg:
+		// Rate limits first, before the tmux-error early return: the meters
+		// track the account and stay fresh even when tmux is misbehaving.
+		// Sample bookkeeping mirrors the head's dataMsg handling — record a
+		// sample only when the percentage moves, trim to the last hour.
+		if msg.rlErr == nil {
+			m.rateLimits = msg.rl
+			m.rateOK = true
+			if len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != msg.rl.FiveHour.UsedPercent {
+				m.pctSamples = append(m.pctSamples, pctSample{at: msg.at, pct: msg.rl.FiveHour.UsedPercent})
+			}
+			cutoff := msg.at.Add(-1 * time.Hour)
+			trimmed := m.pctSamples[:0]
+			for _, s := range m.pctSamples {
+				if s.at.After(cutoff) {
+					trimmed = append(trimmed, s)
+				}
+			}
+			m.pctSamples = trimmed
+		} else {
+			m.rateOK = false
+		}
 		// Schedule the next tick from here, not from swTickMsg: polls never
 		// overlap, and a slow tmux stretches the interval instead of queueing.
 		if msg.err != nil {
@@ -270,7 +340,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pv := m.previewCmd()
 		if !m.standby && !m.creating && !m.createBusy {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
-				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target), pv)
+				return m, tea.Batch(swNextTick(),
+					swSwitchCmd(act.Client, act.Target, swWantsBanner(act.Target, m.snap.Lobby)), pv)
 			}
 		}
 		return m, tea.Batch(swNextTick(), pv)
@@ -302,9 +373,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.createErr = ""
 		// Jump straight to the new session; the next poll adds it to the
 		// list. Same shape as an enter-jump: the conductor sees the client
-		// moved and pauses until the user returns to the lobby.
+		// moved and pauses until the user returns to the lobby — and like an
+		// enter-jump, no arrival banner: the user asked to go there.
 		if m.cond.client != "" {
-			return m, swSwitchCmd(m.cond.client, msg.name)
+			return m, swSwitchCmd(m.cond.client, msg.name, false)
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -378,9 +450,17 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			// A manual jump; the conductor notices the client moved on the
-			// next poll and pauses — no special bookkeeping here.
+			// next poll and pauses — no special bookkeeping here. No banner
+			// either: the user chose this destination themselves.
 			if m.sel < len(m.snap.Sessions) && m.cond.client != "" {
-				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name)
+				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name, false)
+			}
+		case "esc":
+			// Back out of the lobby to wherever the client came from. Same
+			// conductor story as enter: the client moves, the next poll sees
+			// it, and the conductor pauses.
+			if m.cond.client != "" {
+				return m, swSwitchLastCmd(m.cond.client)
 			}
 		}
 	}
@@ -398,9 +478,59 @@ func swSessionRows(sess swSession) int {
 	return 1
 }
 
+// swMetersLine renders the account budget gauges as a full-width line — the
+// head's renderMetersLine minus the per-session ctx gauge, since the lobby
+// has no session of its own. Same degradation and growth rules: when the
+// line overflows the pane width, gauges drop from the end in the head's
+// order (eta, then wk; 5h always stays), and the surviving bars then widen
+// past defaultBarW to consume the leftover columns.
+func swMetersLine(m swModel, now time.Time) string {
+	build := func(barW int) []string {
+		return rateGauges(m.rateLimits, m.pctSamples, now, barW)
+	}
+	if m.width <= 0 {
+		// No size yet: emit the baseline gauges unstyle rather than fitting
+		// to a width we don't know.
+		return " " + strings.Join(build(defaultBarW), " · ")
+	}
+	avail := m.width - 2 // columns inside the " "..." " padding below
+	if avail < 1 {
+		avail = 1
+	}
+	parts := build(defaultBarW)
+	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
+		parts = parts[:len(parts)-1]
+	}
+
+	// Only 5h and wk carry bars — the trailing eta segment is plain text — so
+	// the slack splits across those two, or the eta's share would just become
+	// trailing blank space. Integer division leaves a few columns unspent
+	// rather than risking an overflow that clipLine would then chop.
+	barCount := len(parts)
+	if barCount > 2 {
+		barCount = 2
+	}
+	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
+		wide := build(defaultBarW + grow)[:len(parts)]
+		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
+			parts = wide
+		}
+	}
+	return statusbarStyle.Width(m.width).Render(clipLine(" "+strings.Join(parts, " · ")+" ", m.width))
+}
+
 func (m swModel) View() string {
+	now := time.Now()
 	var b strings.Builder
-	b.WriteString(swTitleStyle.Render("claudemux switchboard") + "\n\n")
+	b.WriteString(swTitleStyle.Render("claudemux switchboard") + "\n")
+	// The account budget meters sit under the title, where the head keeps its
+	// meters line: full-width 5h/wk gauges with reset times, plus the ETA when
+	// there's burn-rate signal. Omitted entirely (no blank placeholder) when
+	// the cache is unreadable — computePreviewLayout is told either way.
+	if m.rateOK {
+		b.WriteString(swMetersLine(m, now) + "\n")
+	}
+	b.WriteString("\n")
 	if len(m.snap.Sessions) == 0 {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
@@ -411,7 +541,7 @@ func (m swModel) View() string {
 	for _, sess := range m.snap.Sessions {
 		want += swSessionRows(sess)
 	}
-	lay := computePreviewLayout(m.height, m.lastErr != "", want)
+	lay := computePreviewLayout(m.height, m.lastErr != "", m.rateOK, want)
 
 	// Only when the fleet's total need EXCEEDS the cap is anything dropped —
 	// and then one row is held back so the "+N more" line announcing the
@@ -425,7 +555,6 @@ func (m swModel) View() string {
 		}
 	}
 
-	now := time.Now()
 	used, shown := 0, 0
 	for i, sess := range m.snap.Sessions {
 		// budget == 0 means uncapped (no preview drawn, or the fleet already
@@ -465,6 +594,12 @@ func (m swModel) View() string {
 		if sess.Topic != "" {
 			topic = "  " + swUnknownStyle.Render(sess.Topic)
 		}
+		// Unset model (pre-publish head) renders a blank cell of the same
+		// width, like context: the topics after it must not shift.
+		modelTxt := ""
+		if sess.Model != "" {
+			modelTxt = shortModel(sess.Model)
+		}
 		// The name cell is padded before styling so the selection highlight
 		// covers the whole column, not just the name's own runes. Truncated
 		// by display width (not rune count) for the same reason as swCell: a
@@ -474,10 +609,11 @@ func (m swModel) View() string {
 		if i == m.sel {
 			name = swSelStyle.Render(name)
 		}
-		line := fmt.Sprintf(" %s%s %s%s  %s%s", marker, name,
+		line := fmt.Sprintf(" %s%s %s%s  %s %s%s", marker, name,
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),
-			swPad(ctx, swCtxColW), topic)
+			swPad(ctx, swCtxColW),
+			swCell(modelTxt, swModelColW, swUnknownStyle, false), topic)
 		if m.width > 0 {
 			line = clipLine(line, m.width)
 		}
@@ -579,7 +715,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · n new · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}

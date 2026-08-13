@@ -52,6 +52,11 @@ It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
 until it starts waiting again for a new reason.
 
+Every escorted arrival is announced: a small popup names the session you just
+landed in (`⇥ remix-2 · escorted by claudemux`) and closes after two seconds or
+on your first keypress, so a switch is never a silent teleport. Manual jumps
+(`Enter` on the lobby) skip the banner — you chose where you were going.
+
 The iTerm2 tab color follows you as you're carried between sessions — each
 session paints its project color, and sessions without one (the lobby included)
 reset the tab to the terminal default.
@@ -65,6 +70,11 @@ The lobby is a dispatch point: whenever you're parked there and something waits,
 you get carried to it. To sit and watch the fleet instead, press `Space` — it
 toggles **standby**, which keeps the states live but never dispatches, until you
 press `Space` again.
+
+Under the title, the lobby shows the same account budget meters as the head:
+the 5-hour and weekly rate-limit gauges with their reset times (and an
+"empty in X" projection when usage is climbing), so you can see the account's
+headroom without jumping into a session.
 
 Each session gets two lines: state, timer, a context-usage meter, and its
 live Haiku-generated topic on the first, and a dimmer second line underneath
@@ -90,7 +100,8 @@ carried away mid-keystroke isn't a thing. Under the hood this uses
 attaching.
 
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
-jumps to a session (and pauses conducting), `n` starts a new session, `q`
+jumps to a session (and pauses conducting), `Esc` returns to the session you
+came from (tmux's per-client last session), `n` starts a new session, `q`
 quits.
 
 ## Install

@@ -2239,6 +2239,131 @@ func TestTeardownAutoArmSurvivesLastPromptShadow(t *testing.T) {
 	}
 }
 
+// A transcript that reappears at a new path with the SAME session id is the
+// session moving between project slugs — Claude Code re-homes the file on
+// EnterWorktree/ExitWorktree — not a rotation. The armed watch must survive:
+// the move is caused by the very wrap-up the watch is following (its
+// ExitWorktree step), and aborting here left /done's worktree removal
+// unobserved, so "press x to tear down" never appeared.
+func TestUpdateDataMsgSameSessionMovePreservesTeardown(t *testing.T) {
+	dir := t.TempDir()
+	oldDir := filepath.Join(dir, "proj--worktree-slug")
+	newDir := filepath.Join(dir, "proj-main-slug")
+	for _, d := range []string{oldDir, newDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := filepath.Join(oldDir, "sess-1.jsonl")
+	newp := filepath.Join(newDir, "sess-1.jsonl")
+	if err := os.WriteFile(newp, []byte(`{"type":"assistant","timestamp":"2026-08-13T14:50:00Z","message":{"model":"claude-moved","content":[{"type":"text","text":"hi"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := teardownTestModel()
+	m.jsonlPath = old
+	m.sessionID = "sess-1"
+	m.reader = newEventReader(old)
+	m.teardown = teardownSent
+	m.teardownAuto = true
+	m.teardownSubmitted = true
+
+	next, _ := m.Update(dataMsg{time: time.Now(), activeJSONL: newp,
+		rateLimitErr: errors.New("no rate limits in this test")})
+	got := next.(model)
+
+	if got.teardown != teardownSent {
+		t.Fatalf("phase = %v, want teardownSent to survive the move", got.teardown)
+	}
+	if !got.teardownAuto || !got.teardownSubmitted {
+		t.Error("teardown evidence lost across the move")
+	}
+	if got.teardownWorkDir != "/tmp/repo/.claude/worktrees/wt" {
+		t.Errorf("gate target = %q, want it preserved", got.teardownWorkDir)
+	}
+	if got.jsonlPath != newp {
+		t.Errorf("jsonlPath = %q, want rebound to %q", got.jsonlPath, newp)
+	}
+	if got.sessionID != "sess-1" {
+		t.Errorf("sessionID = %q, want unchanged", got.sessionID)
+	}
+	if got.modelName != "claude-moved" {
+		t.Errorf("modelName = %q, want %q (reseed + recompute from the new path)", got.modelName, "claude-moved")
+	}
+}
+
+// A different session id at a new path is a genuine rotation and must still
+// abort the watch: the wrap-up went to a session that is gone, and certifying
+// its submission against the new session's prompts would be a lie.
+func TestUpdateDataMsgRotationAbortsTeardown(t *testing.T) {
+	dir := t.TempDir()
+	newp := filepath.Join(dir, "sess-2.jsonl")
+	if err := os.WriteFile(newp, []byte(`{"type":"assistant","timestamp":"2026-08-13T14:50:00Z","message":{"model":"claude-new","content":[{"type":"text","text":"hi"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := teardownTestModel()
+	m.jsonlPath = filepath.Join(dir, "sess-1.jsonl")
+	m.sessionID = "sess-1"
+	m.reader = newEventReader(m.jsonlPath)
+	m.teardown = teardownSent
+	m.teardownSubmitted = true
+
+	next, _ := m.Update(dataMsg{time: time.Now(), activeJSONL: newp,
+		rateLimitErr: errors.New("no rate limits in this test")})
+	got := next.(model)
+
+	if got.teardown != teardownIdle {
+		t.Fatalf("phase = %v, want teardownIdle after a real rotation", got.teardown)
+	}
+	if got.teardownNote != "session rotated" {
+		t.Errorf("note = %q, want %q", got.teardownNote, "session rotated")
+	}
+	if got.sessionID != "sess-2" {
+		t.Errorf("sessionID = %q, want the rotated session", got.sessionID)
+	}
+}
+
+// The reseed can be the first delivery of the wrap-up prompt itself: a /done
+// whose hooks move the transcript within one poll interval leaves the old
+// reader never having tailed the turn. The move path mirrors the normal
+// path's auto-arm edge, so the wrap-up seen only in the reseeded ring still
+// arms the watch.
+func TestUpdateDataMsgMoveArmsWrapUpFromReseed(t *testing.T) {
+	dir := t.TempDir()
+	oldDir := filepath.Join(dir, "a")
+	newDir := filepath.Join(dir, "b")
+	for _, d := range []string{oldDir, newDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newp := filepath.Join(newDir, "sess-1.jsonl")
+	if err := os.WriteFile(newp, []byte(`{"type":"user","timestamp":"2026-08-13T14:50:00Z","cwd":"/tmp/repo/.claude/worktrees/wt","message":{"content":"<command-message>done</command-message>\n<command-name>/done</command-name>"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := teardownTestModel()
+	m.jsonlPath = filepath.Join(oldDir, "sess-1.jsonl")
+	m.sessionID = "sess-1"
+	m.reader = newEventReader(m.jsonlPath)
+	m.lastTyped = "an earlier prompt"
+
+	next, _ := m.Update(dataMsg{time: time.Now(), activeJSONL: newp,
+		rateLimitErr: errors.New("no rate limits in this test")})
+	got := next.(model)
+
+	if got.teardown != teardownSent {
+		t.Fatalf("phase = %v, want teardownSent: the reseeded wrap-up must arm", got.teardown)
+	}
+	if !got.teardownAuto {
+		t.Error("auto = false; the head armed itself and the chip must say so")
+	}
+	if got.teardownWorkDir != "/tmp/repo/.claude/worktrees/wt" {
+		t.Errorf("gate target = %q, want the worktree cwd from the reseeded ring", got.teardownWorkDir)
+	}
+}
+
 // Auto-arm outside a worktree now captures the session's real (non-worktree)
 // directory as the gate target rather than declining and clearing it — the
 // safety net moved to teardownAutoGateOpen's cleanliness requirement (see

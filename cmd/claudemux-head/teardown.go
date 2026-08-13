@@ -503,9 +503,35 @@ func claudeGoneCmd(selfPane string) tea.Cmd {
 	}
 }
 
+// clientsOnSession parses `list-clients -F "#{client_name}\t#{session_id}"`
+// output and returns the clients attached to session. Matched by session ID,
+// not name, for the same reason killSessionArgs takes one: the clients being
+// rescued here are exactly the ones the kill below is about to strand, so
+// both calls must resolve the session identically.
+func clientsOnSession(listing, session string) []string {
+	var clients []string
+	for _, line := range strings.Split(listing, "\n") {
+		name, sess, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || name == "" || sess != session {
+			continue
+		}
+		clients = append(clients, name)
+	}
+	return clients
+}
+
 // killSessionCmd ends the tmux session this pane lives in. It is the last
 // thing the process does: the kill takes the head down with everything else,
 // so there is no message to return and no state to render afterwards.
+//
+// Before the kill, every client attached to the dying session is switched
+// away — to its last session first (the switchboard lobby, when the client
+// was ferried here from there), then to the switchboard by name as a
+// fallback. Without this, tmux's default detach-on-destroy detaches the
+// client, which closes the whole terminal window when that terminal exists
+// only to run tmux. A client with nowhere to go (attached directly, no
+// lobby running) still detaches exactly as before — both switches failing
+// is not an error, it is the old behavior.
 //
 // nil when there is no pane to resolve a session from, so callers can append
 // it unconditionally — the same contract as renameTabCmd.
@@ -514,18 +540,49 @@ func killSessionCmd(selfPane string) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, "tmux", "display-message",
+		// Each tmux call gets its own deadline, per teardownTmuxTimeout's
+		// contract (see teardownSendCmd): one shared 2s window across the
+		// lookup, a switch per client, and the kill could starve the kill —
+		// the one call this command exists to make.
+		run := func(args ...string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+			defer cancel()
+			return exec.CommandContext(ctx, "tmux", args...).Run()
+		}
+		outCtx, cancelOut := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		out, err := exec.CommandContext(outCtx, "tmux", "display-message",
 			"-p", "-t", selfPane, "#{session_id}").Output()
+		cancelOut()
 		if err != nil {
 			return nil
 		}
-		args, ok := killSessionArgs(strings.TrimSpace(string(out)))
+		session := strings.TrimSpace(string(out))
+		args, ok := killSessionArgs(session)
 		if !ok {
 			return nil
 		}
-		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+
+		// Rescue attached clients before the session under them disappears.
+		// Best-effort throughout: a failed listing or switch must never hold
+		// up the kill the user already confirmed.
+		listCtx, cancelList := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		listing, listErr := exec.CommandContext(listCtx, "tmux", "list-clients",
+			"-F", "#{client_name}\t#{session_id}").Output()
+		cancelList()
+		if listErr == nil {
+			for _, client := range clientsOnSession(string(listing), session) {
+				// `-l` is tmux's own per-client last session — wherever this
+				// client was before it landed here. The "=" match on the
+				// fallback is exact-name, same as bin/claudemux uses, so a
+				// project session merely prefixed "switchboard…" can't be
+				// selected by accident.
+				if run("switch-client", "-c", client, "-l") != nil {
+					_ = run("switch-client", "-c", client, "-t", "=switchboard")
+				}
+			}
+		}
+
+		_ = run(args...)
 		return nil
 	}
 }

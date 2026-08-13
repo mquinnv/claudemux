@@ -14,11 +14,12 @@ import (
 
 func swTestModel() swModel {
 	m := newSwModel("%9")
-	m.width, m.height = 80, 24
+	m.width, m.height = 100, 24
 	m.snap = swSnapshot{
 		Sessions: []swSession{
 			{Name: "api", State: "Idle", Since: time.Now().Add(-2 * time.Minute),
-				Context: 37, Topic: "build fixes", Summary: "fixing the build", Prompt: "run the tests"},
+				Context: 37, Topic: "build fixes", Summary: "fixing the build", Prompt: "run the tests",
+				Model: "claude-opus-4-7"},
 			{Name: "web", State: "Thinking", Since: time.Now(), Context: -1},
 			{Name: "scratch", Context: -1},
 		},
@@ -205,6 +206,20 @@ func TestSwModelEnterSwitchesToSelection(t *testing.T) {
 	}
 }
 
+func TestSwModelEscReturnsToLastSession(t *testing.T) {
+	m := swTestModel()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Error("esc with a client must produce a switch-back cmd")
+	}
+	m.cond.client = ""
+	m.snap.Clients = map[string]string{}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("esc without a client must be a no-op")
+	}
+}
+
 func TestSwModelQuits(t *testing.T) {
 	m := swTestModel()
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
@@ -242,7 +257,7 @@ func TestSwModelViewShowsFleet(t *testing.T) {
 func TestSwModelViewShowsInfo(t *testing.T) {
 	m := swTestModel()
 	view := m.View()
-	for _, want := range []string{"37%", "build fixes", "fixing the build"} {
+	for _, want := range []string{"37%", "build fixes", "fixing the build", "opus 4.7"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q:\n%s", want, view)
 		}
@@ -275,16 +290,18 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 	m := newSwModel("%9")
 	m.width, m.height = 100, 24
 	m.snap = swSnapshot{Sessions: []swSession{
-		{Name: "api", State: "Idle", Since: now.Add(-2 * time.Minute), Context: 7, Topic: "one-digit ctx"},
+		{Name: "api", State: "Idle", Since: now.Add(-2 * time.Minute), Context: 7, Topic: "one-digit ctx",
+			Model: "claude-opus-4-7"},
 		{Name: "a-very-long-session-name-that-overflows", State: "Tool:AskUserQuestion",
-			Since: now.Add(-3 * time.Hour), Context: 100, Topic: "long name, long state"},
+			Since: now.Add(-3 * time.Hour), Context: 100, Topic: "long name, long state",
+			Model: "claude-sonnet-4-5[1m]"},
 		{Name: "web", State: "Thinking", Since: now, Context: -1, Topic: "no context yet"},
 		{Name: "scratch", Context: -1, Topic: "no state, no age"},
 	}}
 
 	const (
 		ctxCol   = 1 + 2 + swNameColW + 1 + swStateColW + swAgeColW + 2
-		topicCol = ctxCol + swCtxColW + 2
+		topicCol = ctxCol + swCtxColW + 1 + swModelColW + 2
 	)
 	view := m.View()
 	for _, sess := range m.snap.Sessions {
@@ -367,7 +384,7 @@ func TestSwModelViewClipsWideRuneNameToColumn(t *testing.T) {
 	}}
 	const (
 		ctxCol   = 1 + 2 + swNameColW + 1 + swStateColW + swAgeColW + 2
-		topicCol = ctxCol + swCtxColW + 2
+		topicCol = ctxCol + swCtxColW + 1 + swModelColW + 2
 	)
 	view := ansi.Strip(m.View())
 	line := ""

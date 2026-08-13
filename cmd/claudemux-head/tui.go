@@ -121,12 +121,13 @@ type model struct {
 	// still republishes @claudemux_state_since.
 	publishedSince time.Time
 
-	// publishedContext/-Summary/-Prompt are the last-published info option
-	// values (context as integer percent; -1 = never published, since 0 is a
-	// legal percent). Same publish-on-change contract as publishedState.
+	// publishedContext/-Summary/-Prompt/-Model are the last-published info
+	// option values (context as integer percent; -1 = never published, since 0
+	// is a legal percent). Same publish-on-change contract as publishedState.
 	publishedContext int
 	publishedSummary string
 	publishedPrompt  string
+	publishedModel   string
 
 	// sessionCwd is the latest cwd the *main* session recorded in its
 	// transcript (last non-sidechain entry's cwd), recomputed from the event
@@ -456,6 +457,40 @@ func lastGitBranch(events []Event, prev string) string {
 	return prev
 }
 
+// transcriptSessionID is the session id a transcript path names — Claude Code
+// writes every transcript as <session-id>.jsonl, so it is the base name minus
+// the extension.
+func transcriptSessionID(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+
+// moveSession re-binds the reader when the SAME session's transcript shows up
+// at a new path. Claude Code homes a transcript under the project slug of the
+// session's cwd, so EnterWorktree and ExitWorktree both move the file
+// mid-session — same session id, different directory.
+//
+// Everything session-scoped survives, because it is the same conversation:
+// the summary, the context gauge, and above all an armed teardown watch.
+// Routing a move through switchSession instead killed the watch at exactly
+// the wrong moment — a /done wrap-up's own ExitWorktree step moved the
+// transcript, the false "rotation" aborted the watch, and the worktree
+// removal seconds later went unobserved, so the gate never opened.
+//
+// The ring is reseeded from the new path rather than kept: the old reader may
+// have missed events written between its last successful tail and the move,
+// and the file at the new path carries them all.
+func (m *model) moveSession(jsonlPath string, now time.Time) {
+	teardownLogf("move phase=%v from=%s to=%s", m.teardown, m.jsonlPath, jsonlPath)
+	r := newEventReader(jsonlPath)
+	r.SeedFromEnd(500)
+	seeded, _ := r.Seeded()
+	m.jsonlPath = jsonlPath
+	m.reader = r
+	m.allEvents = seeded
+	m.firstPrompt = r.FirstPrompt()
+	m.recomputeFromEvents(now)
+}
+
 // switchSession re-binds the monitor to a different session .jsonl: it opens a
 // fresh reader, re-seeds from the end, and recomputes all derived state.
 // Called when the active session rotates and the monitor is in follow-active
@@ -475,7 +510,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 		*m = m.abortTeardown("session rotated", now)
 	}
 
-	sessionID := strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
+	sessionID := transcriptSessionID(jsonlPath)
 	r := newEventReader(jsonlPath)
 	r.SeedFromEnd(500)
 	seeded, _ := r.Seeded()
@@ -953,6 +988,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// events (they were tailed from the old reader). They refresh on the
 		// next poll.
 		if msg.activeJSONL != "" && msg.activeJSONL != m.jsonlPath {
+			// Same session id at a new path is a move, not a rotation — see
+			// moveSession. The auto-arm edge and the ready-phase resume check
+			// are mirrored from the normal path below: the reseed can carry a
+			// prompt the old reader never delivered, and a wrap-up in it must
+			// still arm just as a post-ready prompt must still disarm.
+			if transcriptSessionID(msg.activeJSONL) == m.sessionID {
+				prevTyped := m.lastTyped
+				m.moveSession(msg.activeJSONL, msg.time)
+				m.autoArmTeardown(prevTyped, msg.time)
+				if m.teardown == teardownReady && m.lastTyped != prevTyped &&
+					!teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
+					m = m.abortTeardown("session resumed", msg.time)
+				}
+				m.lastUpdate = msg.time
+				return m, nil
+			}
 			cmd := m.switchSession(msg.activeJSONL, msg.time)
 			m.lastUpdate = msg.time
 			return m, cmd
@@ -1446,22 +1497,29 @@ func rateGaugeParts(m model, now time.Time, barW int) []string {
 	if !m.rateOK {
 		return nil
 	}
-	fhPct := float64(m.rateLimits.FiveHour.UsedPercent)
-	wkPct := float64(m.rateLimits.SevenDay.UsedPercent)
+	return rateGauges(m.rateLimits, m.pctSamples, now, barW)
+}
+
+// rateGauges is the model-independent core of rateGaugeParts, shared with the
+// switchboard (swMetersLine) so both panels build the identical gauge text
+// from the same raw rate-limit data.
+func rateGauges(rl RateLimits, samples []pctSample, now time.Time, barW int) []string {
+	fhPct := float64(rl.FiveHour.UsedPercent)
+	wkPct := float64(rl.SevenDay.UsedPercent)
 	parts := []string{
 		fmt.Sprintf("5h %s %d%%→%s",
 			renderBar(barW, fhPct, thresholdColor(fhPct)),
-			m.rateLimits.FiveHour.UsedPercent,
-			m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
+			rl.FiveHour.UsedPercent,
+			rl.FiveHour.ResetsAt.Local().Format("3:04p")),
 		fmt.Sprintf("wk %s %d%%→%s",
 			renderBar(barW, wkPct, thresholdColor(wkPct)),
-			m.rateLimits.SevenDay.UsedPercent,
-			m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
+			rl.SevenDay.UsedPercent,
+			rl.SevenDay.ResetsAt.Local().Format("Mon")),
 	}
-	rate := burnRatePctPerMin(m.pctSamples, now)
+	rate := burnRatePctPerMin(samples, now)
 	if rate > 0 {
-		eta := etaToEmptyPct(m.rateLimits.FiveHour.UsedPercent, rate)
-		if eta > 0 && now.Add(eta).Before(m.rateLimits.FiveHour.ResetsAt) {
+		eta := etaToEmptyPct(rl.FiveHour.UsedPercent, rate)
+		if eta > 0 && now.Add(eta).Before(rl.FiveHour.ResetsAt) {
 			parts = append(parts, "empty in "+formatDuration(eta))
 		}
 	}

@@ -284,6 +284,26 @@ func TestKillSessionArgs(t *testing.T) {
 	}
 }
 
+func TestClientsOnSession(t *testing.T) {
+	listing := "/dev/ttys001\t$3\n" +
+		"/dev/ttys002\t$7\n" +
+		"/dev/ttys003\t$3\n" +
+		"garbage-line-no-tab\n" +
+		"\t$3\n" + // no client name
+		"\n"
+	got := clientsOnSession(listing, "$3")
+	want := []string{"/dev/ttys001", "/dev/ttys003"}
+	if !slices.Equal(got, want) {
+		t.Errorf("clients = %v, want %v", got, want)
+	}
+	if got := clientsOnSession(listing, "$9"); got != nil {
+		t.Errorf("clients = %v for a session with none attached, want nil", got)
+	}
+	if got := clientsOnSession("", "$3"); got != nil {
+		t.Errorf("clients = %v for an empty listing, want nil", got)
+	}
+}
+
 // Outside tmux there is no pane to type into; the command must report that
 // rather than shelling out or silently succeeding.
 func TestTeardownSendCmdNoPane(t *testing.T) {

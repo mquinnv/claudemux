@@ -104,6 +104,7 @@ const (
 	infoContextOption = "@claudemux_context"
 	infoSummaryOption = "@claudemux_summary"
 	infoPromptOption  = "@claudemux_prompt"
+	infoModelOption   = "@claudemux_model"
 )
 
 // infoValueMaxRunes bounds published summary/prompt text. 120 comfortably
@@ -151,6 +152,12 @@ func (m *model) maybePublishInfo() []tea.Cmd {
 	if p := sanitizeOptionValue(m.lastTyped); p != m.publishedPrompt {
 		m.publishedPrompt = p
 		cmds = append(cmds, publishOptionCmd(m.selfPane, infoPromptOption, p))
+	}
+	// The raw model id, not shortModel's display form: the option is an
+	// interface like @claudemux_state, and the lobby shortens at render time.
+	if v := sanitizeOptionValue(m.modelName); v != m.publishedModel {
+		m.publishedModel = v
+		cmds = append(cmds, publishOptionCmd(m.selfPane, infoModelOption, v))
 	}
 	return cmds
 }
