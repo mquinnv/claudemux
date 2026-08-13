@@ -122,7 +122,12 @@ type swLayout struct {
 // preview box. A pane that can show the fleet or a preview but not both shows
 // the fleet: the lobby's job is ferrying clients, and the preview is decoration
 // on top of that.
-func computePreviewLayout(height int, hasErr bool) swLayout {
+//
+// listWant is the rows the fleet actually needs (the sum of swSessionRows).
+// The min/max clamp governs only the share the preview CLAIMS from the list;
+// rows the fleet was never going to fill go to the preview past the cap,
+// because the alternative is rendering them blank.
+func computePreviewLayout(height int, hasErr bool, listWant int) swLayout {
 	chrome := swChromeRows
 	if hasErr {
 		chrome++
@@ -138,15 +143,21 @@ func computePreviewLayout(height int, hasErr bool) swLayout {
 	if content > swPreviewMaxRows {
 		content = swPreviewMaxRows
 	}
-	// +2 for the box's own borders. A session occupies up to swSessionRows
-	// (2) rows, and View holds back one more of the list budget for the
-	// "… +N more" line whenever anything is dropped — so 3 is the floor
-	// that guarantees at least one full session row still renders (list=3
-	// -> budget 2 -> exactly one 2-row session + the more line). Below
-	// that, the box would crowd out the fleet entirely: a pane that can
-	// show either the fleet or a preview, but not both, shows the fleet.
+	// +2 for the box's own borders.
 	list := avail - (content + 2)
-	if list < 3 {
+	if listWant < list {
+		content += list - listWant
+		list = listWant
+	}
+	// A session occupies up to swSessionRows (2) rows, and View holds back
+	// one more of the list budget for the "… +N more" line whenever anything
+	// is dropped — so under truncation, 3 is the floor that guarantees at
+	// least one full session row still renders (list=3 -> budget 2 -> exactly
+	// one 2-row session + the more line). Below that, the box would crowd out
+	// the fleet entirely: a pane that can show either the fleet or a preview,
+	// but not both, shows the fleet. A fleet that fits whole (list == listWant)
+	// needs no such floor.
+	if list < 3 && list < listWant {
 		return swLayout{}
 	}
 	return swLayout{Show: true, Content: content, ListRows: list}

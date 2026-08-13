@@ -564,6 +564,36 @@ func TestSwModelViewCapsListForPreview(t *testing.T) {
 	}
 }
 
+// A small fleet must not strand rows as blank space between the list and the
+// preview: the box grows into whatever the fleet doesn't use, filling the pane.
+func TestSwModelViewPreviewGrowsIntoUnusedListRows(t *testing.T) {
+	m := swPreviewModel() // fleet wants 4 rows; height 46
+	raw := m.View()
+	view := ansi.Strip(raw)
+	lines := strings.Split(view, "\n")
+	top, bottom := -1, -1
+	for i, l := range lines {
+		if strings.Contains(l, "┌") {
+			top = i
+		}
+		if strings.Contains(l, "└") {
+			bottom = i
+		}
+	}
+	if top < 0 || bottom < 0 {
+		t.Fatalf("no preview box rendered:\n%s", view)
+	}
+	// avail 40, claim 13, list share 25, fleet needs 4 -> 34 content rows.
+	if got := bottom - top - 1; got != 34 {
+		t.Errorf("box has %d content rows, want 34 (grown past the %d-row ceiling):\n%s",
+			got, swPreviewMaxRows, view)
+	}
+	// The whole point: the view fills the pane instead of leaving dead space.
+	if got := len(strings.Split(raw, "\n")); got != m.height {
+		t.Errorf("view is %d lines, want %d (the full pane)", got, m.height)
+	}
+}
+
 func TestSwModelViewEmptyFleetHasNoPreview(t *testing.T) {
 	m := newSwModel("%9")
 	m.width, m.height = 80, 46

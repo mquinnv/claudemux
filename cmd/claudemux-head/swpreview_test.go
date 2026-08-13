@@ -111,34 +111,50 @@ func TestRenderPreviewRefusesTinyBoxes(t *testing.T) {
 }
 
 func TestComputePreviewLayout(t *testing.T) {
+	// listWant 99 throughout the "big fleet" cases: a fleet larger than any
+	// list budget here, so the preview never grows past its claimed share.
 	tests := []struct {
-		name   string
-		height int
-		hasErr bool
-		want   swLayout
+		name     string
+		height   int
+		hasErr   bool
+		listWant int
+		want     swLayout
 	}{
 		// avail 40 -> 40/3 = 13 content, list 40-15 = 25.
-		{"a full-screen lobby", 46, false, swLayout{Show: true, Content: 13, ListRows: 25}},
+		{"a full-screen lobby", 46, false, 99, swLayout{Show: true, Content: 13, ListRows: 25}},
 		// avail 18 -> 6 content (floor), list 18-8 = 10.
-		{"a small lobby hits the floor", 24, false, swLayout{Show: true, Content: 6, ListRows: 10}},
+		{"a small lobby hits the floor", 24, false, 99, swLayout{Show: true, Content: 6, ListRows: 10}},
 		// avail 94 -> 31 clamped to 16, list 94-18 = 76.
-		{"a tall lobby hits the ceiling", 100, false, swLayout{Show: true, Content: 16, ListRows: 76}},
+		{"a tall lobby hits the ceiling", 100, false, 99, swLayout{Show: true, Content: 16, ListRows: 76}},
 		// avail 11 -> 6 content, list 3: the last height that fits both
 		// (list=3 -> budget 2 -> one 2-row session + the more line).
-		{"the smallest lobby with a preview", 17, false, swLayout{Show: true, Content: 6, ListRows: 3}},
+		{"the smallest lobby with a preview", 17, false, 99, swLayout{Show: true, Content: 6, ListRows: 3}},
 		// avail 10 -> list would be 2, one short of a full session row
 		// surviving the cap: fleet wins, preview is dropped.
-		{"one row short: fleet wins", 16, false, swLayout{}},
+		{"one row short: fleet wins", 16, false, 99, swLayout{}},
 		// avail 9 -> list would be 1: fleet wins, preview is dropped.
-		{"too short for both", 15, false, swLayout{}},
-		{"no size yet", 0, false, swLayout{}},
+		{"too short for both", 15, false, 99, swLayout{}},
+		{"no size yet", 0, false, 99, swLayout{}},
 		// An error line costs a row: avail 39 -> 13 content, list 39-15 = 24.
-		{"an error line shifts the budget", 46, true, swLayout{Show: true, Content: 13, ListRows: 24}},
+		{"an error line shifts the budget", 46, true, 99, swLayout{Show: true, Content: 13, ListRows: 24}},
+		// A small fleet returns its unused rows to the preview: avail 40,
+		// claim 13, list share 25, fleet only needs 4 -> content 13+21 = 34.
+		{"a small fleet grows the preview", 46, false, 4, swLayout{Show: true, Content: 34, ListRows: 4}},
+		// Growth ignores the 16-row ceiling — the ceiling caps the claim, not
+		// rows the fleet was never going to fill: avail 94, claim 16, list
+		// share 76, fleet needs 4 -> content 16+72 = 88.
+		{"growth is not capped at the ceiling", 100, false, 4, swLayout{Show: true, Content: 88, ListRows: 4}},
+		// A fleet exactly filling its share changes nothing.
+		{"an exactly-fitting fleet", 46, false, 25, swLayout{Show: true, Content: 13, ListRows: 25}},
+		// avail 10 -> list share 2: too small for a truncated fleet (see "one
+		// row short" above), but a fleet that fits WHOLE in 2 rows needs no
+		// truncation floor, so both render.
+		{"a tiny fleet fits where a big one would not", 16, false, 2, swLayout{Show: true, Content: 6, ListRows: 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := computePreviewLayout(tt.height, tt.hasErr); got != tt.want {
-				t.Errorf("computePreviewLayout(%d, %v) = %+v, want %+v", tt.height, tt.hasErr, got, tt.want)
+			if got := computePreviewLayout(tt.height, tt.hasErr, tt.listWant); got != tt.want {
+				t.Errorf("computePreviewLayout(%d, %v, %d) = %+v, want %+v", tt.height, tt.hasErr, tt.listWant, got, tt.want)
 			}
 		})
 	}

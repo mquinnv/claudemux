@@ -287,18 +287,19 @@ func (m swModel) View() string {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
 
-	lay := computePreviewLayout(m.height, m.lastErr != "")
+	// Rows each session wants on screen. The layout needs this up front so the
+	// preview can grow into rows a small fleet would otherwise leave blank.
+	want := 0
+	for _, sess := range m.snap.Sessions {
+		want += swSessionRows(sess)
+	}
+	lay := computePreviewLayout(m.height, m.lastErr != "", want)
 
-	// Rows each session wants on screen. Only when the fleet's total need
-	// EXCEEDS the cap is anything dropped — and then one row is held back so
-	// the "+N more" line announcing the truncation doesn't itself push the
-	// preview box off the bottom.
+	// Only when the fleet's total need EXCEEDS the cap is anything dropped —
+	// and then one row is held back so the "+N more" line announcing the
+	// truncation doesn't itself push the preview box off the bottom.
 	budget := lay.ListRows
 	if budget > 0 {
-		want := 0
-		for _, sess := range m.snap.Sessions {
-			want += swSessionRows(sess)
-		}
 		if want <= budget {
 			budget = 0 // everything fits; no cap needed
 		} else {
