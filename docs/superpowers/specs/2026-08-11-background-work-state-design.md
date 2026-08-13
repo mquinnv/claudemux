@@ -156,8 +156,10 @@ other regardless of how the backgrounding was triggered.
 fields. If it stops, no launch is ever detected and every session reports `Idle` at the
 end of its turn — the pre-branch bug, and the safe direction to fail. A false negative
 costs the feature; a false positive would publish `Background` for a genuinely idle
-session and hide it from the conductor for up to `bgMaxAge`, undetectably, which is
-strictly worse than not having the feature at all.
+session and hide it from the conductor, undetectably, for up to the applicable expiry
+window — `bgShellMaxAge` for a shell, `bgAgentStallAge` past the agent's last transcript
+write (or `bgAgentMaxAge` in the worst case, a wedged agent whose transcript keeps
+advancing) for an agent — which is strictly worse than not having the feature at all.
 
 **Completion** — a `<task-id>` extracted from a notification, recognized **structurally**:
 a `queue-operation` whose top-level content, or a `user` turn whose text, *starts with*
