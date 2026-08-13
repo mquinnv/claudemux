@@ -1334,11 +1334,18 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 		leftParts = append(leftParts, c)
 	}
 	if chip == noWorktreeWarning {
-		// No "⎇ " glyph here: that's a branch symbol, and this message is
-		// about having NO branch/worktree.
+		// No glyph: this message is about having NO worktree, and the branch
+		// chip below still renders beside it.
 		leftParts = append(leftParts, chip)
-	} else if chip != "" {
-		leftParts = append(leftParts, "⎇ "+truncateRunes(chip, 24))
+		chip = ""
+	}
+	// This packed layout has no width budget to hand out — the right-hand
+	// gauges are sized after this point — so the chips get a fixed cap and
+	// clipLine remains the final guard, exactly as the single chip did before.
+	// The cap is in display CELLS now, not runes: the old truncateRunes(chip,
+	// 24) under-truncated a wide-rune name to 48 cells.
+	if chips := chipSegment(m.sessionBranch, chip, packedChipCells); chips != "" {
+		leftParts = append(leftParts, chips)
 	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
 
@@ -1449,6 +1456,12 @@ const (
 	chipSep           = " · "
 )
 
+// packedChipCells caps the chips in the packed single-line layout, which
+// cannot compute a real budget: its right-hand gauges are sized after the
+// left group is built. 40 cells is the old 24-rune worktree cap plus room for
+// a branch beside it.
+const packedChipCells = 40
+
 // chipSegment assembles the branch and worktree chips into at most avail
 // display cells.
 //
@@ -1555,41 +1568,31 @@ func renderStateLine(m model, now time.Time) string {
 	chip := m.worktreeChip()
 	if chip == noWorktreeWarning {
 		// Put the warning in with the state/model text, which never shrinks,
-		// rather than the chip slot below, which is the first thing dropped
-		// as the pane narrows. A real worktree name is fine to lose under a
-		// narrow pane — it's re-derivable from the session. This warning is
-		// the entire visible mitigation for a design risk and must not be
-		// the first casualty.
+		// rather than the chip slot below, which is the first thing to give
+		// way as the pane narrows. A worktree NAME is fine to lose — it is
+		// re-derivable from the session. This warning is the entire visible
+		// mitigation for a design risk and must not be the first casualty.
+		// The branch chip still renders beside it: knowing which branch a
+		// worktree-less session sits on is exactly what you need to act.
 		parts = append(parts, chip)
 		chip = ""
 	}
 	left := strings.Join(parts, " · ")
 
-	if chip == "" {
-		return statusbarStyle.Width(m.width).Render(clipLine(" "+left+" ", m.width))
-	}
-
-	chipStr := "⎇ " + chip
 	avail := m.width - 2 // columns inside the " "..." " padding below
 	if avail < 1 {
 		avail = 1
 	}
 	sep := " · "
-	if lipgloss.Width(left)+lipgloss.Width(sep)+lipgloss.Width(chipStr) <= avail {
-		return statusbarStyle.Width(m.width).Render(clipLine(" "+left+sep+chipStr+" ", m.width))
-	}
-
-	// Doesn't fit — shrink the chip only, never the state/model text. The
-	// fits check above is in display cells (lipgloss.Width), so truncation
-	// must be display-width-aware too (ansi.Truncate), not rune-count based
-	// (truncateRunes) — otherwise wide runes (e.g. CJK branch names)
-	// under-truncate and the line still overflows.
 	chipAvail := avail - lipgloss.Width(left) - lipgloss.Width(sep)
-	if chipAvail < 1 {
-		chipAvail = 1
+	chips := ""
+	if chipAvail > 0 {
+		chips = chipSegment(m.sessionBranch, chip, chipAvail)
 	}
-	chipStr = ansi.Truncate(chipStr, chipAvail, "…")
-	return statusbarStyle.Width(m.width).Render(clipLine(" "+left+sep+chipStr+" ", m.width))
+	if chips == "" {
+		return statusbarStyle.Width(m.width).Render(clipLine(" "+left+" ", m.width))
+	}
+	return statusbarStyle.Width(m.width).Render(clipLine(" "+left+sep+chips+" ", m.width))
 }
 
 // renderMetersLine renders the second line of the new split layout: the ctx

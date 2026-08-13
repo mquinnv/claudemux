@@ -332,7 +332,7 @@ func TestViewHeightOnePacksSingleStatusbar(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("View() produced %d lines, want 1:\n%s", len(lines), out)
 	}
-	if !strings.Contains(out, "⎇ feature-branch") {
+	if !strings.Contains(out, "⌂ feature-branch") {
 		t.Errorf("statusbar = %q, want it to contain the worktree chip", out)
 	}
 }
@@ -381,7 +381,7 @@ func TestRenderStateLineShowsFullWorktreeChip(t *testing.T) {
 	}
 	now := time.Now()
 	got := renderStateLine(m, now)
-	if !strings.Contains(got, "⎇ "+name) {
+	if !strings.Contains(got, "⌂ "+name) {
 		t.Errorf("renderStateLine = %q, want it to contain the full chip %q", got, name)
 	}
 	if w := lipgloss.Width(got); w != m.width {
@@ -1965,7 +1965,7 @@ func TestRenderStatusbarPinPrecedesChip(t *testing.T) {
 	line := renderStatusbar(m, now, "some-worktree-branch")
 
 	pinIdx := strings.Index(line, "⬚ pinned")
-	chipIdx := strings.Index(line, "⎇")
+	chipIdx := strings.Index(line, "⌂")
 	if pinIdx < 0 {
 		t.Fatalf("pin indicator missing from %q", line)
 	}
@@ -3396,6 +3396,50 @@ func TestChipSegmentWideRunes(t *testing.T) {
 		got := chipSegment(strings.Repeat("囲", 12), strings.Repeat("宽", 12), avail)
 		if lipgloss.Width(got) > avail {
 			t.Errorf("avail=%d: %q measures %d cells", avail, got, lipgloss.Width(got))
+		}
+	}
+}
+
+// The point of the feature: branch and worktree are different facts and the
+// pane shows both.
+func TestStateLineShowsBothChips(t *testing.T) {
+	m := model{ready: true, width: 120, height: 2,
+		state: State{Kind: StateIdle}, sessionBranch: "lobby-preview",
+		sessionCwd: "/tmp/repo/.claude/worktrees/align-context-meters"}
+	line := ansi.Strip(renderStateLine(m, time.Now()))
+	for _, want := range []string{"⎇ lobby-preview", "⌂ align-context-meters"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("state line missing %q: %q", want, line)
+		}
+	}
+}
+
+// The warning and the branch occupy different slots, so a marked session that
+// never got its worktree still says which branch it is sitting on.
+func TestStateLineWarningKeepsBranch(t *testing.T) {
+	m := model{ready: true, width: 120, height: 2, state: State{Kind: StateIdle},
+		sessionBranch: "main", worktreePending: true, firstPrompt: "do a thing"}
+	line := ansi.Strip(renderStateLine(m, time.Now()))
+	if !strings.Contains(line, noWorktreeWarning) {
+		t.Errorf("warning missing: %q", line)
+	}
+	if !strings.Contains(line, "⎇ main") {
+		t.Errorf("branch missing alongside the warning: %q", line)
+	}
+}
+
+// Neither layout may ever emit a line wider than the pane, at any width, with
+// wide runes in either name.
+func TestStatusLinesNeverExceedWidth(t *testing.T) {
+	for _, width := range []int{10, 20, 40, 80, 120} {
+		m := model{ready: true, width: width, height: 2, state: State{Kind: StateIdle},
+			modelName: "claude-opus-5", sessionBranch: strings.Repeat("囲", 12),
+			sessionCwd: "/tmp/repo/.claude/worktrees/" + strings.Repeat("宽", 12)}
+		if got := lipgloss.Width(renderStateLine(m, time.Now())); got > width {
+			t.Errorf("renderStateLine(width=%d) measures %d", width, got)
+		}
+		if got := lipgloss.Width(renderStatusbar(m, time.Now(), m.worktreeChip())); got > width {
+			t.Errorf("renderStatusbar(width=%d) measures %d", width, got)
 		}
 	}
 }
