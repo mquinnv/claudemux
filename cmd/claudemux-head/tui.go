@@ -133,6 +133,11 @@ type model struct {
 	// its own worktree doesn't hijack the head's chip.
 	sessionCwd string
 
+	// sessionBranch is the branch the *main* session last recorded. Derived
+	// the same way as sessionCwd and from the same transcript entries — see
+	// lastGitBranch.
+	sessionBranch string
+
 	// cmdWorktree is the worktree the session is driving *at arm's length* —
 	// its cwd stays in the main repo while its commands reach into a linked
 	// worktree by explicit path (git -C <wt>, cd <wt> && …, container names).
@@ -395,6 +400,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 		m.firstPrompt = m.reader.FirstPrompt()
 	}
 	m.sessionCwd = lastMainCwd(m.allEvents, m.sessionCwd)
+	m.sessionBranch = lastGitBranch(m.allEvents, m.sessionBranch)
 	m.cmdWorktree = commandWorktree(m.sessionCwd, m.allEvents, now)
 	m.observeWorktreeTransition()
 }
@@ -409,6 +415,27 @@ func lastMainCwd(events []Event, prev string) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		if e := events[i]; e.Cwd != "" && !e.IsSidechain {
 			return e.Cwd
+		}
+	}
+	return prev
+}
+
+// lastGitBranch returns the branch of the most recent main-session
+// (non-sidechain) event that carries one, scanning the ring newest-first. It
+// mirrors lastMainCwd exactly, for the same two reasons: a subagent working in
+// another worktree must not hijack the chip, and a poll that brings no usable
+// event must keep the branch already known rather than blanking it.
+//
+// A detached HEAD is recorded by Claude Code as the literal string "HEAD".
+// Reporting that verbatim would read as a branch named HEAD, so it is mapped
+// here — the honest answer to "what branch is this session on" is "detached".
+func lastGitBranch(events []Event, prev string) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if e := events[i]; e.GitBranch != "" && !e.IsSidechain {
+			if e.GitBranch == "HEAD" {
+				return "detached"
+			}
+			return e.GitBranch
 		}
 	}
 	return prev
@@ -446,6 +473,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// Clean slate: the new session's own cwd must come from its own events, not
 	// linger from the session we just left. Its seed always carries one.
 	m.sessionCwd = ""
+	m.sessionBranch = ""
 	// Same for the context gauge and model: recomputeFromEvents only overwrites
 	// them when the new ring carries a usage/model event, and a just-started
 	// session (only the first user prompt on disk) carries neither — without

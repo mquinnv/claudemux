@@ -100,6 +100,45 @@ func TestSwitchSessionResetsContextAndModel(t *testing.T) {
 	}
 }
 
+func TestLastGitBranch(t *testing.T) {
+	// Newest wins.
+	if got := lastGitBranch([]Event{{GitBranch: "main"}, {GitBranch: "lobby-preview"}}, ""); got != "lobby-preview" {
+		t.Errorf("lastGitBranch = %q, want lobby-preview", got)
+	}
+	// A subagent working in another worktree must not hijack the chip — same
+	// rule lastMainCwd applies to cwd.
+	if got := lastGitBranch([]Event{{GitBranch: "main"}, {GitBranch: "agent-branch", IsSidechain: true}}, ""); got != "main" {
+		t.Errorf("lastGitBranch (sidechain tail) = %q, want main", got)
+	}
+	// A poll of pure sidechain activity, or a not-yet-seeded ring, keeps what
+	// was already known rather than blanking a chip that was right a second ago.
+	if got := lastGitBranch([]Event{{GitBranch: "agent", IsSidechain: true}}, "prev-branch"); got != "prev-branch" {
+		t.Errorf("lastGitBranch (no usable event) = %q, want prev-branch", got)
+	}
+	if got := lastGitBranch(nil, "prev-branch"); got != "prev-branch" {
+		t.Errorf("lastGitBranch (empty ring) = %q, want prev-branch", got)
+	}
+	// Claude Code records a detached HEAD as the literal string "HEAD", which
+	// would read as a branch named HEAD.
+	if got := lastGitBranch([]Event{{GitBranch: "HEAD"}}, ""); got != "detached" {
+		t.Errorf("lastGitBranch (detached) = %q, want detached", got)
+	}
+}
+
+// A rotated session must not inherit the previous session's branch.
+func TestSwitchSessionResetsBranch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "new.jsonl")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := model{sessionBranch: "old-branch"}
+	m.switchSession(path, time.Now())
+	if m.sessionBranch != "" {
+		t.Errorf("sessionBranch = %q, want empty after rotation", m.sessionBranch)
+	}
+}
+
 func TestLastUserPrompt(t *testing.T) {
 	events := []Event{
 		{Type: "last-prompt", UserText: "first thing"},
