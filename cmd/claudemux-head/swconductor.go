@@ -27,30 +27,47 @@ type swAction struct {
 	Target string // session to switch it to
 }
 
+// swSnooze records a waiting episode the user deliberately walked away from:
+// which episode (the session's published Since) and when they left.
+type swSnooze struct {
+	since time.Time
+	at    time.Time
+}
+
+// swSnoozeTTL bounds a snooze. It exists so a skip cannot become forever:
+// an idle session's episode lasts until its state actually transitions —
+// hours, for a session the user is done with — and an unexpiring snooze
+// starves it behind sessions that were never skipped. Ten minutes keeps the
+// original anti-bounce purpose (leaving a session must not ping-pong the
+// client straight back) while guaranteeing every waiting session resurfaces
+// within one sitting.
+const swSnoozeTTL = 10 * time.Minute
+
 type conductor struct {
 	phase    swPhase
 	client   string
 	escortee string
-	// snoozed maps session -> the Since of a waiting episode the user
-	// deliberately walked away from. That episode never re-queues; a new
-	// episode (different Since) does. Without this, skipping an Idle session
-	// would bounce the client straight back to it from the lobby.
-	snoozed map[string]time.Time
+	// snoozed maps session -> the waiting episode the user deliberately
+	// walked away from, and when. That episode never re-queues until the
+	// snooze expires; a new episode (different Since) un-snoozes it
+	// immediately. Without this, skipping an Idle session would bounce the
+	// client straight back to it from the lobby.
+	snoozed map[string]swSnooze
 }
 
 func newConductor() conductor {
-	return conductor{snoozed: map[string]time.Time{}}
+	return conductor{snoozed: map[string]swSnooze{}}
 }
 
 // waitingQueue lists waiting, un-snoozed sessions oldest-first (name as
 // tiebreak so equal timestamps still order deterministically).
-func (s swSnapshot) waitingQueue(snoozed map[string]time.Time) []swSession {
+func (s swSnapshot) waitingQueue(snoozed map[string]swSnooze, now time.Time) []swSession {
 	var q []swSession
 	for _, sess := range s.Sessions {
 		if !isWaiting(sess.State) {
 			continue
 		}
-		if t, ok := snoozed[sess.Name]; ok && t.Equal(sess.Since) {
+		if sn, ok := snoozed[sess.Name]; ok && sn.since.Equal(sess.Since) && now.Sub(sn.at) < swSnoozeTTL {
 			continue
 		}
 		q = append(q, sess)
@@ -90,13 +107,14 @@ func (c *conductor) resolveClient(s swSnapshot) bool {
 	return false
 }
 
-// pruneSnoozes drops snoozes whose episode ended: session gone, no longer
-// waiting, or waiting anew with a different Since. Keeping the map minimal
-// makes state inspectable and stops unbounded growth across long runs.
-func (c *conductor) pruneSnoozes(s swSnapshot) {
-	for name, since := range c.snoozed {
+// pruneSnoozes drops snoozes whose episode ended (session gone, no longer
+// waiting, or waiting anew with a different Since) or whose TTL expired.
+// Keeping the map minimal makes state inspectable and stops unbounded growth
+// across long runs.
+func (c *conductor) pruneSnoozes(s swSnapshot, now time.Time) {
+	for name, sn := range c.snoozed {
 		sess, ok := s.session(name)
-		if !ok || !isWaiting(sess.State) || !sess.Since.Equal(since) {
+		if !ok || !isWaiting(sess.State) || !sess.Since.Equal(sn.since) || now.Sub(sn.at) >= swSnoozeTTL {
 			delete(c.snoozed, name)
 		}
 	}
@@ -104,14 +122,14 @@ func (c *conductor) pruneSnoozes(s swSnapshot) {
 
 // step advances the conductor by one poll. ok=true carries the single
 // switch-client to issue this tick.
-func (c *conductor) step(s swSnapshot) (swAction, bool) {
-	c.pruneSnoozes(s)
+func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
+	c.pruneSnoozes(s, now)
 	clientChanged := c.resolveClient(s)
 	if c.client == "" {
 		return swAction{}, false
 	}
 	cur := s.Clients[c.client]
-	queue := s.waitingQueue(c.snoozed)
+	queue := s.waitingQueue(c.snoozed, now)
 
 	switch c.phase {
 	case swParked:
@@ -142,7 +160,7 @@ func (c *conductor) step(s swSnapshot) (swAction, bool) {
 			// abandoned session's current episode so the lobby doesn't bounce
 			// them right back.
 			if sess, ok := s.session(c.escortee); ok && isWaiting(sess.State) {
-				c.snoozed[c.escortee] = sess.Since
+				c.snoozed[c.escortee] = swSnooze{since: sess.Since, at: now}
 			}
 			c.escortee = ""
 			if cur == s.Lobby {
@@ -170,13 +188,25 @@ func (c *conductor) step(s swSnapshot) (swAction, bool) {
 }
 
 // statusLine summarizes the conductor for the lobby's bottom row.
-func (c *conductor) statusLine(s swSnapshot) string {
-	n := len(s.waitingQueue(c.snoozed))
+func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
+	n := len(s.waitingQueue(c.snoozed, now))
+	suffix := ""
+	if z := len(c.snoozed); z > 0 {
+		suffix = fmt.Sprintf(" · %d snoozed", z)
+	}
 	switch c.phase {
 	case swPaused:
 		return "paused — you navigated away; return here to resume"
 	case swEscorting:
-		return fmt.Sprintf("escorting → %s · %d waiting", c.escortee, n)
+		return fmt.Sprintf("escorting → %s · %d waiting%s", c.escortee, n, suffix)
 	}
-	return fmt.Sprintf("conducting · %d waiting", n)
+	return fmt.Sprintf("conducting · %d waiting%s", n, suffix)
+}
+
+// isSnoozed reports whether sess's current episode is snoozed right now —
+// the lobby dims such rows so "waiting but deliberately skipped" is visible
+// instead of looking like a conductor bug.
+func (c *conductor) isSnoozed(sess swSession, now time.Time) bool {
+	sn, ok := c.snoozed[sess.Name]
+	return ok && sn.since.Equal(sess.Since) && now.Sub(sn.at) < swSnoozeTTL
 }

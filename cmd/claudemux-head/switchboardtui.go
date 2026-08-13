@@ -269,7 +269,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// about to issue itself.
 		pv := m.previewCmd()
 		if !m.standby && !m.creating && !m.createBusy {
-			if act, ok := m.cond.step(m.snap); ok {
+			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(), swSwitchCmd(act.Client, act.Target), pv)
 			}
 		}
@@ -436,7 +436,11 @@ func (m swModel) View() string {
 		}
 		marker := "  "
 		if isWaiting(sess.State) {
-			marker = swWaitStyle.Render("● ")
+			if m.cond.isSnoozed(sess, now) {
+				marker = swUnknownStyle.Render("● ") // waiting, deliberately skipped
+			} else {
+				marker = swWaitStyle.Render("● ")
+			}
 		}
 		state, style := sess.State, swBusyStyle
 		switch {
@@ -541,10 +545,10 @@ func (m swModel) View() string {
 		}
 	}
 
-	status := m.cond.statusLine(m.snap)
+	status := m.cond.statusLine(m.snap, now)
 	if m.standby {
 		status = fmt.Sprintf("standby · %d waiting — space to conduct",
-			len(m.snap.waitingQueue(m.cond.snoozed)))
+			len(m.snap.waitingQueue(m.cond.snoozed, now)))
 	}
 	// The create flow borrows the status line rather than adding one, so the
 	// layout (and computePreviewLayout's accounting of it) never shifts.
