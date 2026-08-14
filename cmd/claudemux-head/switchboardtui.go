@@ -463,6 +463,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Paused self-heals to Parked at the lobby once standby ends.
 				m.cond.phase = swPaused
 				m.cond.escortee = ""
+				// step() never runs while standby is on, so the client can
+				// move around invisibly (elsewhere and back) before standby
+				// ends. A hand-back latched before standby started can't be
+				// trusted to still describe what happened at this session —
+				// clear it so resuming re-observes from scratch.
+				m.cond.clearPaused()
 			}
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {

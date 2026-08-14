@@ -458,6 +458,55 @@ func TestSwModelStandbyNeverDispatches(t *testing.T) {
 	}
 }
 
+// Regression: standby freezes step() entirely, so a hand-back latched right
+// before standby began must not survive it. Otherwise the client could
+// wander off to another session and back while standby was on (invisible to
+// the conductor) and, on standby-off, get yanked by a latch describing a
+// completely different moment.
+func TestSwModelStandbySpaceClearsStaleHandBackLatch(t *testing.T) {
+	m := swTestModel()
+	// Simulate: the user had already handed "api" back (latched
+	// pausedHandedBack with the queue empty at that instant, so nothing
+	// dispatched yet), and is still sitting at "api" when standby toggles on.
+	m.cond.phase = swPaused
+	m.cond.pausedCur = "api"
+	m.cond.pausedCurWaiting = false
+	m.cond.pausedHandedBack = true
+	m.snap.Clients = map[string]string{"/dev/ttys001": "api"}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = next.(swModel)
+	if !m.standby {
+		t.Fatal("space must enter standby")
+	}
+	if m.cond.pausedCur != "" || m.cond.pausedCurWaiting || m.cond.pausedHandedBack {
+		t.Fatalf("standby must clear the paused observation, got pausedCur=%q pausedCurWaiting=%v pausedHandedBack=%v",
+			m.cond.pausedCur, m.cond.pausedCurWaiting, m.cond.pausedHandedBack)
+	}
+
+	// Leave standby, then feed a snapshot where "api" is current again (busy)
+	// and a session is waiting. If the stale latch had survived, this would
+	// dispatch immediately; it must not.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = next.(swModel)
+	if m.standby {
+		t.Fatal("space again must leave standby")
+	}
+	snap := swSnapshot{
+		Sessions: []swSession{
+			{Name: "api", State: "Thinking", Since: time.Unix(1_754_700_000, 0)},
+			{Name: "queued", State: "Idle", Since: time.Unix(1_754_700_000, 0)},
+		},
+		Lobby:   "switchboard",
+		Clients: map[string]string{"/dev/ttys001": "api"},
+	}
+	next, _ = m.Update(swSnapshotMsg{snap: snap})
+	m = next.(swModel)
+	if m.cond.phase == swEscorting {
+		t.Errorf("a stale hand-back latch must not survive standby: phase=%v escortee=%q", m.cond.phase, m.cond.escortee)
+	}
+}
+
 func TestSwModelStandbyStatusLine(t *testing.T) {
 	m := swTestModel()
 	m.standby = true
