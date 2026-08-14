@@ -10,14 +10,30 @@ import (
 
 func TestRenderBannerCardShowsSessionAndEscortLine(t *testing.T) {
 	lines := renderBannerCard("remix-2")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 lines, got %d: %q", len(lines), lines)
+	if len(lines) != 5 {
+		t.Fatalf("want 5 lines (smoke, roof, body, wheels, escort), got %d: %q", len(lines), lines)
 	}
-	if !strings.Contains(lines[0], "remix-2") {
-		t.Errorf("line 1 must name the session, got %q", lines[0])
+	if !strings.Contains(lines[2], "remix-2") {
+		t.Errorf("body line must name the session, got %q", lines[2])
 	}
-	if !strings.Contains(lines[1], "escorted by claudemux") {
-		t.Errorf("line 2 must say who moved the client, got %q", lines[1])
+	if !strings.Contains(lines[4], "escorted by claudemux") {
+		t.Errorf("last line must say who moved the client, got %q", lines[4])
+	}
+}
+
+// The train's art lines share a frame: the roof, body, and wheels must stay
+// aligned as the car stretches to fit the name, and a name shorter than the
+// engine's fixed parts must not collapse the wheels.
+func TestRenderBannerCardTrainStaysAligned(t *testing.T) {
+	for _, session := range []string{"a", "remix-2", strings.Repeat("x", 200)} {
+		lines := renderBannerCard(session)
+		body := lipgloss.Width(lines[2])
+		if roof := lipgloss.Width(lines[1]); roof != body-2 {
+			t.Errorf("%q: roof width %d, want body-2 = %d", session, roof, body-2)
+		}
+		if wheels := lipgloss.Width(lines[3]); wheels != body-2 {
+			t.Errorf("%q: wheels width %d, want body-2 = %d", session, wheels, body-2)
+		}
 	}
 }
 
@@ -72,9 +88,9 @@ func TestSwBannerPopupArgsSizesToCard(t *testing.T) {
 			h = args[i+1]
 		}
 	}
-	// 2 content lines + 2 border rows.
-	if h != "4" {
-		t.Errorf("popup height = %q, want 4", h)
+	// 5 content lines + 2 border rows.
+	if h != "7" {
+		t.Errorf("popup height = %q, want 7", h)
 	}
 	lines := renderBannerCard("remix-2")
 	widest := 0

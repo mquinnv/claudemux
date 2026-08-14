@@ -29,15 +29,38 @@ const (
 var (
 	swBannerNameStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	swBannerEscortStyle = lipgloss.NewStyle().Faint(true)
+	swBannerSmokeStyle  = lipgloss.NewStyle().Faint(true)
 )
 
-// renderBannerCard is the popup's content: who you arrived at, and who moved
-// you. Pure, so the popup geometry below can be derived from the same lines
-// the banner subcommand will actually print.
+// renderBannerCard is the popup's content: a little locomotive pulling into
+// the station with the session's name on its side. Pure, so the popup
+// geometry below can be derived from the same lines the banner subcommand
+// will actually print.
+//
+//	       . o O
+//	 ______[]_
+//	| remix-2 |>
+//	 (o)---(o)
+//	 escorted by claudemux
+//
+// The car stretches to fit the name; inner is the interior width between the
+// body's side walls, floored so the wheels and stack of a one-letter session
+// still have somewhere to sit.
 func renderBannerCard(session string) []string {
-	name := ansi.Truncate(session, swBannerMaxW-4, "…")
+	// Body width is inner+3 ("|" + inner + "|>"), so this cap keeps the
+	// widest line at swBannerMaxW.
+	name := ansi.Truncate(session, swBannerMaxW-5, "…")
+	inner := lipgloss.Width(name) + 2
+	if inner < 8 {
+		inner = 8
+	}
+	pad := inner - 2 - lipgloss.Width(name)
+	left, right := pad/2, pad-pad/2
 	return []string{
-		" ⇥  " + swBannerNameStyle.Render(name),
+		strings.Repeat(" ", inner-2) + swBannerSmokeStyle.Render(". o O"),
+		" " + strings.Repeat("_", inner-3) + "[]_",
+		"|" + strings.Repeat(" ", left+1) + swBannerNameStyle.Render(name) + strings.Repeat(" ", right+1) + "|>",
+		" (o)" + strings.Repeat("-", inner-6) + "(o)",
 		" " + swBannerEscortStyle.Render("escorted by claudemux"),
 	}
 }
