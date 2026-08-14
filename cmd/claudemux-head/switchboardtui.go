@@ -128,6 +128,14 @@ type swModel struct {
 	// re-exec rather than a quit; runSwitchboard checks it after Run
 	// returns, mirroring the session head's flow in main().
 	restart bool
+	// fleetRestarting marks a ctrl+r sweep in flight: every head has been
+	// (or is being) sent R, but self hasn't quit yet. Once a sweep is
+	// dispatched, the ONLY allowed quit-to-restart path is swFleetRestartMsg's
+	// completion — the auto-restart gate must not race the sweep out from
+	// under it (a fresh build landing mid-sweep is exactly the situation a
+	// fleet restart is usually pressed for), and a second ctrl+r must not
+	// fire an overlapping sweep either.
+	fleetRestarting bool
 	// launchBin mirrors the session head's: the on-disk binary at launch,
 	// re-stat'd each poll so a rebuilt lobby re-execs itself. This matters
 	// MORE here than in the head — the lobby hosts the conductor, and a
@@ -155,9 +163,14 @@ func newSwModel(selfPane string) swModel {
 // conductor would immediately re-escort the user to the session they just
 // walked away from — the exact bounce-back the snooze exists to prevent.
 // So the restart also waits for snoozed to drain, worst case the full
-// swSnoozeTTL.
+// swSnoozeTTL. It also stays off for the duration of a fleet-restart sweep
+// (fleetRestarting): swRestartFleetCmd's sends run in a goroutine outside
+// this model, so a poll landing mid-sweep must not race it into quitting
+// early — the same changed-binary condition that made shouldAutoRestart true
+// is usually exactly what prompted the user to press ctrl+r in the first
+// place, so this case is not rare.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
-	return !m.standby && !m.creating && !m.createBusy &&
+	return !m.standby && !m.creating && !m.createBusy && !m.fleetRestarting &&
 		m.cond.phase == swParked && len(m.cond.snoozed) == 0 &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
@@ -499,7 +512,14 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restart = true
 			return m, tea.Quit
 		case "ctrl+r":
-			// Restart the whole fleet: every session head, then self.
+			// Restart the whole fleet: every session head, then self. A
+			// second press while a sweep is already in flight is a no-op —
+			// dispatching another would race two goroutines' send-keys
+			// against each other and double the sends.
+			if m.fleetRestarting {
+				return m, nil
+			}
+			m.fleetRestarting = true
 			return m, swRestartFleetCmd(m.snap.Sessions)
 		case "n":
 			// One launch at a time: a second prompt opened while one is in

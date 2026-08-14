@@ -892,6 +892,7 @@ func TestSwitchboardShouldAutoRestart(t *testing.T) {
 		func(m *swModel) { m.createBusy = true },
 		func(m *swModel) { m.cond.phase = swEscorting },
 		func(m *swModel) { m.cond.phase = swPaused },
+		func(m *swModel) { m.fleetRestarting = true },
 	} {
 		mm := newSwModel("%1")
 		mm.launchBin, mm.launchBinOK = stamp, true
@@ -966,6 +967,9 @@ func TestSwitchboardFleetRestartKey(t *testing.T) {
 	if sm.restart {
 		t.Error("ctrl+r must not restart self before the sends complete")
 	}
+	if !sm.fleetRestarting {
+		t.Error("ctrl+r must mark a sweep in flight, so a racing poll can't auto-restart out from under it")
+	}
 	if cmd == nil {
 		t.Fatal("ctrl+r must dispatch the fleet-restart cmd")
 	}
@@ -976,6 +980,26 @@ func TestSwitchboardFleetRestartKey(t *testing.T) {
 	}
 	if cmd2 == nil {
 		t.Error("fleet-restart completion must quit the program")
+	}
+}
+
+// TestSwitchboardFleetRestartKeyDoublePress covers the case a second ctrl+r
+// lands while a sweep is already in flight: dispatching another sweep would
+// race two goroutines' send-keys against each other, so the second press
+// must be a no-op rather than issuing swRestartFleetCmd again.
+func TestSwitchboardFleetRestartKeyDoublePress(t *testing.T) {
+	m := newSwModel("%1")
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	sm := got.(swModel)
+
+	got2, cmd2 := sm.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	sm2 := got2.(swModel)
+	if cmd2 != nil {
+		t.Error("a second ctrl+r while a sweep is in flight must not dispatch another")
+	}
+	if sm2.restart != sm.restart || !sm2.fleetRestarting {
+		t.Errorf("model must be unchanged by the no-op second press: got restart=%v fleetRestarting=%v",
+			sm2.restart, sm2.fleetRestarting)
 	}
 }
 
