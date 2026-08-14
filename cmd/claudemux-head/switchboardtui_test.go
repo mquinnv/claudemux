@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -785,5 +787,68 @@ func TestSwModelViewEmptyFleetHasNoPreview(t *testing.T) {
 	m.width, m.height = 80, 46
 	if view := ansi.Strip(m.View()); strings.Contains(view, "┌") {
 		t.Errorf("an empty fleet must not draw a preview box:\n%s", view)
+	}
+}
+
+func TestSwitchboardRestartKey(t *testing.T) {
+	m := newSwModel("%1")
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	sm := got.(swModel)
+	if !sm.restart {
+		t.Error("R must request a restart")
+	}
+	if cmd == nil {
+		t.Error("R must quit the program")
+	}
+}
+
+func TestSwitchboardRestartKeyStaysLiteralWhileCreating(t *testing.T) {
+	m := newSwModel("%1")
+	m.creating = true
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	sm := got.(swModel)
+	if sm.restart {
+		t.Error("R inside the create prompt is input, not a restart")
+	}
+	if sm.createInput != "R" {
+		t.Errorf("createInput = %q, want R", sm.createInput)
+	}
+}
+
+func TestSwitchboardShouldAutoRestart(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp, _ := binStampOf(p)
+	m := newSwModel("%1")
+	m.launchBin, m.launchBinOK = stamp, true
+	now := time.Now()
+	if m.shouldAutoRestart(now) {
+		t.Error("unchanged binary must not restart")
+	}
+	if err := os.WriteFile(p, []byte("v2-longer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !m.shouldAutoRestart(now) {
+		t.Error("replaced binary must restart a parked lobby")
+	}
+	for _, tweak := range []func(*swModel){
+		func(m *swModel) { m.standby = true },
+		func(m *swModel) { m.creating = true },
+		func(m *swModel) { m.createBusy = true },
+		func(m *swModel) { m.cond.phase = swEscorting },
+		func(m *swModel) { m.cond.phase = swPaused },
+	} {
+		mm := newSwModel("%1")
+		mm.launchBin, mm.launchBinOK = stamp, true
+		tweak(&mm)
+		if mm.shouldAutoRestart(now) {
+			t.Errorf("non-quiescent lobby must not restart (%+v)", mm)
+		}
 	}
 }
