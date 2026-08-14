@@ -70,15 +70,25 @@ func main() {
 
 	claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
 
-	sessionID, err := resolveSession(claudeProjectsDir, cwd, *sessionFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding session: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Make sure you're in a directory with an active Claude Code session.\n")
-		os.Exit(1)
-	}
-
 	encodedPath := encodeProjectPath(cwd)
-	jsonlPath := filepath.Join(claudeProjectsDir, encodedPath, sessionID+".jsonl")
+
+	sessionID, err := resolveSession(claudeProjectsDir, cwd, *sessionFlag)
+	var jsonlPath string
+	if err != nil {
+		// No transcript yet. On a brand-new project this is a startup race,
+		// not an error: claudemux launches this head and the claude pane in
+		// the same second, and Claude Code creates its .jsonl only after it
+		// finishes booting. Exiting here killed the head pane on every fresh
+		// project (dead pane, status 1). Start waiting instead — sessionID ""
+		// puts the model in waiting mode and the follow-active rotation
+		// adopts the first transcript that appears. Only auto-detection can
+		// fail (an explicit --session resolves unconditionally), so waiting
+		// mode always has follow enabled and cannot wait forever on a pin.
+		jsonlPath = waitingTranscript(filepath.Join(claudeProjectsDir, encodedPath))
+		sessionID = ""
+	} else {
+		jsonlPath = filepath.Join(claudeProjectsDir, encodedPath, sessionID+".jsonl")
+	}
 
 	// Follow the most-recently-active session unless the user pinned one with
 	// --session. Without this, a long-lived monitor stays frozen on whatever

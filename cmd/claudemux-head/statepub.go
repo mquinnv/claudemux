@@ -39,6 +39,10 @@ func statePublishValue(s State) string {
 		return "Background:" + strconv.Itoa(s.BgCount)
 	case StateAsking:
 		return "Asking"
+	case StateWaiting:
+		// Deliberately NOT in isWaiting's set: the claude pane is still
+		// booting, so the conductor must not escort a human into it.
+		return "Starting"
 	}
 	return ""
 }

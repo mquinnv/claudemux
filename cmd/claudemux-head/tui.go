@@ -93,7 +93,15 @@ type summarizerMsg struct {
 type model struct {
 	// Config
 	jsonlPath string
+	// sessionID is "" in waiting mode: the project had no transcript at
+	// startup (see waitingTranscript) and the head is waiting for the first
+	// one to appear. switchSession sets it when rotation adopts a real file.
 	sessionID string
+
+	// waitingSince anchors StateWaiting's duration and publish timestamp — a
+	// fixed instant, so maybePublishState's anchored-Since guard publishes
+	// the waiting state once, not every tick. Zero outside waiting mode.
+	waitingSince time.Time
 
 	// followActive makes the monitor re-bind to the most-recently-active
 	// .jsonl in the project dir each poll, so it follows a session that
@@ -365,18 +373,24 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		minSummaryInterval: cfg.Summary.MinInterval.Duration,
 		tabTitle:           cfg.Summary.TabTitle,
 		teardownCmdText:    cfg.Teardown.Command,
-		// Init unconditionally fires the seed summarize call when summarizer
-		// != nil (see Init below); this flag must already be held at that
-		// point, for the same reason polling starts true above — Init has a
-		// value receiver and cannot set it itself, so a fast busy→idle edge
-		// on the very first poll would otherwise race a second concurrent
-		// call against the seed call.
-		summarizing: summarizer != nil,
+		// Init fires the seed summarize call when summarizer != nil and a
+		// session is actually bound (see Init below); this flag must already
+		// be held at that point, for the same reason polling starts true
+		// above — Init has a value receiver and cannot set it itself, so a
+		// fast busy→idle edge on the very first poll would otherwise race a
+		// second concurrent call against the seed call. In waiting mode
+		// (sessionID "") Init does NOT fire — there is nothing to summarize —
+		// so the flag must not be held either, or it would never clear and
+		// block every future call.
+		summarizing: summarizer != nil && sessionID != "",
 	}
 	if summarizer == nil {
 		// Startup itself was an acquisition attempt; stamp it so the lazy
 		// loop's first re-attempt waits a full floor rather than one tick.
 		m.lastKeyAttemptAt = time.Now()
+	}
+	if sessionID == "" {
+		m.waitingSince = time.Now()
 	}
 	// Captured while the directory still exists — see the workDir field.
 	if wd, err := os.Getwd(); err == nil {
@@ -405,6 +419,14 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	bgCount, bgOldest := m.bg.outstanding(now)
 	m.state = classifyState(m.allEvents, bgCount, bgOldest, now)
 	m.state = askOverride(m.state, m.allEvents, askMarkerTime(m.askDir, m.sessionID))
+	if !m.waitingSince.IsZero() {
+		// Waiting mode: no transcript exists yet, so classifyState's empty-ring
+		// "Idle" is a lie — nothing is waiting on the human, Claude is booting.
+		// Keyed on the anchor, not sessionID == "": the anchor is set only by
+		// newModel's explicit waiting entry and cleared by switchSession, so a
+		// model built some other way without an ID doesn't read as waiting.
+		m.state = State{Kind: StateWaiting, Since: m.waitingSince, Anchored: true}
+	}
 	for i := len(m.allEvents) - 1; i >= 0; i-- {
 		// Skip placeholder models like "<synthetic>" (error/bookkeeping
 		// events) — show the last real API model instead.
@@ -523,6 +545,9 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 
 	m.jsonlPath = jsonlPath
 	m.sessionID = sessionID
+	// Adopting a real session ends waiting mode (recomputeFromEvents keys on
+	// sessionID, but a stale anchor must not linger into a later rebind).
+	m.waitingSince = time.Time{}
 	m.reader = r
 	m.allEvents = seeded
 	m.firstPrompt = r.FirstPrompt()
@@ -662,7 +687,10 @@ func firstUserPrompt(events []Event) string {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.pollData(), m.tick()}
-	if m.summarizer != nil {
+	// No seed call in waiting mode: the transcript is empty, and
+	// switchSession fires the seed when a real session is adopted. Must
+	// stay in lockstep with newModel's `summarizing` initializer above.
+	if m.summarizer != nil && m.waitingSince.IsZero() {
 		cmds = append(cmds, m.summarize())
 	}
 	return tea.Batch(cmds...)
@@ -1491,6 +1519,9 @@ func stateDot(kind StateKind) string {
 		// the busy dot is the honest read, not the idle one "Working N" sits
 		// next to.
 		return dotTool
+	case StateWaiting:
+		// Claude is booting: something is happening, but not attention-worthy.
+		return dotThinking
 	default:
 		return dotIdle
 	}

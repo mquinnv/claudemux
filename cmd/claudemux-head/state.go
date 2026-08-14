@@ -27,6 +27,13 @@ const (
 	// comes from the marker hooks/claudemux-ask.sh writes at PreToolUse —
 	// see askOverride.
 	StateAsking
+	// StateWaiting: the head is bound to a project with no transcript yet — a
+	// brand-new project whose claude pane is still booting. Not derivable
+	// from events (there are none); set by recomputeFromEvents while the
+	// model has no session (see waitingTranscript). Distinct from Idle so the
+	// conductor doesn't escort a human into a session that can't take input
+	// yet, and so the pane says "Starting" instead of a misleading "Idle".
+	StateWaiting
 )
 
 type State struct {
@@ -204,6 +211,8 @@ func (s State) Label() string {
 		return "Working " + strconv.Itoa(s.BgCount)
 	case StateAsking:
 		return "Asking"
+	case StateWaiting:
+		return "Starting"
 	}
 	return "Unknown"
 }
