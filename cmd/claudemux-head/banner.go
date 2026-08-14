@@ -118,10 +118,17 @@ func runBanner(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: claudemux-head banner <session>")
 		return 2
 	}
-	for _, l := range renderBannerCard(args[0]) {
-		fmt.Fprintln(stdout, l)
-	}
+	// The popup's inner viewport is exactly len(lines) rows
+	// (swBannerPopupArgs asks for len+2, borders included), so the card is
+	// written as newline-JOINED lines: a final newline would move the
+	// cursor to a row that doesn't fit, scrolling the card up and leaving
+	// a blank bottom line. The cursor itself is hidden for the popup's
+	// lifetime — there is nothing to type here — and restored on the way
+	// out for pty hygiene, though the popup dies with this process anyway.
+	fmt.Fprint(stdout, "\x1b[?25l")
+	fmt.Fprint(stdout, strings.Join(renderBannerCard(args[0]), "\n"))
 	waitBannerDismiss(os.Stdin, swBannerHold)
+	fmt.Fprint(stdout, "\x1b[?25h")
 	return 0
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,5 +108,26 @@ func TestSwBannerPopupArgsSizesToCard(t *testing.T) {
 func TestSwShellQuoteEscapesSingleQuotes(t *testing.T) {
 	if got, want := swShellQuote("it's"), `'it'\''s'`; got != want {
 		t.Errorf("swShellQuote = %q, want %q", got, want)
+	}
+}
+
+func TestRunBannerOutputFitsPopupViewport(t *testing.T) {
+	var out strings.Builder
+	if rc := runBanner([]string{"api"}, &out, io.Discard); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	s := out.String()
+	if !strings.HasPrefix(s, "\x1b[?25l") {
+		t.Error("banner must hide the cursor for the popup's lifetime")
+	}
+	if !strings.HasSuffix(s, "\x1b[?25h") {
+		t.Error("banner must restore the cursor before exiting")
+	}
+	body := strings.TrimPrefix(strings.TrimSuffix(s, "\x1b[?25h"), "\x1b[?25l")
+	if strings.HasSuffix(body, "\n") {
+		t.Error("a trailing newline scrolls the card and parks the cursor on a blank bottom row")
+	}
+	if got, want := strings.Count(body, "\n"), len(renderBannerCard("api"))-1; got != want {
+		t.Errorf("body has %d newlines, want %d (N lines joined, not terminated)", got, want)
 	}
 }
