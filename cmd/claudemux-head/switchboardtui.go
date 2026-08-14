@@ -124,10 +124,42 @@ type swModel struct {
 	createInput string
 	createBusy  bool
 	createErr   string
+	// restart records that the user (R) or the binary watcher asked for a
+	// re-exec rather than a quit; runSwitchboard checks it after Run
+	// returns, mirroring the session head's flow in main().
+	restart bool
+	// launchBin mirrors the session head's: the on-disk binary at launch,
+	// re-stat'd each poll so a rebuilt lobby re-execs itself. This matters
+	// MORE here than in the head — the lobby hosts the conductor, and a
+	// stale conductor silently doesn't know newer published states.
+	launchBin   binStamp
+	launchBinOK bool
 }
 
 func newSwModel(selfPane string) swModel {
-	return swModel{selfPane: selfPane, cond: newConductor(), rateLimitsPath: defaultRateLimitsPath()}
+	m := swModel{selfPane: selfPane, cond: newConductor(), rateLimitsPath: defaultRateLimitsPath()}
+	m.launchBin, m.launchBinOK = launchBinStamp()
+	return m
+}
+
+// shouldAutoRestart reports whether this poll may re-exec into a rebuilt
+// binary. Only from a quiescent lobby: standby and the create prompt are
+// in-memory and would not survive the re-exec, and escorting/paused hold
+// snoozes and an escortee whose loss would un-skip sessions the user just
+// walked away from. swParked is usually the lobby's resting state, so
+// waiting for it delays the upgrade by seconds, not sessions — but a live
+// snooze can outlive the escort that created it: step() snoozes the
+// abandoned session and drops straight into swParked, so the lobby can sit
+// parked with conductor.snoozed still holding an entry. conductor.snoozed
+// is in-memory only, so a re-exec right then would discard it and the fresh
+// conductor would immediately re-escort the user to the session they just
+// walked away from — the exact bounce-back the snooze exists to prevent.
+// So the restart also waits for snoozed to drain, worst case the full
+// swSnoozeTTL.
+func (m *swModel) shouldAutoRestart(now time.Time) bool {
+	return !m.standby && !m.creating && !m.createBusy &&
+		m.cond.phase == swParked && len(m.cond.snoozed) == 0 &&
+		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
 func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane, m.rateLimitsPath) }
@@ -331,6 +363,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sel < 0 {
 			m.sel = 0
 		}
+		if m.shouldAutoRestart(time.Now()) {
+			m.restart = true
+			return m, tea.Quit
+		}
 		// Refresh the preview on the same beat as the fleet. tea.Batch drops
 		// nil commands, so this is a no-op when there is nothing to capture.
 		// The conductor also sits out the create flow: dispatching the client
@@ -414,6 +450,11 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "R":
+			// Same contract as the session head's R: quit, and let
+			// runSwitchboard re-exec the binary from disk.
+			m.restart = true
+			return m, tea.Quit
 		case "n":
 			// One launch at a time: a second prompt opened while one is in
 			// flight could race it for the client.
@@ -430,6 +471,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Paused self-heals to Parked at the lobby once standby ends.
 				m.cond.phase = swPaused
 				m.cond.escortee = ""
+				// step() never runs while standby is on, so the client can
+				// move around invisibly (elsewhere and back) before standby
+				// ends. A hand-back latched before standby started can't be
+				// trusted to still describe what happened at this session —
+				// clear it so resuming re-observes from scratch.
+				m.cond.clearPaused()
 			}
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
@@ -715,7 +762,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · R restart · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}
@@ -735,8 +782,16 @@ func runSwitchboard(stderr io.Writer) int {
 		return 1
 	}
 	p := tea.NewProgram(newSwModel(selfPane), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	// Same re-exec-after-Run contract as main()'s session-head path: the
+	// terminal is restored before the replacement starts, and a failed
+	// exec leaves the pane open with the reason visible.
+	if fm, ok := final.(swModel); ok && fm.restart {
+		restartSelf(stderr)
 		return 1
 	}
 	return 0

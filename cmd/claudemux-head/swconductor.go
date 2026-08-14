@@ -53,6 +53,20 @@ type conductor struct {
 	// immediately. Without this, skipping an Idle session would bounce the
 	// client straight back to it from the lobby.
 	snoozed map[string]swSnooze
+	// Paused-session observation. The user navigated somewhere themselves;
+	// swPaused's contract is "never fight the user" — but Michael's actual
+	// signal for "done here" is handing the session back to Claude, not
+	// walking to the lobby. pausedCur/pausedCurWaiting track the session
+	// under the client and whether it was waiting on the last tick;
+	// pausedHandedBack latches once that same session transitions
+	// waiting → not-waiting under them. From then on any waiting session
+	// collects the user (now, or whenever one appears). Latched rather
+	// than edge-only: the next waiter may fire minutes after the
+	// hand-back. Jumping into an already-busy session never latches, so
+	// "go watch a busy session" stays possible.
+	pausedCur        string
+	pausedCurWaiting bool
+	pausedHandedBack bool
 }
 
 func newConductor() conductor {
@@ -104,6 +118,17 @@ func (c *conductor) resolveClient(s swSnapshot) bool {
 		c.client = names[0]
 		return old != c.client
 	}
+	// No lobby client, but if exactly one client exists anywhere, it's
+	// unambiguously ours even before it ever visits the lobby — the daemon
+	// can start after the user already has claude open elsewhere. With 2+
+	// off-lobby candidates there's no way to tell which is ours, so we
+	// still wait for a lobby visit in that case.
+	if c.client == "" && len(s.Clients) == 1 {
+		for name := range s.Clients {
+			c.client = name
+			return true
+		}
+	}
 	return false
 }
 
@@ -118,6 +143,15 @@ func (c *conductor) pruneSnoozes(s swSnapshot, now time.Time) {
 			delete(c.snoozed, name)
 		}
 	}
+}
+
+// clearPaused forgets the paused-session observation; called on every path
+// that leaves swPaused so a later pause at the same session cannot inherit a
+// stale hand-back.
+func (c *conductor) clearPaused() {
+	c.pausedCur = ""
+	c.pausedCurWaiting = false
+	c.pausedHandedBack = false
 }
 
 // step advances the conductor by one poll. ok=true carries the single
@@ -182,6 +216,26 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 	case swPaused:
 		if cur == s.Lobby {
 			c.phase = swParked
+			c.clearPaused()
+			break
+		}
+		sess, ok := s.session(cur)
+		curWaiting := ok && isWaiting(sess.State)
+		if cur != c.pausedCur {
+			// First look at this spot (fresh pause, or the user moved
+			// again): observation restarts, hand-back forgotten.
+			c.pausedCur, c.pausedCurWaiting, c.pausedHandedBack = cur, curWaiting, false
+			break
+		}
+		if c.pausedCurWaiting && !curWaiting {
+			c.pausedHandedBack = true
+		}
+		c.pausedCurWaiting = curWaiting
+		if c.pausedHandedBack && !curWaiting && len(queue) > 0 {
+			c.clearPaused()
+			c.phase = swEscorting
+			c.escortee = queue[0].Name
+			return swAction{Client: c.client, Target: c.escortee}, true
 		}
 	}
 	return swAction{}, false
@@ -207,7 +261,7 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	}
 	switch c.phase {
 	case swPaused:
-		return "paused — you navigated away; return here to resume"
+		return "paused — you navigated away; finish there or return here to resume"
 	case swEscorting:
 		return fmt.Sprintf("escorting → %s · %d waiting%s", c.escortee, n, suffix)
 	}

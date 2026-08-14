@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -456,6 +458,55 @@ func TestSwModelStandbyNeverDispatches(t *testing.T) {
 	}
 }
 
+// Regression: standby freezes step() entirely, so a hand-back latched right
+// before standby began must not survive it. Otherwise the client could
+// wander off to another session and back while standby was on (invisible to
+// the conductor) and, on standby-off, get yanked by a latch describing a
+// completely different moment.
+func TestSwModelStandbySpaceClearsStaleHandBackLatch(t *testing.T) {
+	m := swTestModel()
+	// Simulate: the user had already handed "api" back (latched
+	// pausedHandedBack with the queue empty at that instant, so nothing
+	// dispatched yet), and is still sitting at "api" when standby toggles on.
+	m.cond.phase = swPaused
+	m.cond.pausedCur = "api"
+	m.cond.pausedCurWaiting = false
+	m.cond.pausedHandedBack = true
+	m.snap.Clients = map[string]string{"/dev/ttys001": "api"}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = next.(swModel)
+	if !m.standby {
+		t.Fatal("space must enter standby")
+	}
+	if m.cond.pausedCur != "" || m.cond.pausedCurWaiting || m.cond.pausedHandedBack {
+		t.Fatalf("standby must clear the paused observation, got pausedCur=%q pausedCurWaiting=%v pausedHandedBack=%v",
+			m.cond.pausedCur, m.cond.pausedCurWaiting, m.cond.pausedHandedBack)
+	}
+
+	// Leave standby, then feed a snapshot where "api" is current again (busy)
+	// and a session is waiting. If the stale latch had survived, this would
+	// dispatch immediately; it must not.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = next.(swModel)
+	if m.standby {
+		t.Fatal("space again must leave standby")
+	}
+	snap := swSnapshot{
+		Sessions: []swSession{
+			{Name: "api", State: "Thinking", Since: time.Unix(1_754_700_000, 0)},
+			{Name: "queued", State: "Idle", Since: time.Unix(1_754_700_000, 0)},
+		},
+		Lobby:   "switchboard",
+		Clients: map[string]string{"/dev/ttys001": "api"},
+	}
+	next, _ = m.Update(swSnapshotMsg{snap: snap})
+	m = next.(swModel)
+	if m.cond.phase == swEscorting {
+		t.Errorf("a stale hand-back latch must not survive standby: phase=%v escortee=%q", m.cond.phase, m.cond.escortee)
+	}
+}
+
 func TestSwModelStandbyStatusLine(t *testing.T) {
 	m := swTestModel()
 	m.standby = true
@@ -785,5 +836,104 @@ func TestSwModelViewEmptyFleetHasNoPreview(t *testing.T) {
 	m.width, m.height = 80, 46
 	if view := ansi.Strip(m.View()); strings.Contains(view, "┌") {
 		t.Errorf("an empty fleet must not draw a preview box:\n%s", view)
+	}
+}
+
+func TestSwitchboardRestartKey(t *testing.T) {
+	m := newSwModel("%1")
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	sm := got.(swModel)
+	if !sm.restart {
+		t.Error("R must request a restart")
+	}
+	if cmd == nil {
+		t.Error("R must quit the program")
+	}
+}
+
+func TestSwitchboardRestartKeyStaysLiteralWhileCreating(t *testing.T) {
+	m := newSwModel("%1")
+	m.creating = true
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	sm := got.(swModel)
+	if sm.restart {
+		t.Error("R inside the create prompt is input, not a restart")
+	}
+	if sm.createInput != "R" {
+		t.Errorf("createInput = %q, want R", sm.createInput)
+	}
+}
+
+func TestSwitchboardShouldAutoRestart(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp, _ := binStampOf(p)
+	m := newSwModel("%1")
+	m.launchBin, m.launchBinOK = stamp, true
+	now := time.Now()
+	if m.shouldAutoRestart(now) {
+		t.Error("unchanged binary must not restart")
+	}
+	if err := os.WriteFile(p, []byte("v2-longer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !m.shouldAutoRestart(now) {
+		t.Error("replaced binary must restart a parked lobby")
+	}
+	for _, tweak := range []func(*swModel){
+		func(m *swModel) { m.standby = true },
+		func(m *swModel) { m.creating = true },
+		func(m *swModel) { m.createBusy = true },
+		func(m *swModel) { m.cond.phase = swEscorting },
+		func(m *swModel) { m.cond.phase = swPaused },
+	} {
+		mm := newSwModel("%1")
+		mm.launchBin, mm.launchBinOK = stamp, true
+		tweak(&mm)
+		if mm.shouldAutoRestart(now) {
+			t.Errorf("non-quiescent lobby must not restart (%+v)", mm)
+		}
+	}
+}
+
+// TestSwitchboardShouldAutoRestartLiveSnooze covers the case a parked lobby
+// still has a live snooze: the user just walked an escortee back to the
+// lobby (step() snoozes that session and lands in swParked), so a re-exec
+// right now would drop conductor.snoozed and un-skip the session the user
+// just skipped. shouldAutoRestart must wait out the snooze — worst case the
+// full swSnoozeTTL — before taking a pending rebuild.
+func TestSwitchboardShouldAutoRestartLiveSnooze(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp, _ := binStampOf(p)
+	m := newSwModel("%1")
+	m.launchBin, m.launchBinOK = stamp, true
+	m.cond.phase = swParked
+
+	if err := os.WriteFile(p, []byte("v2-longer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	m.cond.snoozed = map[string]swSnooze{"x": {since: time.Unix(100, 0), at: time.Now()}}
+	if m.shouldAutoRestart(now) {
+		t.Error("parked lobby with a live snooze must not restart")
+	}
+
+	m.cond.snoozed = map[string]swSnooze{}
+	if !m.shouldAutoRestart(now) {
+		t.Error("parked lobby with no live snoozes must restart on a changed binary")
 	}
 }
