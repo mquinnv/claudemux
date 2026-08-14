@@ -901,3 +901,39 @@ func TestSwitchboardShouldAutoRestart(t *testing.T) {
 		}
 	}
 }
+
+// TestSwitchboardShouldAutoRestartLiveSnooze covers the case a parked lobby
+// still has a live snooze: the user just walked an escortee back to the
+// lobby (step() snoozes that session and lands in swParked), so a re-exec
+// right now would drop conductor.snoozed and un-skip the session the user
+// just skipped. shouldAutoRestart must wait out the snooze — worst case the
+// full swSnoozeTTL — before taking a pending rebuild.
+func TestSwitchboardShouldAutoRestartLiveSnooze(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp, _ := binStampOf(p)
+	m := newSwModel("%1")
+	m.launchBin, m.launchBinOK = stamp, true
+	m.cond.phase = swParked
+
+	if err := os.WriteFile(p, []byte("v2-longer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	m.cond.snoozed = map[string]swSnooze{"x": {since: time.Unix(100, 0), at: time.Now()}}
+	if m.shouldAutoRestart(now) {
+		t.Error("parked lobby with a live snooze must not restart")
+	}
+
+	m.cond.snoozed = map[string]swSnooze{}
+	if !m.shouldAutoRestart(now) {
+		t.Error("parked lobby with no live snoozes must restart on a changed binary")
+	}
+}

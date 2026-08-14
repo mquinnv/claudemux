@@ -146,11 +146,19 @@ func newSwModel(selfPane string) swModel {
 // binary. Only from a quiescent lobby: standby and the create prompt are
 // in-memory and would not survive the re-exec, and escorting/paused hold
 // snoozes and an escortee whose loss would un-skip sessions the user just
-// walked away from. swParked is the lobby's resting state, so waiting for
-// it delays the upgrade by seconds, not sessions.
+// walked away from. swParked is usually the lobby's resting state, so
+// waiting for it delays the upgrade by seconds, not sessions — but a live
+// snooze can outlive the escort that created it: step() snoozes the
+// abandoned session and drops straight into swParked, so the lobby can sit
+// parked with conductor.snoozed still holding an entry. conductor.snoozed
+// is in-memory only, so a re-exec right then would discard it and the fresh
+// conductor would immediately re-escort the user to the session they just
+// walked away from — the exact bounce-back the snooze exists to prevent.
+// So the restart also waits for snoozed to drain, worst case the full
+// swSnoozeTTL.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
 	return !m.standby && !m.creating && !m.createBusy &&
-		m.cond.phase == swParked &&
+		m.cond.phase == swParked && len(m.cond.snoozed) == 0 &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
