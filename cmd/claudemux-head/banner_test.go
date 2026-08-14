@@ -10,29 +10,29 @@ import (
 
 func TestRenderBannerCardShowsSessionAndEscortLine(t *testing.T) {
 	lines := renderBannerCard("remix-2")
-	if len(lines) != 5 {
-		t.Fatalf("want 5 lines (smoke, roof, body, wheels, escort), got %d: %q", len(lines), lines)
+	if want := len(swBannerTrain) + 1; len(lines) != want {
+		t.Fatalf("want %d lines (train + caption), got %d: %q", want, len(lines), lines)
 	}
-	if !strings.Contains(lines[2], "remix-2") {
-		t.Errorf("body line must name the session, got %q", lines[2])
+	caption := lines[len(lines)-1]
+	if !strings.Contains(caption, "remix-2") {
+		t.Errorf("caption line must name the session, got %q", caption)
 	}
-	if !strings.Contains(lines[4], "escorted by claudemux") {
-		t.Errorf("last line must say who moved the client, got %q", lines[4])
+	if !strings.Contains(caption, "escorted by claudemux") {
+		t.Errorf("caption line must say who moved the client, got %q", caption)
 	}
 }
 
-// The train's art lines share a frame: the roof, body, and wheels must stay
-// aligned as the car stretches to fit the name, and a name shorter than the
-// engine's fixed parts must not collapse the wheels.
-func TestRenderBannerCardTrainStaysAligned(t *testing.T) {
-	for _, session := range []string{"a", "remix-2", strings.Repeat("x", 200)} {
+// The locomotive is fixed art: only its centering indent may vary with the
+// session name, never the drawing itself.
+func TestRenderBannerCardTrainIsFixedArt(t *testing.T) {
+	base := renderBannerCard("remix-2")
+	for _, session := range []string{"a", strings.Repeat("x", 200)} {
 		lines := renderBannerCard(session)
-		body := lipgloss.Width(lines[2])
-		if roof := lipgloss.Width(lines[1]); roof != body-2 {
-			t.Errorf("%q: roof width %d, want body-2 = %d", session, roof, body-2)
-		}
-		if wheels := lipgloss.Width(lines[3]); wheels != body-2 {
-			t.Errorf("%q: wheels width %d, want body-2 = %d", session, wheels, body-2)
+		for i := range swBannerTrain {
+			if strings.TrimLeft(lines[i], " ") != strings.TrimLeft(base[i], " ") {
+				t.Errorf("%q: train line %d changed with the name: %q vs %q",
+					session, i, lines[i], base[i])
+			}
 		}
 	}
 }
@@ -88,11 +88,11 @@ func TestSwBannerPopupArgsSizesToCard(t *testing.T) {
 			h = args[i+1]
 		}
 	}
-	// 5 content lines + 2 border rows.
-	if h != "7" {
-		t.Errorf("popup height = %q, want 7", h)
-	}
 	lines := renderBannerCard("remix-2")
+	// Content lines + 2 border rows.
+	if want := strconv.Itoa(len(lines) + 2); h != want {
+		t.Errorf("popup height = %q, want content+border = %q", h, want)
+	}
 	widest := 0
 	for _, l := range lines {
 		if lw := lipgloss.Width(l); lw > widest {

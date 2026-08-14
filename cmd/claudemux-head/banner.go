@@ -32,37 +32,54 @@ var (
 	swBannerSmokeStyle  = lipgloss.NewStyle().Faint(true)
 )
 
-// renderBannerCard is the popup's content: a little locomotive pulling into
-// the station with the session's name on its side. Pure, so the popup
+// swBannerEscort is the text that trails the session name on the card's last
+// line. The name's truncation budget is swBannerMaxW minus this suffix.
+const swBannerEscort = " · escorted by claudemux"
+
+// swBannerTrain is the fixed locomotive art, engine and tender, pulling in
+// toward the left. The art no longer stretches around the session name — the
+// name lives on the caption line below, so the train can afford real detail:
+// a smoke plume, boiler domes, a cab, and a coupled tender.
+var swBannerTrain = []string{
+	`      o  O`,
+	`     o`,
+	`    o       _____`,
+	`   .][__n_n_|DD[  ====____`,
+	`  >(________|__|_[_______]|`,
+	"  _/oo OOOOO oo`  ooo  ooo",
+}
+
+// renderBannerCard is the popup's content: the locomotive above, and a single
+// caption line naming the session and who escorted it. Pure, so the popup
 // geometry below can be derived from the same lines the banner subcommand
-// will actually print.
-//
-//	       . o O
-//	 ______[]_
-//	| remix-2 |>
-//	 (o)---(o)
-//	 escorted by claudemux
-//
-// The car stretches to fit the name; inner is the interior width between the
-// body's side walls, floored so the wheels and stack of a one-letter session
-// still have somewhere to sit.
+// will actually print. The train and caption are centered on each other, and
+// the name is truncated so no line exceeds swBannerMaxW.
 func renderBannerCard(session string) []string {
-	// Body width is inner+3 ("|" + inner + "|>"), so this cap keeps the
-	// widest line at swBannerMaxW.
-	name := ansi.Truncate(session, swBannerMaxW-5, "…")
-	inner := lipgloss.Width(name) + 2
-	if inner < 8 {
-		inner = 8
+	name := ansi.Truncate(session, swBannerMaxW-lipgloss.Width(swBannerEscort), "…")
+	captionW := lipgloss.Width(name) + lipgloss.Width(swBannerEscort)
+	trainW := 0
+	for _, l := range swBannerTrain {
+		if w := lipgloss.Width(l); w > trainW {
+			trainW = w
+		}
 	}
-	pad := inner - 2 - lipgloss.Width(name)
-	left, right := pad/2, pad-pad/2
-	return []string{
-		strings.Repeat(" ", inner-2) + swBannerSmokeStyle.Render(". o O"),
-		" " + strings.Repeat("_", inner-3) + "[]_",
-		"|" + strings.Repeat(" ", left+1) + swBannerNameStyle.Render(name) + strings.Repeat(" ", right+1) + "|>",
-		" (o)" + strings.Repeat("-", inner-6) + "(o)",
-		" " + swBannerEscortStyle.Render("escorted by claudemux"),
+	trainPad, captionPad := 0, 0
+	if captionW > trainW {
+		trainPad = (captionW - trainW) / 2
+	} else {
+		captionPad = (trainW - captionW) / 2
 	}
+	lines := make([]string, 0, len(swBannerTrain)+1)
+	for i, l := range swBannerTrain {
+		if i < 3 {
+			// The rising puffs read as motion, not structure.
+			l = swBannerSmokeStyle.Render(l)
+		}
+		lines = append(lines, strings.Repeat(" ", trainPad)+l)
+	}
+	lines = append(lines, strings.Repeat(" ", captionPad)+
+		swBannerNameStyle.Render(name)+swBannerEscortStyle.Render(swBannerEscort))
+	return lines
 }
 
 // swWantsBanner: announce arrivals at sessions, not the return to the lobby —
