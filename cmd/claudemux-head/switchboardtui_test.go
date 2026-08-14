@@ -937,3 +937,57 @@ func TestSwitchboardShouldAutoRestartLiveSnooze(t *testing.T) {
 		t.Error("parked lobby with no live snoozes must restart on a changed binary")
 	}
 }
+
+func TestFleetRestartArgs(t *testing.T) {
+	sessions := []swSession{
+		{Name: "a", HeadPane: "%10"},
+		{Name: "b"}, // no head pane recorded: must be skipped, not sent to pane ""
+		{Name: "c", HeadPane: "%12"},
+	}
+	got := swFleetRestartArgs(sessions)
+	want := [][]string{
+		{"send-keys", "-t", "%10", "R"},
+		{"send-keys", "-t", "%12", "R"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d argvs, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if strings.Join(got[i], " ") != strings.Join(want[i], " ") {
+			t.Errorf("argv[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSwitchboardFleetRestartKey(t *testing.T) {
+	m := newSwModel("%1")
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	sm := got.(swModel)
+	if sm.restart {
+		t.Error("ctrl+r must not restart self before the sends complete")
+	}
+	if cmd == nil {
+		t.Fatal("ctrl+r must dispatch the fleet-restart cmd")
+	}
+	got2, cmd2 := sm.Update(swFleetRestartMsg{})
+	sm2 := got2.(swModel)
+	if !sm2.restart {
+		t.Error("fleet-restart completion must request self-restart")
+	}
+	if cmd2 == nil {
+		t.Error("fleet-restart completion must quit the program")
+	}
+}
+
+func TestSwitchboardFleetRestartKeyInertWhileCreating(t *testing.T) {
+	m := newSwModel("%1")
+	m.creating = true
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	sm := got.(swModel)
+	if sm.restart {
+		t.Error("ctrl+r inside the create prompt must be inert")
+	}
+	if sm.createInput != "" {
+		t.Errorf("ctrl+r must not type into the create prompt, got %q", sm.createInput)
+	}
+}

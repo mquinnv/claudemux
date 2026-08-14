@@ -101,6 +101,25 @@ func TestBuildSwSnapshotRecordsClaudePane(t *testing.T) {
 	}
 }
 
+// HeadPane records the session's own claudemux-head pane, distinct from
+// ClaudePane: the fleet-restart key needs it to know where to type R.
+func TestBuildSwSnapshotRecordsHeadPane(t *testing.T) {
+	s := buildSwSnapshot(swSessOut, swPaneOut, swClientOut, "%9")
+	api, ok := s.session("api")
+	if !ok || api.HeadPane != "%1" {
+		t.Errorf("api.HeadPane = %q, want %%1", api.HeadPane)
+	}
+	web, ok := s.session("web")
+	if !ok || web.HeadPane != "%5" {
+		t.Errorf("web.HeadPane = %q, want %%5", web.HeadPane)
+	}
+	// plain has no claudemux-head pane at all: it must not surface as a
+	// session, let alone with a stray HeadPane.
+	if _, ok := s.session("plain"); ok {
+		t.Error("plain has no head pane and must be excluded from Sessions")
+	}
+}
+
 // "node" identifies claude only as a fallback. A session that has both a real
 // claude pane and some other node process must preview claude, whatever order
 // tmux lists them in.

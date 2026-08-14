@@ -317,6 +317,44 @@ func swSwitchLastCmd(client string) tea.Cmd {
 	}
 }
 
+// swFleetRestartMsg reports that every session head has been sent the R
+// restart key; the lobby restarts itself only on receipt, so the sends are
+// complete before this process quits.
+type swFleetRestartMsg struct{}
+
+// swFleetRestartArgs builds one tmux send-keys argv per session head pane.
+// Sessions with no recorded head pane are skipped — send-keys to an empty
+// target would land in whatever pane tmux resolves, which could be a claude
+// prompt.
+func swFleetRestartArgs(sessions []swSession) [][]string {
+	var argvs [][]string
+	for _, sess := range sessions {
+		if sess.HeadPane == "" {
+			continue
+		}
+		argvs = append(argvs, []string{"send-keys", "-t", sess.HeadPane, "R"})
+	}
+	return argvs
+}
+
+// swRestartFleetCmd types the R restart key into every session head, then
+// reports completion. R has been the head's restart key for months, so this
+// reaches heads running binaries too old to auto-restart themselves — which
+// is exactly when a fleet restart is wanted. Sends run sequentially with the
+// same per-call deadline as every other tmux shell-out; a send that fails
+// (dead pane, wedged tmux) is skipped rather than aborting the sweep.
+func swRestartFleetCmd(sessions []swSession) tea.Cmd {
+	argvs := swFleetRestartArgs(sessions)
+	return func() tea.Msg {
+		for _, args := range argvs {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = exec.CommandContext(ctx, "tmux", args...).Run()
+			cancel()
+		}
+		return swFleetRestartMsg{}
+	}
+}
+
 func swNextTick() tea.Cmd {
 	return tea.Tick(swPollInterval, func(t time.Time) tea.Msg { return swTickMsg(t) })
 }
@@ -381,6 +419,11 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(swNextTick(), pv)
+	case swFleetRestartMsg:
+		// Self last: every head has been told to restart; now pick up the
+		// new binary here too, via the same after-Run re-exec as R.
+		m.restart = true
+		return m, tea.Quit
 	case swPreviewMsg:
 		// Always clear the flag, stale or not: a dropped result that left the
 		// flag set would wedge the preview for the rest of the session.
@@ -455,6 +498,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// runSwitchboard re-exec the binary from disk.
 			m.restart = true
 			return m, tea.Quit
+		case "ctrl+r":
+			// Restart the whole fleet: every session head, then self.
+			return m, swRestartFleetCmd(m.snap.Sessions)
 		case "n":
 			// One launch at a time: a second prompt opened while one is in
 			// flight could race it for the client.
@@ -762,7 +808,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · R restart · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}

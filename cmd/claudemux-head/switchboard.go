@@ -31,6 +31,10 @@ type swSession struct {
 	// one left on its head pane would preview the four rows the lobby row
 	// already summarizes.
 	ClaudePane string
+	// HeadPane is the session's claudemux-head pane. The fleet-restart key
+	// types `R` into it — and must never type into the claude pane, where
+	// a stray R would land in the user's prompt.
+	HeadPane string
 }
 
 type swSnapshot struct {
@@ -85,6 +89,7 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 	topics := map[string]string{}
 	claudePanes := map[string]string{}
 	shimPanes := map[string]string{}
+	headPanes := map[string]string{}
 	for _, line := range strings.Split(paneOut, "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) != 4 {
@@ -93,6 +98,9 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if f[2] == swHeadCommand {
 			heads[f[0]] = true
 			topics[f[0]] = f[3]
+			if _, ok := headPanes[f[0]]; !ok {
+				headPanes[f[0]] = f[1]
+			}
 		}
 		// First pane of each kind wins, so the previewed pane is stable
 		// across polls even when a session has several candidates.
@@ -132,6 +140,7 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if sess.ClaudePane == "" {
 			sess.ClaudePane = shimPanes[sess.Name]
 		}
+		sess.HeadPane = headPanes[sess.Name]
 		snap.Sessions = append(snap.Sessions, sess)
 	}
 
