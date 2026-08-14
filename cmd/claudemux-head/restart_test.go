@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // The re-exec must carry the ORIGINAL flags. A head launched with --session is
@@ -36,5 +39,40 @@ func TestRestartArgvEmptyArgs(t *testing.T) {
 	want := []string{"/bin/head"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("restartArgv() = %v, want %v", got, want)
+	}
+}
+
+func TestShouldAutoRestart(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp, ok := binStampOf(p)
+	if !ok {
+		t.Fatal("stampOf failed")
+	}
+	m := &model{launchBin: stamp, launchBinOK: true}
+	now := time.Now()
+	if m.shouldAutoRestart(now) {
+		t.Error("unchanged binary must not restart")
+	}
+	if err := os.WriteFile(p, []byte("v2-longer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-time.Minute)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !m.shouldAutoRestart(now) {
+		t.Error("replaced binary must restart an idle head")
+	}
+	m.teardown = teardownSent
+	if m.shouldAutoRestart(now) {
+		t.Error("must not restart mid-teardown")
+	}
+	m.teardown = teardownIdle
+	m.launchBinOK = false
+	if m.shouldAutoRestart(now) {
+		t.Error("must not restart when the launch stamp failed")
 	}
 }

@@ -239,6 +239,12 @@ type model struct {
 	// The TUI exits either way — main reads this once p.Run() has returned and
 	// restored the terminal, then replaces the process. See restartSelf.
 	restart bool
+	// launchBin is the on-disk binary this process started as; each tick
+	// compares it against the file so a rebuilt head re-execs itself — the
+	// R key's job, without waiting for a human to remember. launchBinOK
+	// false (stamping failed) disables the feature for this process.
+	launchBin   binStamp
+	launchBinOK bool
 	// Teardown state: `x` wraps the session up and kills its tmux session.
 	// See teardown.go. Like tabPinned, this is deliberately not persisted —
 	// an armed kill that survived a head restart would be a trap.
@@ -384,6 +390,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		// block every future call.
 		summarizing: summarizer != nil && sessionID != "",
 	}
+	m.launchBin, m.launchBinOK = launchBinStamp()
 	if summarizer == nil {
 		// Startup itself was an acquisition attempt; stamp it so the lazy
 		// loop's first re-attempt waits a full floor rather than one tick.
@@ -887,6 +894,14 @@ func (m model) shouldAcquireSummarizer(now time.Time) bool {
 	return now.Sub(m.lastKeyAttemptAt) >= summarizerAcquireFloor
 }
 
+// shouldAutoRestart reports whether this tick may re-exec into a rebuilt
+// binary. Only from a quiet head: a teardown in flight must not be disarmed
+// by a restart it didn't ask for (teardown state is deliberately not
+// persisted — see the teardown fields).
+func (m *model) shouldAutoRestart(now time.Time) bool {
+	return m.teardown == teardownIdle && m.launchBinOK && binChanged(m.launchBin, now)
+}
+
 // acquireSummarizer re-runs newSummarizer off the Update loop: reading the
 // key can block up to ~2s on a FIFO (envFileTimeout), which must never stall
 // rendering.
@@ -981,6 +996,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		now := time.Time(msg)
+		if m.shouldAutoRestart(now) {
+			m.restart = true
+			return m, tea.Quit
+		}
 		switch m.teardown {
 		case teardownSent:
 			// Evidence the keystrokes landed: claude went busy, or a new
