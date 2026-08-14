@@ -271,3 +271,91 @@ func TestStatusLineOmitsExpiredSnoozeFromCount(t *testing.T) {
 		t.Errorf("statusLine = %q, want %q (expired snooze must not count)", got, want)
 	}
 }
+
+// pauseAt drives a fresh conductor into swPaused at session name: one step
+// parked at the lobby is skipped — the client simply appears off-lobby.
+func pauseAt(c *conductor, name string, sessions ...swSession) {
+	c.step(snapAt(name, sessions...), time.Unix(1_754_700_000, 0))
+}
+
+func TestPausedWatchingBusySessionNeverYanked(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", busy("b"))
+	// b was never waiting under the user; a waiting session elsewhere
+	// must not move them.
+	for i := 0; i < 3; i++ {
+		if _, ok := c.step(snapAt("b", busy("b"), waiting("a", 100)), now.Add(time.Duration(i)*time.Second)); ok {
+			t.Fatal("watching a busy session must never dispatch")
+		}
+	}
+	if c.phase != swPaused {
+		t.Errorf("phase = %v, want paused", c.phase)
+	}
+}
+
+func TestPausedHandBackDispatchesToWaiting(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	// Observe b waiting under the user...
+	if _, ok := c.step(snapAt("b", waiting("b", 50), waiting("a", 100)), now); ok {
+		t.Fatal("attending a waiting session must not dispatch")
+	}
+	// ...then the user hands it back: conduct to the queue head.
+	act, ok := c.step(snapAt("b", busy("b"), waiting("a", 100)), now.Add(time.Second))
+	if !ok || act.Target != "a" {
+		t.Fatalf("hand-back must dispatch to a, got %+v ok=%v", act, ok)
+	}
+	if c.phase != swEscorting || c.escortee != "a" {
+		t.Errorf("phase=%v escortee=%q", c.phase, c.escortee)
+	}
+}
+
+func TestPausedHandBackStickyUntilQueueFills(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	c.step(snapAt("b", waiting("b", 50)), now)
+	// Hand-back with nothing waiting: stay put...
+	if _, ok := c.step(snapAt("b", busy("b")), now.Add(time.Second)); ok {
+		t.Fatal("empty queue: nothing to dispatch to")
+	}
+	// ...but the hand-back is remembered; a session that starts waiting
+	// minutes later still collects the user.
+	act, ok := c.step(snapAt("b", busy("b"), waiting("a", 900)), now.Add(3*time.Minute))
+	if !ok || act.Target != "a" {
+		t.Fatalf("late waiter must be dispatched, got %+v ok=%v", act, ok)
+	}
+}
+
+func TestPausedMovingAgainResetsHandBack(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	c.step(snapAt("b", waiting("b", 50)), now)
+	c.step(snapAt("b", busy("b")), now.Add(time.Second)) // handed back
+	// The user jumps to c2 (busy) themselves: observation restarts there.
+	c.step(snapAt("c2", busy("b"), busy("c2")), now.Add(2*time.Second))
+	if _, ok := c.step(snapAt("c2", busy("b"), busy("c2"), waiting("a", 900)), now.Add(3*time.Second)); ok {
+		t.Fatal("a fresh self-navigation must clear the hand-back")
+	}
+}
+
+func TestPausedLobbyReturnClearsHandBack(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	c.step(snapAt("b", waiting("b", 50)), now)
+	c.step(snapAt("b", busy("b")), now.Add(time.Second)) // handed back
+	// Return to the lobby: parked, observation cleared.
+	c.step(snapAt("switchboard", busy("b")), now.Add(2*time.Second))
+	if c.phase != swParked {
+		t.Fatalf("phase = %v, want parked", c.phase)
+	}
+	// Jump back into b (busy): the old hand-back must not linger.
+	c.step(snapAt("b", busy("b")), now.Add(3*time.Second))
+	if _, ok := c.step(snapAt("b", busy("b"), waiting("a", 900)), now.Add(4*time.Second)); ok {
+		t.Fatal("stale hand-back from a previous pause must not dispatch")
+	}
+}
