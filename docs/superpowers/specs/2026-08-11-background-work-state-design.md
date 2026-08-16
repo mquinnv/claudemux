@@ -95,6 +95,7 @@ a top-level **`toolUseResult`** — a sibling of `message`, read exactly like th
 |---|---|---|
 | background shell | `toolUseResult.backgroundTaskId` is a non-empty string | that string |
 | async agent | `toolUseResult.isAsync == true` | `toolUseResult.agentId` |
+| forked background skill | `toolUseResult.background == true` | `toolUseResult.agentId` |
 
 Verified across all 1915 transcripts under `~/.claude/projects` on this machine:
 
@@ -107,6 +108,16 @@ Verified across all 1915 transcripts under `~/.claude/projects` on this machine:
   plain string — so `isAsync` is what separates the two dispatches the same tool makes.
 - Every notified `<task-id>` matches either a `backgroundTaskId` or an `agentId`, so the
   launch id and the completion id are the same string.
+
+Added 2026-08-16 (Claude Code 2.1.232): a **Skill that runs as a forked background
+agent** (e.g. `/code-review high`) writes a third shape — `background: true` and
+`status: "forked"` beside the same non-empty `agentId`, with **no `isAsync` key at
+all**. The fork writes the same `subagents/agent-<id>.jsonl` liveness file as an
+async agent, so it follows the agent expiry regime. One captured instance so far —
+`testdata/launch-skill-fork.jsonl`; before detection learned this shape, a session
+running a multi-hour forked review read as Idle the whole time. A skill that runs
+inline writes `commandName`/`success` with no `agentId`, so `background` is what
+separates the two dispatches the same tool makes.
 
 This is structural in a way no text rule can be: a command's stdout lands *inside*
 `toolUseResult.stdout` and cannot add a key beside it, so no output — no matter what it
