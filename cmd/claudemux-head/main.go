@@ -51,6 +51,13 @@ func main() {
 		os.Exit(runSwitchboard(os.Stderr))
 	}
 
+	// `onboard` is the layout picker, run by bin/claudemux on a session's
+	// first launch and by `claudemux setup` any time after. Dispatched
+	// before flag.Parse() alongside every other subcommand here.
+	if len(os.Args) > 1 && os.Args[1] == "onboard" {
+		os.Exit(runOnboard(os.Stderr))
+	}
+
 	// `banner` runs inside the switchboard's display-popup (see banner.go).
 	if len(os.Args) > 1 && os.Args[1] == "banner" {
 		os.Exit(runBanner(os.Args[2:], os.Stdout, os.Stderr))
