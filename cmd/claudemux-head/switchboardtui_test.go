@@ -1015,3 +1015,40 @@ func TestSwitchboardFleetRestartKeyInertWhileCreating(t *testing.T) {
 		t.Errorf("ctrl+r must not type into the create prompt, got %q", sm.createInput)
 	}
 }
+
+// The title line carries a mode badge so conduct-vs-standby is readable at a
+// glance, not just in the faint status line at the bottom.
+func TestSwModeBadge(t *testing.T) {
+	cases := []struct {
+		name    string
+		standby bool
+		phase   swPhase
+		want    string
+	}{
+		{"conducting", false, swParked, "CONDUCTING"},
+		{"escorting is conducting", false, swEscorting, "CONDUCTING"},
+		{"paused", false, swPaused, "PAUSED"},
+		{"standby", true, swParked, "STANDBY"},
+	}
+	for _, c := range cases {
+		if got := swModeBadge(c.standby, c.phase); !strings.Contains(got, c.want) {
+			t.Errorf("%s: swModeBadge = %q, want it to contain %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSwModelViewShowsModeBadge(t *testing.T) {
+	m := swTestModel()
+	if view := m.View(); !strings.Contains(view, "CONDUCTING") {
+		t.Errorf("view missing CONDUCTING badge:\n%s", view)
+	}
+	m.standby = true
+	if view := m.View(); !strings.Contains(view, "STANDBY") {
+		t.Errorf("standby view missing STANDBY badge:\n%s", view)
+	}
+	m.standby = false
+	m.cond.phase = swPaused
+	if view := m.View(); !strings.Contains(view, "PAUSED") {
+		t.Errorf("paused view missing PAUSED badge:\n%s", view)
+	}
+}

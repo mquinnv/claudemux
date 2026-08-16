@@ -212,6 +212,10 @@ type model struct {
 	summary    Summary
 	rateLimits RateLimits
 	rateOK     bool
+	// conductRaw is the last-read @claudemux_conducting value, parsed at
+	// render time (not poll time) so its heartbeat keeps decaying against the
+	// clock even if polls stall — see conductChip.
+	conductRaw string
 
 	// UI
 	lastUpdate time.Time
@@ -742,12 +746,22 @@ func (m model) pollData() tea.Cmd {
 		}
 		newEvents, _ := reader.Tail()
 		rl, rlErr := readRateLimits(rlPath)
+		// The lobby's conduct-mode heartbeat, read on the same beat as
+		// everything else. Only inside tmux (selfPane set); a failed or absent
+		// read is "" and the chip simply stays off.
+		conductRaw := ""
+		if selfPane != "" {
+			cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
+			conductRaw = readConductOption(cctx)
+			ccancel()
+		}
 		return dataMsg{
 			time:         time.Now(),
 			activeJSONL:  activeJSONL,
 			newEvents:    newEvents,
 			rateLimits:   rl,
 			rateLimitErr: rlErr,
+			conductRaw:   conductRaw,
 		}
 	}
 }
@@ -758,6 +772,7 @@ type dataMsg struct {
 	newEvents    []Event
 	rateLimits   RateLimits
 	rateLimitErr error
+	conductRaw   string // raw @claudemux_conducting value, "" when unset/unreadable
 }
 
 // turnEndedByIdle reports whether kind reads as "the main thread's turn
@@ -1037,6 +1052,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dataMsg:
 		m.polling = false
+		// Ahead of the rotation early-returns below: the conduct chip must
+		// track the lobby regardless of which transcript this head is bound to.
+		m.conductRaw = msg.conductRaw
 		// Session rotated: re-bind to the newer file and discard this batch's
 		// events (they were tailed from the old reader). They refresh on the
 		// next poll.
@@ -1460,6 +1478,9 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if c := m.statusChip(now); c != "" {
 		leftParts = append(leftParts, c)
 	}
+	if c := conductChip(m.conductRaw, now); c != "" {
+		leftParts = append(leftParts, c)
+	}
 	if chip == noWorktreeWarning {
 		// No glyph: this message is about having NO worktree, and the branch
 		// chip below still renders beside it.
@@ -1715,6 +1736,9 @@ func renderStateLine(m model, now time.Time) string {
 		parts = append(parts, shortModel(m.modelName))
 	}
 	if c := m.statusChip(now); c != "" {
+		parts = append(parts, c)
+	}
+	if c := conductChip(m.conductRaw, now); c != "" {
 		parts = append(parts, c)
 	}
 

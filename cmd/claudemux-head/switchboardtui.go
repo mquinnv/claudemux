@@ -88,7 +88,28 @@ var (
 	swUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	swSelStyle     = lipgloss.NewStyle().Reverse(true)
 	swStatusStyle  = lipgloss.NewStyle().Faint(true)
+	// Mode badge and status-line tints: conduct-vs-standby must be readable at
+	// a glance from either end of the screen, not inferable from one faint
+	// word at the bottom.
+	swBadgeConductStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("35"))
+	swBadgeStandbyStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("214"))
+	swBadgePausedStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("254")).Background(lipgloss.Color("241"))
+	swStatusConductStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("35"))
+	swStatusStandbyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 )
+
+// swModeBadge renders the title-line mode badge. Escorting shows as
+// CONDUCTING — it is the active form of it, and the status line below already
+// names the escortee.
+func swModeBadge(standby bool, phase swPhase) string {
+	switch conductMode(standby, phase) {
+	case "standby":
+		return swBadgeStandbyStyle.Render(" STANDBY ")
+	case "paused":
+		return swBadgePausedStyle.Render(" PAUSED ")
+	}
+	return swBadgeConductStyle.Render(" CONDUCTING ")
+}
 
 type swModel struct {
 	selfPane string
@@ -400,11 +421,15 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.rateOK = false
 		}
+		// Publish the conduct-mode heartbeat on every poll, tmux error or not:
+		// the heads' staleness window (conductStaleAfter) is sized against this
+		// beat, and mode toggles republish immediately on their own.
+		pub := publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
 		// Schedule the next tick from here, not from swTickMsg: polls never
 		// overlap, and a slow tmux stretches the interval instead of queueing.
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
-			return m, swNextTick()
+			return m, tea.Batch(swNextTick(), pub)
 		}
 		m.lastErr = ""
 		m.snap = msg.snap
@@ -428,10 +453,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.standby && !m.creating && !m.createBusy {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
-					swSwitchCmd(act.Client, act.Target, swWantsBanner(act.Target, m.snap.Lobby)), pv)
+					swSwitchCmd(act.Client, act.Target, swWantsBanner(act.Target, m.snap.Lobby)), pv, pub)
 			}
 		}
-		return m, tea.Batch(swNextTick(), pv)
+		return m, tea.Batch(swNextTick(), pv, pub)
 	case swFleetRestartMsg:
 		// Self last: every head has been told to restart; now pick up the
 		// new binary here too, via the same after-Run re-exec as R.
@@ -544,6 +569,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// clear it so resuming re-observes from scratch.
 				m.cond.clearPaused()
 			}
+			// Republish immediately rather than waiting out the poll beat, so
+			// the heads' chips track the toggle as fast as the badge does.
+			return m, publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
 				m.sel++
@@ -635,7 +663,11 @@ func swMetersLine(m swModel, now time.Time) string {
 func (m swModel) View() string {
 	now := time.Now()
 	var b strings.Builder
-	b.WriteString(swTitleStyle.Render("claudemux switchboard") + "\n")
+	title := swTitleStyle.Render("claudemux switchboard") + "  " + swModeBadge(m.standby, m.cond.phase)
+	if m.width > 0 {
+		title = clipLine(title, m.width)
+	}
+	b.WriteString(title + "\n")
 	// The account budget meters sit under the title, where the head keeps its
 	// meters line: full-width 5h/wk gauges with reset times, plus the ETA when
 	// there's burn-rate signal. Omitted entirely (no blank placeholder) when
@@ -802,18 +834,30 @@ func (m swModel) View() string {
 	// The create flow borrows the status line rather than adding one, so the
 	// layout (and computePreviewLayout's accounting of it) never shifts.
 	statusStyled := true
+	// Tinted to match the title badge — conducting green, standby orange — so
+	// both ends of the screen agree about the mode. The create texts keep the
+	// neutral faint style: they are about the launch, not the conductor.
+	statusStyle := swStatusStyle
+	switch conductMode(m.standby, m.cond.phase) {
+	case "conducting":
+		statusStyle = swStatusConductStyle
+	case "standby":
+		statusStyle = swStatusStandbyStyle
+	}
 	switch {
 	case m.creating:
 		status = "new session: " + m.createInput + "▌"
 		statusStyled = false // unstyled so the typed query stands out
 	case m.createBusy:
 		status = "creating session…"
+		statusStyle = swStatusStyle
 	case m.createErr != "":
 		status = "create failed: " + m.createErr
+		statusStyle = swStatusStyle
 	}
 	statusLine := status
 	if statusStyled {
-		statusLine = swStatusStyle.Render(status)
+		statusLine = statusStyle.Render(status)
 	}
 	if m.width > 0 {
 		statusLine = clipLine(statusLine, m.width)
@@ -860,5 +904,10 @@ func runSwitchboard(stderr io.Writer) int {
 		restartSelf(stderr)
 		return 1
 	}
+	// A quit for good: drop the conduct option now so heads lose their chip
+	// immediately instead of waiting out the staleness window. A restarting
+	// lobby skips this (above) — its replacement is publishing again well
+	// inside that window, so the chips never blink.
+	unsetConductOption()
 	return 0
 }
