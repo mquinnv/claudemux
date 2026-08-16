@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claudemux [-n] [-d] [-w|-W] [dir|query ...]
+# Usage: claudemux [-n] [-d] [-w|-W] [switch|setup|dir|query ...]
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
@@ -54,7 +54,7 @@ while getopts "ndwW" opt; do
     d) DETACHED=true ;;
     w) worktree_mode_set force ;;
     W) worktree_mode_set skip ;;
-    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [dir|query ...]" >&2; exit 1 ;;
+    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [switch|setup|dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -457,6 +457,38 @@ deferred_launch() {
   return 0
 }
 
+# maybe_onboard — run claudemux-head's interactive layout picker, once, when
+# this looks like a first run: `claudemux-head` is on PATH, stdin AND stdout
+# are both TTYs (a non-interactive caller — the switchboard's `n` prompt,
+# which shells out through `claudemux -d`, or any scripted invocation — must
+# never be handed a TUI), $DETACHED is false (same reason: `-d` callers want
+# a session name on stdout, not a picker stealing the terminal), and
+# `launch.layout` reads back empty with exit 0. That last check goes through
+# ch_config_get rather than a raw `claudemux-head config get` call so a
+# config.yml that fails to parse degrades to "skip onboarding, launch
+# proceeds" — ch_config_get already prints the diagnostic once — instead of
+# this function trying to interpret the failure itself.
+#
+# A cancelled (exit 1) or failed (exit 3) onboard is non-fatal: the launch
+# continues on the default layout either way, same as if nothing had been
+# offered. ONBOARD_ATTEMPTED guards against firing twice in one invocation —
+# both the no-args path and the argument path below call this, but they are
+# mutually exclusive branches today; the guard is what keeps that true if a
+# future call site is ever added rather than relying on that being an accident
+# of the current control flow.
+ONBOARD_ATTEMPTED=false
+maybe_onboard() {
+  [ "$ONBOARD_ATTEMPTED" = false ] || return 0
+  ONBOARD_ATTEMPTED=true
+  command -v claudemux-head >/dev/null 2>&1 || return 0
+  { [ -t 0 ] && [ -t 1 ]; } || return 0
+  [ "$DETACHED" = false ] || return 0
+  ch_config_get launch.layout
+  { [ -z "$CH_CONFIG_ERR" ] && [ -z "$CH_CONFIG_VALUE" ]; } || return 0
+  claudemux-head onboard || true
+  return 0
+}
+
 create_session() {
   local work_dir="$1"
   local session_name
@@ -587,7 +619,7 @@ create_session() {
   attach "$session_name" "$work_dir"
 }
 
-# `claudemux switch` — the switchboard: a lobby session whose pane runs
+# open_switchboard — the switchboard: a lobby session whose pane runs
 # `claudemux-head switchboard`, auto-ferrying the attached client to sessions
 # waiting on input. The pane runs the program directly via exec (no shell),
 # matching the head/claude panes: exiting the switchboard closes the pane, and
@@ -597,7 +629,14 @@ create_session() {
 # "switchboard" already exists, `claudemux switch` attaches to that project
 # session instead and no switchboard ever runs (first-wins) — see the
 # exact-match guard in create_session for the other half of this hazard.
-if [ "${1:-}" = "switch" ]; then
+#
+# `switch` and `setup` are reserved words in their own right: both are
+# matched against $1 below before any directory or zoxide resolution runs, so
+# a project directory literally named "switch" or "setup" can never be
+# reached by `claudemux switch`/`claudemux setup` — cd into it and run bare
+# `claudemux`, or pass a path (`claudemux ./switch`), instead.
+open_switchboard() {
+  local head_bin tab_color_helper
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
   if ! tmux has-session -t '=switchboard' 2>/dev/null; then
@@ -633,24 +672,42 @@ if [ "${1:-}" = "switch" ]; then
   fi
   tmux attach -t '=switchboard'
   exit 0
+}
+
+# `claudemux switch` opens the switchboard directly (see open_switchboard's
+# header comment for the reserved-word/directory-collision hazard this and
+# `setup` share).
+if [ "${1:-}" = "switch" ]; then
+  open_switchboard
 fi
 
-# No args: attach the sole session if there's exactly one, else launch in $PWD.
+# `claudemux setup` — claudemux-head's interactive layout picker, run
+# directly on this terminal with no tmux session involved. Just an exec: the
+# picker's own exit status (0 saved, 1 cancelled, 3 save failure) becomes
+# claudemux's.
+if [ "${1:-}" = "setup" ]; then
+  exec claudemux-head onboard
+fi
+
+# Bare claudemux ALWAYS means the switchboard now — no attach-sole-session,
+# no create-in-$PWD. maybe_onboard runs first so a first-time user is offered
+# a layout choice before ever landing in the lobby; a cancelled or failed
+# onboard just means every session launched from here on uses the default
+# layout until `claudemux setup` is run by hand.
 if [ "$#" -eq 0 ]; then
-  session_count="$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$session_count" -eq 1 ]; then
-    only_session="$(tmux list-sessions -F '#{session_name}' 2>/dev/null)"
-    only_path="$(tmux display-message -p -t "${only_session}:" '#{pane_current_path}' 2>/dev/null || true)"
-    attach "$only_session" "$only_path"
-  fi
-  create_session "$(pwd)"
+  maybe_onboard
+  open_switchboard
 fi
 
-# Each argument becomes (or reattaches to) its own session. The first arg that
-# resolves calls create_session, which attaches and never returns; unresolved
-# args are reported and skipped. Falling through the loop means nothing
-# resolved — exit non-zero so the shell wrapper keeps this message visible
-# instead of closing the tab on a "successful" no-op.
+# Each argument becomes (or reattaches to) its own session. maybe_onboard runs
+# once before the loop, for the same first-run reason as the no-args branch
+# above — this is the path a first-time `claudemux <dir>` takes without ever
+# passing through the switchboard. The first arg that resolves calls
+# create_session, which attaches and never returns; unresolved args are
+# reported and skipped. Falling through the loop means nothing resolved —
+# exit non-zero so the shell wrapper keeps this message visible instead of
+# closing the tab on a "successful" no-op.
+maybe_onboard
 for arg in "$@"; do
   if dir="$(resolve_dir "$arg")"; then
     create_session "$dir"

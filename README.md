@@ -40,9 +40,28 @@ In a project with an `op_env`, the `claude` pane is held by a waiting screen whi
 by `claude` itself, with the secrets in its environment. Pressing any key skips the wait
 and starts `claude` immediately, *without* those secrets.
 
+### Layouts
+
+The arrangement above — `shell-right` — is the default of four layouts. Pick one with
+`claudemux setup`, an interactive picker that shows all four as diagrams and writes the
+choice to `launch.layout` in `config.yml`:
+
+- **`shell-right`** (default) — head across the top, `claude` below it, shell to the right.
+- **`no-shell`** — head across the top, `claude` below it, no shell pane at all.
+- **`shell-bottom`** — head across the top, `claude` in the middle, shell full-width at
+  the bottom.
+- **`head-bottom`** — `claude` and the shell side by side on top, head full-width at the
+  bottom.
+
+The first time you launch `claudemux` — bare, or pointed at a directory — with no
+layout chosen yet, `setup` runs automatically before the session opens. Cancelling it
+(or a save failure) isn't fatal: the launch continues on `shell-right`, and you can run
+`claudemux setup` again whenever you want to change it.
+
 ## The switchboard
 
-`claudemux switch` opens a **switchboard**: a full-screen lobby session that watches
+Run `claudemux` with no arguments to open a **switchboard** (`claudemux switch` does the
+same thing, explicitly): a full-screen lobby session that watches
 every claudemux session and automatically carries your tmux client to whichever one
 is waiting on input — Claude's turn ended, or it asked you a question — oldest first.
 Answer, and it moves you to the next waiting session; when nothing waits, you're
@@ -217,6 +236,7 @@ onepassword:
 
 launch:
   auto_worktree: false
+  layout: ""
 
 teardown:
   command: /done
@@ -245,6 +265,10 @@ teardown:
 - `onepassword.default_account` / `onepassword.accounts` — consumed by `claudemux`, not
   by the TUI itself, to pick a 1Password account when injecting an `op_env`. Ships empty;
   see `.project.yml` below.
+- `launch.layout` — consumed by `claudemux`, not the TUI. Picks the pane arrangement for
+  new sessions: `shell-right` (default), `no-shell`, `shell-bottom`, or `head-bottom` —
+  see **Layouts** above. Empty (never chosen) behaves as `shell-right`. Set it with
+  `claudemux setup`, the interactive picker, rather than hand-editing this file.
 - `launch.auto_worktree` — consumed by `claudemux`, not the TUI. When `true`, a launch
   in a git repo's main checkout **on its default branch** marks the session as wanting a
   worktree rather than creating one at launch: `claudemux` prefixes both the `claude`
