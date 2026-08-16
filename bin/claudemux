@@ -441,10 +441,16 @@ run_in_pane() {
 # matching the old synchronous behavior.
 deferred_launch() {
   local session="$1" work_dir="$2" claude_pane="$3" shell_pane="$4" claude_cmd="$5" holder="$6"
-  local shell_cmd0
-  shell_cmd0="$(pane_cmd "$shell_pane")"
+  local shell_cmd0=""
+  # shell_pane is "" in the no-shell layout — pane_cmd's own `2>/dev/null ||
+  # true` would swallow a bad `-t ""` target anyway, but skipping the calls
+  # outright is what keeps "no shell pane" and "shell pane that vanished"
+  # distinguishable without relying on tmux's handling of an empty target.
+  if [ -n "$shell_pane" ]; then
+    shell_cmd0="$(pane_cmd "$shell_pane")"
+  fi
   if inject_op_env "$session" "$work_dir"; then
-    if [ -n "$shell_cmd0" ] && [ "$(pane_cmd "$shell_pane")" = "$shell_cmd0" ]; then
+    if [ -n "$shell_pane" ] && [ -n "$shell_cmd0" ] && [ "$(pane_cmd "$shell_pane")" = "$shell_cmd0" ]; then
       tmux respawn-pane -k -t "$shell_pane"
     fi
   else
@@ -554,11 +560,26 @@ create_session() {
   fi
   claude_cmd="${worktree_env}${claude_cmd}"
 
-  # top-left = claudemux-head (4 rows: first prompt, last prompt, state line, meters),
-  # below it = claude, right = shell (full height, 30% wide — the head
-  # statusbar needs the extra width or it drops its right-side gauges).
-  # Track panes by ID — the short head pane sits above claude, so positional
-  # indices would shift under us.
+  # claudemux-head (4 rows: first prompt, last prompt, state line, meters) is
+  # ALWAYS full window width and exactly 4 rows — the four `launch.layout`
+  # values (config.go's legalLayouts; empty/unrecognized here defaults to
+  # shell-right, defense only, the head validates) only move it and the
+  # optional shell:
+  #   shell-right (default) — head across the top; claude below it; shell
+  #     30% wide on the right.
+  #   no-shell    — head across the top; claude below it; no shell pane.
+  #   shell-bottom — head across the top; claude in the middle; shell 20%
+  #     tall across the bottom.
+  #   head-bottom — claude and shell side by side on top; head full-width
+  #     across the bottom.
+  # Track panes by ID — the short head pane never sits at a fixed positional
+  # index across layouts, so positional indices would shift under us.
+  #
+  # Pane creation ORDER is what makes the head full width without a
+  # split-window -f: `split-window -v [-b] -l 4` run while the window still
+  # has a single column spans the whole width; run it after the claude|shell
+  # split instead and it would only span claude's column. So in every layout
+  # the head is split off claude FIRST, and the shell (if any) SECOND.
   #
   # The head and claude panes RUN their program (run_in_pane); only the shell
   # pane is a shell. Typing into a shell with send-keys was visible work: the
@@ -567,13 +588,35 @@ create_session() {
   # with a second prompt underneath it, all before anything started. A pane
   # created with a command never draws a prompt at all, so there is nothing to
   # hide.
-  local claude_pane head_pane shell_pane head_bin holder_cmd
+  local layout claude_pane head_pane shell_pane head_bin holder_cmd
+  ch_config_get launch.layout
+  layout="$CH_CONFIG_VALUE"
+  case "$layout" in
+    shell-right | no-shell | shell-bottom | head-bottom) ;;
+    *) layout="shell-right" ;;
+  esac
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
   tmux new-session -d -s "$session_name" -c "$work_dir" -x "$(tput cols)" -y "$(tput lines)"
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
-  shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
-  head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+  shell_pane=""
+  case "$layout" in
+    shell-right)
+      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+    no-shell)
+      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+    shell-bottom)
+      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      shell_pane="$(tmux split-window -v -l '20%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+    head-bottom)
+      head_pane="$(tmux split-window -v -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+  esac
   run_in_pane "$head_pane" "${worktree_env}$(printf '%q' "$head_bin")"
 
   # With an op_env, claude's launch is handed to a background injector so the

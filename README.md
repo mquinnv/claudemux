@@ -17,17 +17,18 @@ You run `claudemux`; `claudemux-head` is what it draws.
 `claudemux some-project` creates a tmux session laid out like this:
 
 ```
-┌────────────────────────────┬──────────┐
-│ claudemux-head   (4 rows)  │          │
-├────────────────────────────┤  shell   │
-│                            │  (30%)   │
-│ claude                     │          │
-│                            │          │
-└────────────────────────────┴──────────┘
+┌────────────────────────────────────────┐
+│ claudemux-head                (4 rows) │
+├─────────────────────────────┬──────────┤
+│                             │          │
+│ claude                      │  shell   │
+│                             │  (30%)   │
+└─────────────────────────────┴──────────┘
 ```
 
-`claudemux-head` gets a fixed 4-row pane at the top left (it re-pins itself to 4 rows on
-every resize), `claude` runs below it, and a shell takes the right 30% of the window.
+`claudemux-head` gets a fixed-height pane across the FULL width of the top (it re-pins
+itself to 4 rows on every resize), `claude` runs below it, and a shell takes the right 30%
+of the remaining height — it sits beside `claude`, not beside the head.
 
 The head and `claude` panes **run their program directly** — they are not shells with a
 command typed into them, so a new session never shows a prompt or an echoed command. Two
