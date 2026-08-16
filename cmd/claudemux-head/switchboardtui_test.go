@@ -438,6 +438,50 @@ func TestSwModelSpaceTogglesStandby(t *testing.T) {
 	}
 }
 
+// A head's space lands here as a request on the poll, and flips conduct mode
+// through the same path the lobby's own space key uses.
+func TestSwModelAppliesHeadConductRequest(t *testing.T) {
+	now := time.Now()
+	m := swTestModel()
+	m.cond.phase = swEscorting
+	m.cond.escortee = "api"
+	req := conductRequestValue(now)
+	next, _ := m.Update(swSnapshotMsg{at: now, conductReq: req, err: errors.New("tmux is wedged")})
+	m = next.(swModel)
+	// Deliberately on the tmux-error path: standby is a local flag, and a
+	// fleet listing that failed is no reason to ignore a key the user pressed.
+	if !m.standby {
+		t.Fatal("a fresh request must enter standby")
+	}
+	if m.cond.escortee != "" || m.cond.phase != swPaused {
+		t.Errorf("a requested toggle must neutralize the conductor, got phase=%v escortee=%q",
+			m.cond.phase, m.cond.escortee)
+	}
+	// The same token again is the same press, re-read because the head leaves
+	// it published; re-applying it would toggle the mode back on every poll.
+	next, _ = m.Update(swSnapshotMsg{at: now, conductReq: req})
+	m = next.(swModel)
+	if !m.standby {
+		t.Error("a re-read of an already-applied request must not toggle again")
+	}
+	// A new press does toggle again.
+	next, _ = m.Update(swSnapshotMsg{at: now, conductReq: conductRequestValue(now.Add(time.Millisecond))})
+	if next.(swModel).standby {
+		t.Error("a second request must leave standby")
+	}
+}
+
+// A request older than the staleness window is a keypress from before this
+// lobby existed (or from one that could not reach it), and must not fire late.
+func TestSwModelIgnoresStaleConductRequest(t *testing.T) {
+	m := swTestModel()
+	stale := conductRequestValue(time.Now().Add(-conductStaleAfter - time.Second))
+	next, _ := m.Update(swSnapshotMsg{at: time.Now(), conductReq: stale})
+	if next.(swModel).standby {
+		t.Error("a stale request must not toggle conduct mode")
+	}
+}
+
 func TestSwModelStandbyNeverDispatches(t *testing.T) {
 	m := swTestModel()
 	m.standby = true

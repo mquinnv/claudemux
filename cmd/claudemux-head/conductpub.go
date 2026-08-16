@@ -101,6 +101,98 @@ func readConductOption(ctx context.Context) string {
 	return strings.TrimSpace(string(out))
 }
 
+// Conduct-mode requests: the reverse direction of conductOption, and the only
+// way a head can change the mode. The lobby OWNS conduct mode and republishes
+// it every poll, so a head writing @claudemux_conducting directly would be
+// overwritten inside a beat. Instead space in a head leaves a request here and
+// the lobby applies it on its next poll, through the same code path as its own
+// space key.
+const conductRequestOption = "@claudemux_conduct_request"
+
+// conductRequestVerb is the only request there is. A head deliberately asks
+// for a FLIP rather than naming the mode it wants: it would be naming it from
+// a value up to a poll old, and two heads pressing space at once would then
+// fight over an absolute instead of composing into two flips.
+const conductRequestVerb = "toggle"
+
+// conductRequestValue is "<verb> <unix-nanos>". Nanoseconds, unlike the
+// heartbeat's seconds: the value doubles as the lobby's already-applied
+// marker (see swModel.conductReq), so two presses inside one second must not
+// collapse into one token.
+func conductRequestValue(now time.Time) string {
+	return fmt.Sprintf("%s %d", conductRequestVerb, now.UnixNano())
+}
+
+// parseConductRequest decodes a published request against now, returning the
+// raw value as the lobby's dedup token. ok=false for absent, malformed, an
+// unknown verb (a newer head talking a protocol this lobby doesn't know), or a
+// request older than conductStaleAfter — the same window the heartbeat uses,
+// here bounding how long a keypress stays live. That staleness check is also
+// what keeps a lobby STARTING UP from firing whatever request happens to be
+// sitting in the option: anything from before it existed is long expired,
+// while a press from a second ago (a head toggling across a lobby restart)
+// still lands, which is the behavior the user asked for.
+func parseConductRequest(v string, now time.Time) (string, bool) {
+	fields := strings.Fields(v)
+	if len(fields) != 2 || fields[0] != conductRequestVerb {
+		return "", false
+	}
+	ns, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return "", false
+	}
+	if now.Sub(time.Unix(0, ns)) >= conductStaleAfter {
+		return "", false
+	}
+	return v, true
+}
+
+// conductRequestArgs is the tmux argv publishing a request. Global (-g) like
+// the heartbeat it answers: which head pressed space doesn't matter, only that
+// somebody did.
+func conductRequestArgs(now time.Time) []string {
+	return []string{"set-option", "-g", conductRequestOption, conductRequestValue(now)}
+}
+
+// requestConductToggleCmd asks the lobby to flip conduct mode, fire-and-forget
+// with the same hard deadline as every other tmux shell-out here. A lost
+// request just leaves the mode alone; the head's optimistic chip expires on
+// its own (see conductPendingWindow).
+func requestConductToggleCmd(now time.Time) tea.Cmd {
+	args := conductRequestArgs(now)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		return nil
+	}
+}
+
+// readConductRequestOption fetches the raw request for the lobby's poll, with
+// the same -q "missing is empty" handling as readConductOption.
+func readConductRequestOption(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, "tmux", "show-option", "-gqv", conductRequestOption).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// conductPendingWindow bounds a head's optimistic flip after space. Three
+// seconds covers the round trip in the bad case — this head's poll, the
+// lobby's, and a slow tmux on each — while staying short enough that a request
+// nobody applied (a lobby that quit between the read and the press) corrects
+// itself before the user has read the chip twice.
+const conductPendingWindow = 3 * time.Second
+
+// conductOn reports whether a published mode means the conductor may move you.
+// Paused counts — it is conduct-on, merely idle this instant — so this is
+// exactly the distinction the head's chip draws, and the one a head's space
+// key flips.
+func conductOn(mode string) bool {
+	return mode != "" && mode != "standby"
+}
+
 var conductChipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
 
 // conductChip renders the head's conduct-mode chip from the raw option value,
@@ -109,7 +201,7 @@ var conductChipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
 // are deliberately indistinguishable — in all three, nothing will move you.
 func conductChip(raw string, now time.Time) string {
 	mode, ok := parseConductValue(raw, now)
-	if !ok || mode == "standby" {
+	if !ok || !conductOn(mode) {
 		return ""
 	}
 	return conductChipStyle.Render("⏵ conduct")

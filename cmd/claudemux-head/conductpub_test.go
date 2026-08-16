@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestConductMode(t *testing.T) {
@@ -99,6 +101,173 @@ func TestConductChip(t *testing.T) {
 		if got := conductChip(raw, now); got != "" {
 			t.Errorf("conductChip(%s) = %q, want empty", name, got)
 		}
+	}
+}
+
+func TestConductRequestValue(t *testing.T) {
+	now := time.Unix(1754700000, 123456789)
+	if got, want := conductRequestValue(now), "toggle 1754700000123456789"; got != want {
+		t.Errorf("conductRequestValue = %q, want %q", got, want)
+	}
+	// Two presses inside the same second must be distinguishable, or the
+	// lobby's already-applied check would swallow the second one.
+	a := conductRequestValue(now)
+	b := conductRequestValue(now.Add(time.Millisecond))
+	if a == b {
+		t.Errorf("requests a millisecond apart share a token: %q", a)
+	}
+}
+
+func TestParseConductRequest(t *testing.T) {
+	now := time.Unix(1754700000, 0)
+	at := func(d time.Duration) string { return conductRequestValue(now.Add(d)) }
+	cases := []struct {
+		name   string
+		value  string
+		wantOK bool
+	}{
+		{"fresh", at(0), true},
+		{"aging but fresh", at(-conductStaleAfter + time.Second), true},
+		// A request left behind by a head whose lobby was down must not fire
+		// minutes later when a lobby finally starts.
+		{"stale", at(-conductStaleAfter - time.Second), false},
+		// Clock skew forward reads as fresh, same as the heartbeat's.
+		{"slightly future", at(2 * time.Second), true},
+		{"empty", "", false},
+		{"no timestamp", "toggle", false},
+		{"bad timestamp", "toggle soon", false},
+		{"extra field", "toggle 1754700000000000000 extra", false},
+		// Only one verb exists; anything else is a newer head talking a
+		// protocol this lobby doesn't know, and is ignored rather than guessed.
+		{"unknown verb", "standby 1754700000000000000", false},
+	}
+	for _, c := range cases {
+		tok, ok := parseConductRequest(c.value, now)
+		if ok != c.wantOK {
+			t.Errorf("%s: parseConductRequest(%q) ok = %v, want %v", c.name, c.value, ok, c.wantOK)
+		}
+		if ok && tok != c.value {
+			t.Errorf("%s: token = %q, want the raw value %q", c.name, tok, c.value)
+		}
+	}
+}
+
+func TestConductRequestArgs(t *testing.T) {
+	now := time.Unix(1754700000, 0)
+	got := conductRequestArgs(now)
+	want := []string{"set-option", "-g", conductRequestOption, "toggle 1754700000000000000"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("conductRequestArgs = %v, want %v", got, want)
+	}
+}
+
+func TestConductOn(t *testing.T) {
+	for mode, want := range map[string]bool{
+		"conducting": true,
+		// Paused is conduct-on: handing this session back can still dispatch.
+		"paused":  true,
+		"standby": false,
+		"":        false,
+	} {
+		if got := conductOn(mode); got != want {
+			t.Errorf("conductOn(%q) = %v, want %v", mode, got, want)
+		}
+	}
+}
+
+// Space in a head asks the lobby to flip conduct mode, and flips the local
+// chip immediately rather than waiting out two poll beats.
+func TestHeadSpaceRequestsConductToggle(t *testing.T) {
+	now := time.Now()
+	m := model{conductRaw: fmt.Sprintf("conducting %d", now.Unix())}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	if cmd == nil {
+		t.Fatal("space with a live lobby must publish a toggle request")
+	}
+	m = next.(model)
+	if m.conductPendingMode != "standby" {
+		t.Errorf("conductPendingMode = %q, want standby", m.conductPendingMode)
+	}
+	if got := conductChip(m.conductRawFor(now), now); got != "" {
+		t.Errorf("chip = %q, want it gone the instant standby was asked for", got)
+	}
+	// And back: the pending mode is derived from what is on screen now, so a
+	// second press reverses the first even before the lobby has answered.
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	if cmd == nil {
+		t.Fatal("a second space must publish its own request")
+	}
+	m = next.(model)
+	if m.conductPendingMode != "conducting" {
+		t.Errorf("conductPendingMode = %q, want conducting", m.conductPendingMode)
+	}
+	// The shape a real terminal delivers: bubbletea gives a typed space its own
+	// KeySpace type, which the key switch must catch as well as the synthetic
+	// rune form the cases above use.
+	m.conductPendingMode, m.conductPendingUntil = "", time.Time{}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if cmd == nil || next.(model).conductPendingMode != "standby" {
+		t.Errorf("a KeySpace press must toggle too, got cmd=%v pending=%q",
+			cmd != nil, next.(model).conductPendingMode)
+	}
+}
+
+// With no live lobby there is no conductor to toggle, so space does nothing —
+// rather than flashing a chip for a process that isn't running.
+func TestHeadSpaceWithoutLobbyIsNoOp(t *testing.T) {
+	now := time.Now()
+	for name, raw := range map[string]string{
+		"absent": "",
+		"stale":  fmt.Sprintf("conducting %d", now.Add(-time.Minute).Unix()),
+	} {
+		m := model{conductRaw: raw}
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+		if cmd != nil {
+			t.Errorf("%s: space must not publish a request", name)
+		}
+		if got := next.(model).conductPendingMode; got != "" {
+			t.Errorf("%s: conductPendingMode = %q, want empty", name, got)
+		}
+	}
+}
+
+// The optimistic flip is a loan against the lobby's answer: it holds while the
+// request is outstanding, ends the moment a poll agrees, and expires on its own
+// if no poll ever does.
+func TestHeadConductPendingWindow(t *testing.T) {
+	now := time.Now()
+	m := model{conductPendingMode: "standby", conductPendingUntil: now.Add(conductPendingWindow)}
+	m.conductRaw = fmt.Sprintf("conducting %d", now.Unix())
+	if got := conductChip(m.conductRawFor(now), now); got != "" {
+		t.Errorf("chip = %q, want the pending standby to win over a stale read", got)
+	}
+	// Expired: reality wins again even though nothing cleared the fields.
+	late := now.Add(conductPendingWindow + time.Second)
+	m.conductRaw = fmt.Sprintf("conducting %d", late.Unix())
+	if got := conductChip(m.conductRawFor(late), late); got == "" {
+		t.Error("an unanswered request must expire back to what the lobby says")
+	}
+}
+
+// A poll that confirms the requested mode retires the pending flip; one that
+// still shows the old mode leaves it standing until the window closes.
+func TestHeadConductPendingClearedByPoll(t *testing.T) {
+	now := time.Now()
+	m := model{conductPendingMode: "standby", conductPendingUntil: now.Add(conductPendingWindow)}
+	next, _ := m.Update(dataMsg{time: now, conductRaw: fmt.Sprintf("conducting %d", now.Unix())})
+	if got := next.(model).conductPendingMode; got != "standby" {
+		t.Errorf("conductPendingMode = %q, want the request still pending", got)
+	}
+	next, _ = m.Update(dataMsg{time: now, conductRaw: fmt.Sprintf("standby %d", now.Unix())})
+	if got := next.(model).conductPendingMode; got != "" {
+		t.Errorf("conductPendingMode = %q, want it retired by the confirming poll", got)
+	}
+	// Paused confirms a "conducting" request: both mean conduct-on, which is
+	// the only distinction the chip draws.
+	m.conductPendingMode = "conducting"
+	next, _ = m.Update(dataMsg{time: now, conductRaw: fmt.Sprintf("paused %d", now.Unix())})
+	if got := next.(model).conductPendingMode; got != "" {
+		t.Errorf("conductPendingMode = %q, want paused to confirm a conducting request", got)
 	}
 }
 
