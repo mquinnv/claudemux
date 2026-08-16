@@ -72,15 +72,15 @@ func shippedScriptPath(name string) (string, bool) {
 	})
 }
 
-// projectDeclaredName reads the `name:` field from a .project.yml, or "" when
-// the file is absent, unparseable, or declares no name. A .project.yml is
-// gitignored, so worktrees and fresh clones legitimately have none — this is a
-// missing value, never an error.
+// projectDeclaredName reads the `name:` field from a project config file (see
+// projectConfigPath for which one), or "" when the file is absent, unparseable,
+// or declares no name. That file is gitignored, so worktrees and fresh clones
+// legitimately have none — this is a missing value, never an error.
 //
 // bin/claudemux reads the same field with sed. The two agree on the simple
 // key: value files this project uses; yaml.v3 is the stricter of the pair.
-func projectDeclaredName(projectYMLPath string) string {
-	b, err := os.ReadFile(projectYMLPath)
+func projectDeclaredName(configPath string) string {
+	b, err := os.ReadFile(configPath)
 	if err != nil {
 		return ""
 	}
@@ -96,7 +96,7 @@ func projectDeclaredName(projectYMLPath string) string {
 // restoreName picks the window name a reset restores.
 //
 // The declared name cannot be used bare: `claudemux -n` clones a session as
-// <dir>-2, <dir>-3, ... while the work directory — and so .project.yml, and so
+// <dir>-2, <dir>-3, ... while the work directory — and so its config file, and so
 // both the declared name and the project color — stays the same. Four sessions
 // on one project would all restore to one name on four identically colored
 // tabs. When the session name carries a clone suffix, the suffix rides along
@@ -153,7 +153,7 @@ func isColorHex(s string) bool {
 // color still gets its title back.
 //
 // name is normalized through the same two helpers tabRenameArgs uses
-// (collapseWhitespace, truncateWords) so a quoted .project.yml name: value
+// (collapseWhitespace, truncateWords) so a quoted config-file name: value
 // containing a newline, or an overlong name, cannot land verbatim in the tmux
 // status line — the summary-rename path and the reset-rename path obey one
 // rule.
@@ -275,7 +275,7 @@ func resetTabCmd(selfPane, workDir string) tea.Cmd {
 
 		hex, fg := projectStyleFor(ctx, workDir)
 		name := restoreName(
-			projectDeclaredName(filepath.Join(workDir, ".project.yml")),
+			projectDeclaredName(projectConfigPath(workDir)),
 			session, workDir)
 
 		for _, args := range tabResetTmuxArgs(selfPane, session, name, hex, fg) {

@@ -30,7 +30,7 @@
 # CLAUDEMUX_WORKTREE_PENDING; hooks/claudemux-worktree.sh then asks the model to
 # create one named after the task on its first response. Creating it at launch
 # meant naming it before any prompt existed. With launch.auto_worktree enabled
-# in config.yml (or `worktree: true` in .project.yml), a launch on a repo's
+# in config.yml (or `worktree: true` in .claudemux.yml), a launch on a repo's
 # default branch is marked automatically; feature branches, detached HEADs,
 # linked worktrees, and non-repos are left alone.
 #
@@ -199,11 +199,32 @@ attach() {
   exit 0
 }
 
-# project_field FILE KEY — echo the trimmed, unquoted value of a top-level
-# `KEY: value` line from a simple flat .project.yml. Empty if absent.
+# project_config_file DIR — echo the project config file to read from DIR: the
+# current .claudemux.yml when it exists, else the legacy .project.yml. Always
+# echoes a path; a project with neither gets the current name, which
+# project_field then reads as "no such file", i.e. no declared values.
+#
+# The name preference is duplicated in two other readers — the ancestor walk in
+# bin/project-color-resolve.sh and projectConfigPath in
+# cmd/claudemux-head/projectconfig.go. Deliberate: this launcher stays
+# self-contained rather than sourcing the resolver at top level, so a broken
+# install that has lost the resolver still reads op_env, name and color instead
+# of silently launching without them. Keep the three in step.
+project_config_file() {
+  if [ -f "$1/.claudemux.yml" ]; then
+    echo "$1/.claudemux.yml"
+  else
+    echo "$1/.project.yml"
+  fi
+}
+
+# project_field DIR KEY — echo the trimmed, unquoted value of a top-level
+# `KEY: value` line from DIR's simple flat project config. Empty if absent.
 project_field() {
-  [ -f "$1" ] || return 0
-  sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" "$1" | head -1 \
+  local file
+  file="$(project_config_file "$1")"
+  [ -f "$file" ] || return 0
+  sed -n "s/^[[:space:]]*$2:[[:space:]]*//p" "$file" | head -1 \
     | sed -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//"
 }
 
@@ -276,7 +297,7 @@ auto_worktree_wanted() {
 
 # worktree_requested DIR — success when this launch should mark the session
 # for a worktree. Precedence, highest first: -w/-W, `worktree:` in
-# DIR/.project.yml, launch.auto_worktree in config.yml. An explicit -w skips
+# DIR/.claudemux.yml, launch.auto_worktree in config.yml. An explicit -w skips
 # the appropriateness heuristic entirely — the user asked, and if DIR turns
 # out not to be a repo, that surfaces later as a failed EnterWorktree
 # mid-session plus a permanent "no worktree" chip, since `claude --worktree`
@@ -288,7 +309,7 @@ worktree_requested() {
     force) return 0 ;;
     skip)  return 1 ;;
   esac
-  proj="$(project_field "$dir/.project.yml" worktree)"
+  proj="$(project_field "$dir" worktree)"
   case "$proj" in
     true)  auto_worktree_wanted "$dir"; return ;;
     false) return 1 ;;
@@ -299,13 +320,13 @@ worktree_requested() {
 }
 
 # op_account_for DIR — the 1Password account for DIR's repo. Precedence:
-#   1. explicit `op_account` in DIR/.project.yml
+#   1. explicit `op_account` in DIR/.claudemux.yml
 #   2. onepassword.accounts.<github-org> from claudemux-head's config.yml
 #   3. onepassword.default_account from the same
 # An empty result is valid and expected: `op` then picks its own default account.
 op_account_for() {
   local work_dir="$1" acct origin org
-  acct="$(project_field "$work_dir/.project.yml" op_account)"
+  acct="$(project_field "$work_dir" op_account)"
   if [ -n "$acct" ]; then
     echo "$acct"
     return 0
@@ -328,7 +349,7 @@ op_account_for() {
   printf '%s' "$CH_CONFIG_VALUE"
 }
 
-# inject_op_env SESSION DIR — if DIR's .project.yml names a 1Password
+# inject_op_env SESSION DIR — if DIR's project config names a 1Password
 # Environment (op_env), read it once and copy its variables into SESSION's
 # tmux session environment. One authorization per session; panes spawned (or
 # respawned) afterwards inherit, and claude/sub-agents never call op
@@ -338,7 +359,7 @@ op_account_for() {
 # those out of Environments.
 inject_op_env() {
   local session="$1" work_dir="$2" env_id acct env_out line key
-  env_id="$(project_field "$work_dir/.project.yml" op_env)"
+  env_id="$(project_field "$work_dir" op_env)"
   [ -n "$env_id" ] || return 1
   acct="$(op_account_for "$work_dir")"
   local -a acct_args=()
@@ -474,12 +495,12 @@ create_session() {
     fi
   fi
 
-  # Project metadata (.project.yml: color + name), passed to claude at launch:
+  # Project metadata (.claudemux.yml: color + name), passed to claude at launch:
   # name via -n, color as a "/color X" prompt argument. No post-startup
   # send-keys — typing into the pane during boot used to collide with it.
   local proj_color proj_name claude_cmd claude_bin worktree_env
-  proj_color="$(project_field "$work_dir/.project.yml" color)"
-  proj_name="$(project_field "$work_dir/.project.yml" name)"
+  proj_color="$(project_field "$work_dir" color)"
+  proj_name="$(project_field "$work_dir" name)"
   # Absolute path when one can be resolved. The panes below are spawned with a
   # command, and tmux runs a pane command through a NON-interactive shell: it
   # never sources the rc file that put ~/.local/bin on PATH, and the environment
@@ -553,7 +574,7 @@ create_session() {
   # after `--`: it execs it if it is left waiting past its own timeout or the
   # user presses a key, so this pane ends up running claude however the wait
   # ends.
-  if [ -n "$(project_field "$work_dir/.project.yml" op_env)" ]; then
+  if [ -n "$(project_field "$work_dir" op_env)" ]; then
     holder_cmd="$(printf '%q' "$head_bin") boot"
     holder_cmd+=" --project $(printf '%q' "$session_name")"
     holder_cmd+=" --label 'Unlocking 1Password environment'"

@@ -160,7 +160,7 @@ they're your responsibility:
 | `tmux` | `claudemux` | `claudemux` cannot run at all |
 | `claudemux-head` on `PATH` | `claudemux` | the head pane dies at "command not found" and is left on screen saying so; an `op_env` session shows that in place of its waiting screen, then still starts `claude` once the secrets land |
 | `jq` | `hooks/claudemux-map.sh`, `hooks/claudemux-worktree.sh`, `hooks/claudemux-ask.sh` | the hook exits silently; see below |
-| `git` | `claudemux` (1Password org inference) | `op_account` in `.project.yml` or `onepassword.default_account` still work |
+| `git` | `claudemux` (1Password org inference) | `op_account` in `.claudemux.yml` or `onepassword.default_account` still work |
 | `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` only works for literal directories, not `z`-style queries |
 | `op` (1Password CLI) | `claudemux` (`op_env` injection) | sessions launch without injected secrets |
 | iTerm2 | `claudemux` (tab coloring) | other terminals silently ignore the OSC escape sequences |
@@ -244,7 +244,7 @@ teardown:
   summary but leave the window/tab untouched. Independent of `summary.enabled`.
 - `onepassword.default_account` / `onepassword.accounts` — consumed by `claudemux`, not
   by the TUI itself, to pick a 1Password account when injecting an `op_env`. Ships empty;
-  see `.project.yml` below.
+  see `.claudemux.yml` below.
 - `launch.auto_worktree` — consumed by `claudemux`, not the TUI. When `true`, a launch
   in a git repo's main checkout **on its default branch** marks the session as wanting a
   worktree rather than creating one at launch: `claudemux` prefixes both the `claude`
@@ -262,8 +262,8 @@ teardown:
   a dirty tree) doesn't nag you for the rest of the session. Feature branches, detached HEADs, existing
   worktrees, and non-repos are left alone. Override per launch with `claudemux -w`
   (mark the session regardless of config or repo state) / `-W` (never mark), or per
-  project with `worktree: true|false` in `.project.yml`. Default `false`. `-w`/`-W`
-  (and the config/`.project.yml` toggles) only take effect on newly created sessions —
+  project with `worktree: true|false` in `.claudemux.yml`. Default `false`. `-w`/`-W`
+  (and the config/`.claudemux.yml` toggles) only take effect on newly created sessions —
   `claudemux -w <existing-session>` attaches without marking it, silently ignoring
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
@@ -276,10 +276,10 @@ teardown:
 `sumary:` fails loudly at launch instead of quietly behaving as if you'd written nothing.
 A missing file is fine — that's just defaults.
 
-## `.project.yml`
+## `.claudemux.yml`
 
-`claudemux` reads an optional `.project.yml` from the root of the project directory you
-launch it in. See [`.project.yml.example`](.project.yml.example) for the full format:
+`claudemux` reads an optional `.claudemux.yml` from the root of the project directory you
+launch it in. See [`.claudemux.yml.example`](.claudemux.yml.example) for the full format:
 
 ```yaml
 color: blue          # tmux status-bar / iTerm2 tab color
@@ -289,17 +289,24 @@ op_env: abcdefghijklmnopqrstuvwxyz  # 1Password Environment ID (optional)
 op_account: my.1password.com        # 1Password account for op_env (optional)
 ```
 
-**`.project.yml` is gitignored by this repo on purpose, and `op_env` should not be
+**`.claudemux.yml` is gitignored by this repo on purpose, and `op_env` should not be
 committed** — it's an identifier that points at your secrets. Copy the example instead
 of tracking the real file:
 
 ```bash
-cp .project.yml.example .project.yml
+cp .claudemux.yml.example .claudemux.yml
 ```
+
+**Formerly `.project.yml`.** That name is still read when a directory has no
+`.claudemux.yml`, so existing projects keep working untouched and there is no migration
+step — rename yours whenever you get to it. Both names are gitignored. When a directory
+somehow has both, `.claudemux.yml` wins; when they sit at different depths, the nearer
+file wins regardless of name, so a subdirectory that carries its own config is never
+overruled from above.
 
 ## Appearance: project colors
 
-The `color:` field in `.project.yml` drives two things at once, so a session is
+The `color:` field in `.claudemux.yml` drives two things at once, so a session is
 visually identifiable at a glance:
 
 - **The tmux status bar and active-pane border** for the session are tinted to that
@@ -341,7 +348,7 @@ are repainted from `color:`. The tab then stays put — summaries keep running,
 but they stop renaming the window — and the status pane shows `⬚ pinned`. Press
 `r` again to hand control back; the current label is re-applied straight away.
 
-Sessions cloned with `-n` share one `.project.yml`, so `remix-2` restores to
+Sessions cloned with `-n` share one `.claudemux.yml`, so `remix-2` restores to
 `Remix 2` rather than colliding with `remix`'s `Remix`.
 
 **Refreshing the summary.** Summaries normally land on their own, when a turn
@@ -410,7 +417,7 @@ wrap-up in order:
 
 The worktree the gate watches is the one **the session's working directory is in** — the
 cwd from its transcript. `claudemux -w` (or `launch.auto_worktree`, or `worktree: true`
-in `.project.yml`) only marks the session as wanting one; it's the model, prompted by
+in `.claudemux.yml`) only marks the session as wanting one; it's the model, prompted by
 `hooks/claudemux-worktree.sh`, that actually calls `EnterWorktree` and moves the
 session's cwd there, typically during its first response. The gate reads that cwd
 regardless of when the move happened, so it holds just as well for a worktree entered

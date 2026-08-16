@@ -1,6 +1,10 @@
 # claudemux reads this from the root of a project you launch it in.
-# Copy to .project.yml. NOTE: .project.yml is gitignored on purpose —
+# Copy to .claudemux.yml. NOTE: .claudemux.yml is gitignored on purpose —
 # op_env is an ID pointing at your secrets, and should not be committed.
+#
+# This file used to be called .project.yml. That name is still read when no
+# .claudemux.yml is present, so existing projects keep working untouched; rename
+# yours whenever you like.
 
 # Tab/status-bar color for this project's tmux session.
 # One of: red blue green yellow purple orange pink cyan — or a #hex value.
