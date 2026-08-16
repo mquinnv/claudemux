@@ -216,6 +216,14 @@ type model struct {
 	// render time (not poll time) so its heartbeat keeps decaying against the
 	// clock even if polls stall — see conductChip.
 	conductRaw string
+	// conductPendingMode holds the mode this head's space key just asked the
+	// lobby for, shown in place of conductRaw until a poll confirms it or
+	// conductPendingUntil passes. Without it the chip would answer a keypress
+	// only after this head's poll AND the lobby's — up to two beats of looking
+	// broken — and would flicker back in between, since a poll already in
+	// flight when space was pressed still carries the pre-toggle value.
+	conductPendingMode  string
+	conductPendingUntil time.Time
 
 	// UI
 	lastUpdate time.Time
@@ -970,6 +978,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.summarizing = true
 			return m, m.summarize()
+		case " ":
+			// Toggle fleet conduct mode from here — the same thing space does
+			// in the lobby, so the key means one thing wherever you press it.
+			// The head owns none of that state: it publishes a request and the
+			// lobby applies it (see conductRequestOption).
+			//
+			// Only while a live lobby is publishing. With no conductor running
+			// there is nothing to toggle, and a request nobody will read would
+			// leave the chip flashing a mode that never took effect.
+			now := time.Now()
+			if _, ok := parseConductValue(m.conductRaw, now); !ok {
+				return m, nil
+			}
+			// The direction is read off what is on SCREEN (pending flip
+			// included, via conductRawFor), not off the last poll: mashing
+			// space twice must come back to where it started rather than
+			// re-sending the same direction twice. Always parseable here —
+			// conductRawFor returns either the always-fresh pending forgery or
+			// the conductRaw the liveness gate above just accepted.
+			mode, _ := parseConductValue(m.conductRawFor(now), now)
+			if conductOn(mode) {
+				m.conductPendingMode = "standby"
+			} else {
+				m.conductPendingMode = "conducting"
+			}
+			m.conductPendingUntil = now.Add(conductPendingWindow)
+			return m, requestConductToggleCmd(now)
 		case "x":
 			return m.teardownKey()
 		case "r":
@@ -1055,6 +1090,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ahead of the rotation early-returns below: the conduct chip must
 		// track the lobby regardless of which transcript this head is bound to.
 		m.conductRaw = msg.conductRaw
+		// A poll that agrees with an outstanding space retires it early, so the
+		// chip stops being a promise the moment it becomes a fact. Compared by
+		// conductOn, not by mode string: the lobby may answer a "conducting"
+		// request with "paused", which is the same thing to this chip.
+		if m.conductPendingMode != "" {
+			if mode, ok := parseConductValue(msg.conductRaw, msg.time); ok &&
+				conductOn(mode) == conductOn(m.conductPendingMode) {
+				m.conductPendingMode = ""
+			}
+		}
 		// Session rotated: re-bind to the newer file and discard this batch's
 		// events (they were tailed from the old reader). They refresh on the
 		// next poll.
@@ -1445,6 +1490,18 @@ func (m model) statusChip(now time.Time) string {
 	return ""
 }
 
+// conductRawFor is the conduct value the chip should render at now: a pending
+// space request's mode while its window stands, else the last real read. The
+// pending value is minted fresh on every call rather than stored, so it can
+// never go stale under a slow render — the window, not a heartbeat, is what
+// ends it. Shared by renderStateLine and renderStatusbar, like statusChip.
+func (m model) conductRawFor(now time.Time) string {
+	if m.conductPendingMode != "" && now.Before(m.conductPendingUntil) {
+		return conductPublishValue(m.conductPendingMode, now)
+	}
+	return m.conductRaw
+}
+
 // renderStatusbar packs state and budget info onto a single
 // background-filled line at the bottom of the pane. Between the model and
 // ctx segments it shows a chip segment assembled by chipSegment from two
@@ -1478,7 +1535,7 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if c := m.statusChip(now); c != "" {
 		leftParts = append(leftParts, c)
 	}
-	if c := conductChip(m.conductRaw, now); c != "" {
+	if c := conductChip(m.conductRawFor(now), now); c != "" {
 		leftParts = append(leftParts, c)
 	}
 	if chip == noWorktreeWarning {
@@ -1738,7 +1795,7 @@ func renderStateLine(m model, now time.Time) string {
 	if c := m.statusChip(now); c != "" {
 		parts = append(parts, c)
 	}
-	if c := conductChip(m.conductRaw, now); c != "" {
+	if c := conductChip(m.conductRawFor(now), now); c != "" {
 		parts = append(parts, c)
 	}
 

@@ -99,6 +99,9 @@ carried away mid-keystroke isn't a thing. Under the hood this uses
 `claudemux -d`, which creates the session and prints its name instead of
 attaching.
 
+`Space` also works from any session's status pane — see *Toggling conduct mode*
+below — so you can stop the conductor without coming back here first.
+
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `Esc` returns to the session you
 came from (tmux's per-client last session), `n` starts a new session, `q`
@@ -353,6 +356,15 @@ slot back, since it is the one that needs an answer. `s` does nothing when there
 is no API key, and a second press while a call is in flight is ignored rather
 than billed twice. A pinned tab stays pinned: the summary and topic refresh, the
 window name does not.
+
+**Toggling conduct mode.** While the conductor is live, the status pane shows a
+`⏵ conduct` chip — a standing notice that you may be carried elsewhere when this
+session finishes. Click the pane and press `Space` to turn conducting off (and
+again to turn it back on), exactly as `Space` does in the lobby: the head hands
+the request to the lobby, which flips the mode for the whole fleet. The chip
+answers the keypress immediately and settles on what the lobby actually did
+within a couple of seconds. With no lobby running there is nothing to conduct,
+so the chip is absent and `Space` does nothing.
 
 **Restarting the status pane.** Press `R` (capital) to restart it in place. The
 process re-execs the `claudemux-head` binary as it stands on disk right now, so

@@ -79,6 +79,11 @@ type swSnapshotMsg struct {
 	at    time.Time
 	rl    RateLimits
 	rlErr error
+	// conductReq is the raw @claudemux_conduct_request value — a head's space
+	// key asking for a mode flip. Like the meters it survives a fleet-listing
+	// error: standby is a local flag, and a wedged tmux is no reason to drop a
+	// key the user pressed.
+	conductReq string
 }
 
 var (
@@ -126,6 +131,12 @@ type swModel struct {
 	rateLimits     RateLimits
 	rateOK         bool
 	pctSamples     []pctSample
+	// conductReq is the last head-requested toggle this lobby applied, kept as
+	// the already-applied marker: the head leaves its request published, so
+	// every poll re-reads the same press and only an unseen value may toggle.
+	// Empty at startup, which needs no seeding — anything left in the option
+	// from before this lobby existed is stale by then (see parseConductRequest).
+	conductReq string
 	// standby stops all conducting (space toggles it): the lobby keeps
 	// showing live states but the conductor is never stepped, so the user
 	// can sit and look at the fleet without being dispatched.
@@ -196,6 +207,26 @@ func (m *swModel) shouldAutoRestart(now time.Time) bool {
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
+// toggleStandby flips conduct mode. Shared by the lobby's own space key and by
+// head-requested toggles (conductRequestOption) so a head's space and the
+// lobby's cannot drift into meaning different things.
+func (m *swModel) toggleStandby() {
+	m.standby = !m.standby
+	if m.standby {
+		// The user asked to stop conducting, not to skip: neutralize the
+		// conductor without snoozing whatever it was escorting. Paused
+		// self-heals to Parked at the lobby once standby ends.
+		m.cond.phase = swPaused
+		m.cond.escortee = ""
+		// step() never runs while standby is on, so the client can move around
+		// invisibly (elsewhere and back) before standby ends. A hand-back
+		// latched before standby started can't be trusted to still describe
+		// what happened at this session — clear it so resuming re-observes
+		// from scratch.
+		m.cond.clearPaused()
+	}
+}
+
 func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane, m.rateLimitsPath) }
 
 // selectedPane returns the claude pane of the selected session — "" when there
@@ -232,7 +263,9 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		rl, rlErr := readRateLimits(rlPath)
-		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr}
+		// Read ahead of the listings so a head's toggle still lands on a poll
+		// whose fleet listing fails — see swSnapshotMsg.conductReq.
+		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
 			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}")
 		if err != nil {
@@ -421,6 +454,15 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.rateOK = false
 		}
+		// Apply a head's space before publishing below, so the mode this poll
+		// announces already includes a toggle this same poll picked up rather
+		// than lagging it by a beat. The token is the raw request value: the
+		// head leaves it published, so every poll re-reads the same press, and
+		// only a value this lobby hasn't applied yet counts as a new one.
+		if tok, ok := parseConductRequest(msg.conductReq, msg.at); ok && tok != m.conductReq {
+			m.conductReq = tok
+			m.toggleStandby()
+		}
 		// Publish the conduct-mode heartbeat on every poll, tmux error or not:
 		// the heads' staleness window (conductStaleAfter) is sized against this
 		// beat, and mode toggles republish immediately on their own.
@@ -555,20 +597,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.createErr = ""
 			}
 		case " ":
-			m.standby = !m.standby
-			if m.standby {
-				// The user asked to stop conducting, not to skip: neutralize
-				// the conductor without snoozing whatever it was escorting.
-				// Paused self-heals to Parked at the lobby once standby ends.
-				m.cond.phase = swPaused
-				m.cond.escortee = ""
-				// step() never runs while standby is on, so the client can
-				// move around invisibly (elsewhere and back) before standby
-				// ends. A hand-back latched before standby started can't be
-				// trusted to still describe what happened at this session —
-				// clear it so resuming re-observes from scratch.
-				m.cond.clearPaused()
-			}
+			m.toggleStandby()
 			// Republish immediately rather than waiting out the poll beat, so
 			// the heads' chips track the toggle as fast as the badge does.
 			return m, publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
