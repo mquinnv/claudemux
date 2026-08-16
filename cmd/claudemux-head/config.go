@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,7 +92,18 @@ type OnePasswordConfig struct {
 // worktree must be something the user asked for.
 type LaunchConfig struct {
 	AutoWorktree bool `yaml:"auto_worktree"`
+	// Layout is the pane arrangement bin/claudemux builds for a new session,
+	// chosen by `claudemux-head onboard` (or hand-set). Empty means the user
+	// has never chosen: the launcher treats it as shell-right AND knows to
+	// offer onboarding. Values: shell-right, no-shell, shell-bottom,
+	// head-bottom.
+	Layout string `yaml:"layout"`
 }
+
+// legalLayouts are the pane arrangements bin/claudemux knows how to build.
+// Kept as a slice (not a map) because validate() also uses it to render the
+// list of legal values in its error message.
+var legalLayouts = []string{"shell-right", "no-shell", "shell-bottom", "head-bottom"}
 
 // TeardownConfig configures the `x` key in the status pane, which wraps a
 // session up and kills its tmux session.
@@ -220,6 +232,13 @@ func (c Config) validate() error {
 	if c.Summary.MinInterval.Duration < 0 {
 		return fmt.Errorf("summary.min_interval is %s: a negative floor removes the rate limit on billable API calls instead of setting one; use 0 to disable it deliberately",
 			c.Summary.MinInterval.Duration)
+	}
+	// Empty is legal (the user has never chosen a layout); anything else must
+	// be a name bin/claudemux actually knows how to build, or the launcher
+	// would fall back to shell-right without any indication why.
+	if c.Launch.Layout != "" && !slices.Contains(legalLayouts, c.Launch.Layout) {
+		return fmt.Errorf("launch.layout is %q: must be one of %s",
+			c.Launch.Layout, strings.Join(legalLayouts, ", "))
 	}
 	return nil
 }
