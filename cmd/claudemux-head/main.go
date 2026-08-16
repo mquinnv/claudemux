@@ -25,7 +25,10 @@ func main() {
 		if len(os.Args) > 2 && os.Args[2] == "get" {
 			os.Exit(runConfigGet(os.Args[3:], os.Stdout, os.Stderr))
 		}
-		fmt.Fprintln(os.Stderr, "usage: claudemux-head config get <dotted.path>")
+		if len(os.Args) > 2 && os.Args[2] == "set" {
+			os.Exit(runConfigSet(os.Args[3:], os.Stdout, os.Stderr))
+		}
+		fmt.Fprintln(os.Stderr, "usage: claudemux-head config get <dotted.path> | claudemux-head config set <dotted.path> <value>")
 		os.Exit(2)
 	}
 
