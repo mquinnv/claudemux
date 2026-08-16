@@ -318,7 +318,11 @@ func parseEvent(line string) (Event, bool) {
 // machine: `backgroundTaskId` is a non-empty string on all 821 background shell
 // launches and nothing else; `isAsync` is a bool that is only ever true, paired
 // with a non-empty string `agentId`, on all 1596 async agent launches and
-// nothing else.
+// nothing else. A third shape appeared with Claude Code 2.1.232: a Skill that
+// runs as a forked background agent writes `background: true` (with
+// `status: "forked"` and the same non-empty `agentId`) and no `isAsync` key at
+// all — see testdata/launch-skill-fork.jsonl, captured from a real
+// `/code-review high` launch.
 //
 // `toolUseResult` is frequently NOT an object — 4035 entries write a bare
 // string there and 2728 an array — so a failed decode is the normal case, not
@@ -332,18 +336,21 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 	var res struct {
 		BackgroundTaskID string `json:"backgroundTaskId"`
 		IsAsync          bool   `json:"isAsync"`
+		Background       bool   `json:"background"`
 		AgentID          string `json:"agentId"`
 	}
 	if json.Unmarshal(toolUseResult, &res) != nil {
 		return
 	}
 	ev.BgTaskID = res.BackgroundTaskID
-	// isAsync is the load-bearing half: the same `Agent` tool dispatches
-	// foreground agents, and only an ASYNC one ends the main thread's turn.
-	// Every observed isAsync is true, so requiring it costs nothing today and
-	// keeps a future foreground record — which would have to say isAsync
-	// false — from reading as a launch.
-	if res.IsAsync {
+	// The bool is the load-bearing half: the same `Agent` tool dispatches
+	// foreground agents (and the same `Skill` tool runs skills inline), and
+	// only a launch that ends the main thread's turn counts. Async agents say
+	// `isAsync: true`; forked background skills say `background: true`. Every
+	// observed record with an agentId sets one of them, so requiring it costs
+	// nothing today and keeps a future foreground record — which would have
+	// to say false on both — from reading as a launch.
+	if res.IsAsync || res.Background {
 		ev.BgAgentID = res.AgentID
 	}
 }

@@ -198,12 +198,20 @@ func bgAssertFixtureRegisters(t *testing.T, fixture, wantID string) {
 
 // --- launches: the harness's own record --------------------------------------
 
-// The two originally captured launches, one per kind, from claudemux's own
+// Originally captured launches, one per kind, from the user's own personal
 // traffic (not an employer transcript, unlike the three recovered fixtures
 // below — see testdata/README.md). DERIVED from real transcript lines the
 // same way: harness structure, wording, field names, ids and key order
 // untouched; cwd, git branch, doc/session-scoped paths, and every
 // session/message/request identifier replaced with neutral placeholders.
+//
+// launch-skill-fork is the third launch kind: a Skill that runs as a forked
+// background agent (e.g. `/code-review high`, Claude Code 2.1.232). Its
+// record carries no isAsync at all — the harness marks it with
+// `background: true` + `status: "forked"` alongside the same `agentId`, and
+// the agent writes the same subagents/agent-<id>.jsonl liveness file. Missing
+// this shape made claudemux call a session Idle for the entire (often
+// hour-long) review the fork was running.
 func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	tests := []struct {
 		fixture string
@@ -211,6 +219,7 @@ func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	}{
 		{"launch-shell.jsonl", "boigiwsir"},
 		{"launch-agent.jsonl", "a99a8221a00c2d373"},
+		{"launch-skill-fork.jsonl", "aaba848fe04645123"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
@@ -526,6 +535,8 @@ func TestBgNonObjectToolUseResultIsHarmless(t *testing.T) {
 		{"an object whose isAsync has the wrong type", map[string]any{"isAsync": "yes", "agentId": "a1"}},
 		{"an object with an empty id", map[string]any{"backgroundTaskId": ""}},
 		{"an agent record that is not async", map[string]any{"isAsync": false, "agentId": "a1"}},
+		{"an object whose background has the wrong type", map[string]any{"background": "yes", "agentId": "a1"}},
+		{"a skill record that is not backgrounded", map[string]any{"background": false, "status": "completed", "agentId": "a1"}},
 	}
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
@@ -718,6 +729,23 @@ func TestBgAgentAliveFilePastOldCap(t *testing.T) {
 	bgTouchAgentFile(t, b.subagentsDir, "agentaaa", now.Add(-1*time.Minute))
 	if n, _ := b.outstanding(now); n != 1 {
 		t.Errorf("outstanding = %d, want 1: a live agent must count past 30m", n)
+	}
+}
+
+// A forked-skill launch is an agent, not a shell: it writes the same
+// subagents/agent-<id>.jsonl file, so it must follow the liveness regime and
+// keep counting past the shell cap while that file advances. (The observed
+// fork ran a multi-hour /code-review; the shell cap would have called its
+// session Idle 30 minutes in.)
+func TestBgSkillForkFollowsAgentLiveness(t *testing.T) {
+	events, launch := bgFixture(t, "launch-skill-fork.jsonl")
+	now := launch.Add(2 * time.Hour)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(events, launch)
+	bgTouchAgentFile(t, b.subagentsDir, "aaba848fe04645123", now.Add(-1*time.Minute))
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: a live forked skill must count past 30m", n)
 	}
 }
 
