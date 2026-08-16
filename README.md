@@ -81,6 +81,14 @@ live Haiku-generated topic on the first, and a dimmer second line underneath
 with the running summary and last prompt (`summary · prompt`, either half
 omitted if empty, the whole line omitted if both are).
 
+Each session's **name is tinted with its project color** — the same `color:` that
+paints its tmux status bar and terminal tab — so a fleet spanning several projects
+sorts itself visually without you reading a single name. Only the name is tinted:
+the state, timer, context and model columns keep their own meanings in color.
+Sessions whose project declares no color render plain, and the selected row's
+highlight always wins over the tint. Heads started before this existed publish no
+color and render plain too, so a mixed-version fleet degrades one row at a time.
+
 Below the fleet list, a bordered box previews the selected session's `claude`
 pane — the same thing `tmux choose-tree -Zs` does for the session under the
 cursor, so you can see what's actually happening before you jump to it. It

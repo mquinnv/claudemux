@@ -698,6 +698,11 @@ func firstUserPrompt(events []Event) string {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.pollData(), m.tick()}
+	// The project color is static for the life of a session, so it is published
+	// once here rather than from the per-tick publish path.
+	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
+		cmds = append(cmds, c)
+	}
 	// No seed call in waiting mode: the transcript is empty, and
 	// switchSession fires the seed when a real session is adopted. Must
 	// stay in lockstep with newModel's `summarizing` initializer above.

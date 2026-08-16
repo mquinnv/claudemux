@@ -111,6 +111,15 @@ const (
 	infoSummaryOption = "@claudemux_summary"
 	infoPromptOption  = "@claudemux_prompt"
 	infoModelOption   = "@claudemux_model"
+	// infoColorOption carries the session's project color as a bare 6-digit hex
+	// so the lobby can tint its row to match the session's status bar and
+	// terminal tab. Published once at start, not per tick: the color comes from
+	// the project config, which does not change under a running session.
+	//
+	// The lobby learns everything from tmux options and never reads the
+	// filesystem — resolving colors there would mean discovering each session's
+	// work directory and shelling out to the resolver once per session per poll.
+	infoColorOption = "@claudemux_color"
 )
 
 // infoValueMaxRunes bounds published summary/prompt text. 120 comfortably
@@ -119,6 +128,27 @@ const infoValueMaxRunes = 120
 
 func sanitizeOptionValue(s string) string {
 	return truncateWords(collapseWhitespace(s), infoValueMaxRunes)
+}
+
+// publishColorCmd resolves workDir's project color and publishes it, or does
+// nothing when there is no pane to publish against and no directory to resolve.
+//
+// The resolution runs inside the cmd, not before it: projectStyleFor shells out
+// to the resolver script, which must not sit on the path to the first frame.
+// A project with no color publishes "" — which the lobby renders exactly as it
+// rendered every row before this option existed.
+func publishColorCmd(selfPane, workDir string) tea.Cmd {
+	if selfPane == "" || workDir == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), tabResetTimeout)
+		defer cancel()
+		hex, _ := projectStyleFor(ctx, workDir)
+		_ = exec.CommandContext(ctx, "tmux",
+			"set-option", "-t", selfPane, infoColorOption, hex).Run()
+		return nil
+	}
 }
 
 // publishOptionCmd sets one session option, fire-and-forget. An empty value
