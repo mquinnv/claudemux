@@ -193,16 +193,29 @@ func conductOn(mode string) bool {
 	return mode != "" && mode != "standby"
 }
 
-var conductChipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
+var (
+	conductChipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
+	// Orange, the same hue the lobby gives its own STANDBY badge and status
+	// line (see swBadgeStandbyStyle), so one mode does not wear two colors
+	// depending on which surface you read it from.
+	stayChipStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+)
 
-// conductChip renders the head's conduct-mode chip from the raw option value,
-// or "" when nothing should show. Presence means "the conductor may move you
-// when this session finishes"; standby, a stale heartbeat, and no lobby at all
-// are deliberately indistinguishable — in all three, nothing will move you.
+// conductChip renders the head's conduct-mode chip from the raw option value.
+//
+// Presence means A LIVE LOBBY IS WATCHING; the chip then says what it will do:
+// "⏵ conduct" — it may move you when this session finishes — or "⏸ stay",
+// standby, which is a state the user deliberately switched on and so reads
+// back rather than going quiet. A stale heartbeat and no lobby at all stay
+// blank and indistinguishable: there is no process to report on, and a chip
+// that outlived its lobby would be describing nobody.
 func conductChip(raw string, now time.Time) string {
 	mode, ok := parseConductValue(raw, now)
-	if !ok || !conductOn(mode) {
+	if !ok {
 		return ""
+	}
+	if !conductOn(mode) {
+		return stayChipStyle.Render("⏸ stay")
 	}
 	return conductChipStyle.Render("⏵ conduct")
 }
