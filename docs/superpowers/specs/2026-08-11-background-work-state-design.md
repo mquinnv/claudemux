@@ -96,6 +96,7 @@ a top-level **`toolUseResult`** — a sibling of `message`, read exactly like th
 | background shell | `toolUseResult.backgroundTaskId` is a non-empty string | that string |
 | async agent | `toolUseResult.isAsync == true` | `toolUseResult.agentId` |
 | forked background skill | `toolUseResult.background == true` | `toolUseResult.agentId` |
+| resumed agent | `toolUseResult.resumedAgentId` is a non-empty string | that string |
 
 Verified across all 1915 transcripts under `~/.claude/projects` on this machine:
 
@@ -118,6 +119,22 @@ async agent, so it follows the agent expiry regime. One captured instance so far
 running a multi-hour forked review read as Idle the whole time. A skill that runs
 inline writes `commandName`/`success` with no `agentId`, so `background` is what
 separates the two dispatches the same tool makes.
+
+Added 2026-08-17: a **`SendMessage` that resumes a stopped agent** writes a fourth
+shape — `resumedAgentId`, a non-empty string, with **neither `isAsync` nor
+`background`**. This is how a session picks work back up after an agent was killed,
+or after the harness reports *"No completion record was found for background agent …
+from the previous session"*. The resumed agent runs in the background, writes the same
+`subagents/agent-<id>.jsonl` liveness file, and notifies under that same id, so it
+follows the agent expiry regime. **203** of these exist across the 1915 transcripts on
+this machine, all with `success: true` and a string id — captured as
+`testdata/launch-agent-resume.jsonl`. `SendMessage`'s other two outcomes carry no such
+key: a message *queued* to an agent that is already running writes `pin` and a
+"Message queued for delivery to …" message (38 observed — nothing starts, and whatever
+started that agent is already tracked), and an unreachable recipient writes
+`success: false` with no `pin` at all. Before detection learned this shape, a session
+whose only running work was a resumed agent published `Idle` to the switchboard for
+the agent's whole life.
 
 This is structural in a way no text rule can be: a command's stdout lands *inside*
 `toolUseResult.stdout` and cannot add a key beside it, so no output — no matter what it
@@ -179,6 +196,13 @@ a `queue-operation` whose top-level content, or a `user` turn whose text, *start
 Matching the literal substring `task-notification` anywhere is wrong: it appears in
 ordinary prose — skill documentation quotes it — and several transcripts on this machine
 contain it with no background task involved. The prefix check is the whole guard.
+
+The id itself is read as *anything that is not markup or whitespace*, not `[A-Za-z0-9]+`:
+a **named fork** is notified under an id the harness builds from its prompt, e.g.
+`awhat-is-apiwebhookscallr-53690e0dfb7cf9f8`. An id the pattern cannot express is worse
+here than a missed launch — the completion goes unrecognized, so the task is retired only
+by an expiry timer and the session reads `Background` for minutes after its agent
+finished.
 
 ## Tracking
 
