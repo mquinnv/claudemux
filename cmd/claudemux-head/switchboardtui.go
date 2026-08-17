@@ -371,14 +371,15 @@ func swCreateCmd(query string) tea.Cmd {
 
 // swSwitchCmd moves a client. Fire-and-forget: if tmux refuses (client went
 // away mid-tick), the next poll sees reality and the conductor re-decides.
-// With banner set, a successful switch is followed by the arrival popup on the
+// With a card, a successful switch is followed by the arrival popup on the
 // target session (see banner.go) — only successful, so a vanished client
-// doesn't get a banner announcing a move that never happened.
-func swSwitchCmd(client, target string, banner bool) tea.Cmd {
+// doesn't get a banner announcing a move that never happened. A nil card is a
+// move that needs no announcement.
+func swSwitchCmd(client, target string, card *bannerCard) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run(); err != nil || !banner {
+		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run(); err != nil || card == nil {
 			return nil
 		}
 		self, err := os.Executable()
@@ -389,9 +390,36 @@ func swSwitchCmd(client, target string, banner bool) tea.Cmd {
 		// timeout with headroom rather than sharing the switch's 2s budget.
 		bctx, bcancel := context.WithTimeout(context.Background(), swBannerHold+3*time.Second)
 		defer bcancel()
-		_ = exec.CommandContext(bctx, "tmux", swBannerPopupArgs(self, client, target)...).Run()
+		_ = exec.CommandContext(bctx, "tmux", swBannerPopupArgs(self, client, *card)...).Run()
 		return nil
 	}
+}
+
+// bannerFor is the arrival card for a switch to target, or nil when the move
+// needs no announcement (see swWantsBanner).
+//
+// Everything on the card comes from the snapshot the conductor just decided on,
+// so the popup — a separate process that would otherwise have to re-query tmux
+// during the second it is on screen — is handed the facts already in hand. A
+// session the snapshot doesn't know (raced away between decision and switch)
+// still gets a card: its name is the one fact that is certainly true.
+//
+// Topic falls back to the summary for the same reason the fleet rows show both:
+// a head that has not yet named its tab has usually still published what it is
+// doing right now, and that beats a blank line.
+func (m swModel) bannerFor(target string) *bannerCard {
+	if !swWantsBanner(target, m.snap.Lobby) {
+		return nil
+	}
+	card := bannerCard{Session: target, Context: -1}
+	if sess, ok := m.snap.session(target); ok {
+		card.Topic = sess.Topic
+		if card.Topic == "" {
+			card.Topic = sess.Summary
+		}
+		card.Color, card.Model, card.Context = sess.Color, sess.Model, sess.Context
+	}
+	return &card
 }
 
 // swSwitchLastCmd sends a client back to its last session — tmux's own
@@ -519,7 +547,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.standby && !m.creating && !m.createBusy {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
-					swSwitchCmd(act.Client, act.Target, swWantsBanner(act.Target, m.snap.Lobby)), pv, pub)
+					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub)
 			}
 		}
 		return m, tea.Batch(swNextTick(), pv, pub)
@@ -559,7 +587,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// moved and pauses until the user returns to the lobby — and like an
 		// enter-jump, no arrival banner: the user asked to go there.
 		if m.cond.client != "" {
-			return m, swSwitchCmd(m.cond.client, msg.name, false)
+			return m, swSwitchCmd(m.cond.client, msg.name, nil)
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -647,7 +675,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// next poll and pauses — no special bookkeeping here. No banner
 			// either: the user chose this destination themselves.
 			if m.sel < len(m.snap.Sessions) && m.cond.client != "" {
-				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name, false)
+				return m, swSwitchCmd(m.cond.client, m.snap.Sessions[m.sel].Name, nil)
 			}
 		case "esc":
 			// Back out of the lobby to wherever the client came from. Same
