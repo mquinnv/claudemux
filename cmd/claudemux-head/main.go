@@ -5,12 +5,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 // version is stamped by the release workflow's -ldflags. "dev" for local builds.
 var version = "dev"
+
+// knownSubcommands lists every non-flag first argument main() dispatches. It
+// must be kept in step with the dispatch chain at the top of main — a
+// subcommand added there but not here becomes a usage error, which
+// TestKnownSubcommandsAreAccepted is what catches.
+var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner"}
+
+// unknownSubcommand reports a first argument that reads as a subcommand — a
+// bare word, not a flag — that this binary does not implement. Anything
+// starting with "-" belongs to flag.Parse(), and no argument at all is the
+// session head's normal invocation.
+func unknownSubcommand(args []string) (string, bool) {
+	if len(args) < 2 {
+		return "", false
+	}
+	arg := args[1]
+	if arg == "" || strings.HasPrefix(arg, "-") {
+		return "", false
+	}
+	for _, known := range knownSubcommands {
+		if arg == known {
+			return "", false
+		}
+	}
+	return arg, true
+}
 
 func main() {
 	// Subcommand dispatch must precede flag.Parse(): `config` is a bare first
@@ -61,6 +88,21 @@ func main() {
 	// `banner` runs inside the switchboard's display-popup (see banner.go).
 	if len(os.Args) > 1 && os.Args[1] == "banner" {
 		os.Exit(runBanner(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
+	// Everything past this point is the session head. A first argument that
+	// looks like a subcommand but reached here is one this binary does not
+	// have, and flag.Parse() would SILENTLY IGNORE it and draw the head
+	// anyway. That is how a stale install presents itself: bin/claudemux is a
+	// symlink into the repo, so the launcher is always current while this
+	// binary is whatever was last `go install`ed — and `claudemux-head
+	// onboard` answered by painting a session head on the user's terminal
+	// reads as "claudemux is broken", not "the head binary is old".
+	if sub, ok := unknownSubcommand(os.Args); ok {
+		fmt.Fprintf(os.Stderr, "claudemux-head: unknown subcommand %q (known: %s)\n",
+			sub, strings.Join(knownSubcommands, ", "))
+		fmt.Fprintln(os.Stderr, "if you expected this to work, this binary is older than bin/claudemux — reinstall it")
+		os.Exit(2)
 	}
 
 	sessionFlag := flag.String("session", "", "Use a specific session ID instead of auto-detecting")
