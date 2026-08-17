@@ -6,7 +6,10 @@
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
 #
 # Each directory gets its own session named after the directory basename.
-# Layout: top-left = claudemux-head (short) | below it = claude (focused) | right = shell (full height)
+# Layout: claudemux-head is always a full-width, 4-row pane; `launch.layout`
+# in config.yml then chooses where claude and the optional shell go —
+# shell-right (default), no-shell, shell-bottom, or head-bottom. See
+# create_session's layout comment block below for what each one looks like.
 #
 # A bare arg that isn't a directory is resolved via zoxide (`z`) history.
 #
@@ -710,6 +713,17 @@ open_switchboard() {
     tmux set-hook -g client-session-changed \
       "run-shell -b '$tab_color_helper \"#{client_tty}\" \"#{session_path}\"'"
   fi
+  # -d's documented contract (see the option's help text above) is "create (or
+  # find) the session, print its name to stdout, and exit instead of
+  # attaching" — the switchboard is a session like any other, so it honors
+  # that the same way create_session's attach does. This must come before the
+  # attach/switch-client below, and after the lobby exists and its hooks are
+  # wired, so `claudemux switch -d` (which reaches open_switchboard the same
+  # way) behaves identically to bare `claudemux -d`.
+  if [ "$DETACHED" = true ]; then
+    printf '%s\n' switchboard
+    exit 0
+  fi
   if [ -n "${TMUX:-}" ]; then
     exec tmux switch-client -t '=switchboard'
   fi
@@ -726,9 +740,16 @@ fi
 
 # `claudemux setup` — claudemux-head's interactive layout picker, run
 # directly on this terminal with no tmux session involved. Just an exec: the
-# picker's own exit status (0 saved, 1 cancelled, 3 save failure) becomes
-# claudemux's.
+# picker's own exit status (0 saved, 1 cancelled, 3 save failure or a broken
+# TUI) becomes claudemux's. Guarded by `command -v` like open_switchboard and
+# create_session's head_bin resolution — without it, a missing binary would
+# surface as bash's raw "command not found" (127) instead of a
+# claudemux-voiced error.
 if [ "${1:-}" = "setup" ]; then
+  if ! command -v claudemux-head >/dev/null 2>&1; then
+    echo "claudemux: claudemux-head not found on PATH — install it to run the layout picker" >&2
+    exit 1
+  fi
   exec claudemux-head onboard
 fi
 

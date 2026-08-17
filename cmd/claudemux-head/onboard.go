@@ -281,18 +281,36 @@ func onboardResult(m onboardModel, stderr io.Writer) int {
 	}
 }
 
-// runOnboard is the `claudemux-head onboard` entry point.
+// onboardFatal reports the bubbletea program itself having failed — p.Run()
+// returning an error, or an unexpected final model type — as exit code 3,
+// reusing the same "something went wrong" code onboardResult gives a save
+// failure. Split out from runOnboard for the same reason onboardResult is:
+// testable without a real terminal to run the program against. Kept distinct
+// from exit code 1 (user cancel) on purpose: a caller scripting `claudemux
+// setup` can tell "the user declined" from "the TUI broke" this way.
+func onboardFatal(msg string, stderr io.Writer) int {
+	fmt.Fprintf(stderr, "claudemux-head onboard: %s\n", msg)
+	return 3
+}
+
+// runOnboard is the `claudemux-head onboard` entry point. Exit codes:
+//
+//	0 — a layout was chosen and saved (onboardResult)
+//	1 — the user cancelled (q/esc/ctrl+c) without choosing (onboardResult)
+//	3 — a layout was chosen but the save failed (onboardResult), OR the
+//	    bubbletea program itself failed to run (onboardFatal). These share a
+//	    code rather than 1 because both mean "something went wrong", distinct
+//	    from a user's deliberate cancel — callers can tell "declined" from
+//	    "broke".
 func runOnboard(stderr io.Writer) int {
 	p := tea.NewProgram(newOnboardModel(onboardConfigWriter))
 	final, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(stderr, "claudemux-head onboard: %v\n", err)
-		return 1
+		return onboardFatal(err.Error(), stderr)
 	}
 	m, ok := final.(onboardModel)
 	if !ok {
-		fmt.Fprintln(stderr, "claudemux-head onboard: internal error")
-		return 1
+		return onboardFatal("internal error", stderr)
 	}
 	return onboardResult(m, stderr)
 }

@@ -65,9 +65,12 @@ func configSet(dotted, value string) error {
 	}
 
 	// Never write a config.yml the next launch can't load: decode it back
-	// through the same strict path loadConfig uses (KnownFields + validate)
-	// before anything touches disk.
-	var cfg Config
+	// through the same strict path loadConfig uses (KnownFields + validate),
+	// seeded with defaultConfig() first — this pre-write check must mirror
+	// loadConfig's decode exactly, defaults and all, or a future validate()
+	// rule that depends on a default (rather than only rejecting an explicit
+	// bad value) could pass here and still be rejected on the next launch.
+	cfg := defaultConfig()
 	dec := yaml.NewDecoder(bytes.NewReader(out))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {

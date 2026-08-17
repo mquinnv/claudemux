@@ -340,3 +340,21 @@ func TestOnboardResultSaveFailure(t *testing.T) {
 		t.Errorf("stderr = %q, want it to contain the error", buf.String())
 	}
 }
+
+// A bubbletea program that fails outright (p.Run() erroring, or an
+// unexpected final model type) must exit 3 — the same "something went
+// wrong" code as a save failure, and distinct from exit 1's user-cancel —
+// so a caller can tell "declined" from "broke".
+func TestOnboardFatal(t *testing.T) {
+	var buf bytes.Buffer
+	code := onboardFatal("pty allocation failed", &buf)
+	if code != 3 {
+		t.Errorf("exit code = %d, want 3", code)
+	}
+	if !strings.Contains(buf.String(), "pty allocation failed") {
+		t.Errorf("stderr = %q, want it to contain the message", buf.String())
+	}
+	if code == 1 {
+		t.Error("TUI failure must not share exit code 1 with user-cancel")
+	}
+}
