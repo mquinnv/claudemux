@@ -103,6 +103,30 @@ var (
 	swStatusStandbyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 )
 
+// swNameStyle picks the style for a session's name cell.
+//
+// Only the name is tinted. The columns after it — state, age, context, model —
+// carry their own meaning in color (orange waiting, blue busy, the context
+// bar's thresholds), and tinting the whole row would put the project color in
+// direct competition with all of them.
+//
+// Selection wins outright over the tint rather than compositing with it: the
+// highlight has to stay legible against every color a project might pick,
+// including one close to the terminal's own foreground.
+//
+// hex is a tmux user option, so anything at all can be in it. Only a bare
+// 6-digit hex is honored — everything else renders plain, because handing junk
+// to lipgloss.Color emits a broken escape sequence into the row.
+func swNameStyle(hex string, selected bool) lipgloss.Style {
+	if selected {
+		return swSelStyle
+	}
+	if !isHex6(hex) {
+		return lipgloss.NewStyle()
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#" + hex))
+}
+
 // swModeBadge renders the title-line mode badge. Escorting shows as
 // CONDUCTING — it is the active form of it, and the status line below already
 // names the escortee.
@@ -267,7 +291,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}")
+			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}\t#{"+infoColorOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -779,10 +803,8 @@ func (m swModel) View() string {
 		// by display width (not rune count) for the same reason as swCell: a
 		// CJK name clipped to swNameColW runes still overruns the column in
 		// cells.
-		name := swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW)
-		if i == m.sel {
-			name = swSelStyle.Render(name)
-		}
+		name := swNameStyle(sess.Color, i == m.sel).
+			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
 		line := fmt.Sprintf(" %s%s %s%s  %s %s%s", marker, name,
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),

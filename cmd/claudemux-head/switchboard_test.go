@@ -8,11 +8,11 @@ import (
 // Raw tmux outputs as the switchboard's three -F formats produce them.
 // An unset user option renders as an empty field.
 const (
-	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\n" +
-		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\n" +
-		"scratch\t\t\t\t\t\t\n" +
-		"switchboard\t\t\t\t\t\t\n" +
-		"plain\t\t\t\t\t\t\n"
+	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\tb34dff\n" +
+		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\t\n" +
+		"scratch\t\t\t\t\t\t\t\n" +
+		"switchboard\t\t\t\t\t\t\t\n" +
+		"plain\t\t\t\t\t\t\t\n"
 	swPaneOut = "api\t%1\tclaudemux-head\tbuild fixes\n" +
 		"api\t%2\tclaude\tbuild fixes\n" +
 		"web\t%5\tclaudemux-head\tcolor picker\n" +
@@ -85,6 +85,25 @@ func TestBuildSwSnapshotMalformedLines(t *testing.T) {
 	if len(sixField.Sessions) != 0 {
 		t.Errorf("pre-model 6-field lines must be skipped, got %+v", sixField.Sessions)
 	}
+	sevenField := buildSwSnapshot("api\tIdle\t1754700000\t37\tsum\tprompt\tm\n", "api\t%1\tclaudemux-head\tt\n", "", "%9")
+	if len(sevenField.Sessions) != 0 {
+		t.Errorf("pre-color 7-field lines must be skipped, got %+v", sevenField.Sessions)
+	}
+}
+
+// The project color rides along as the eighth field. A session whose project
+// declares no color publishes an empty one — the lobby renders those rows
+// exactly as it did before there was a color at all.
+func TestBuildSwSnapshotParsesColor(t *testing.T) {
+	s := buildSwSnapshot(swSessOut, swPaneOut, swClientOut, "%9")
+	api, ok := s.session("api")
+	if !ok || api.Color != "b34dff" {
+		t.Errorf("api.Color = %q, want b34dff", api.Color)
+	}
+	web, ok := s.session("web")
+	if !ok || web.Color != "" {
+		t.Errorf("web.Color = %q, want empty: its project declares no color", web.Color)
+	}
 }
 
 // The preview needs the claude pane, not the head pane: swPaneOut gives api
@@ -129,8 +148,8 @@ func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
 		"api\t%3\tclaude\ttopic\n" +
 		"shim\t%4\tclaudemux-head\ttopic\n" +
 		"shim\t%5\tnode\ttopic\n"
-	sessOut := "api\tIdle\t1754700000\t37\t\t\t\n" +
-		"shim\tIdle\t1754700000\t37\t\t\t\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\n" +
+		"shim\tIdle\t1754700000\t37\t\t\t\t\n"
 	s := buildSwSnapshot(sessOut, paneOut, swClientOut, "")
 	api, _ := s.session("api")
 	if api.ClaudePane != "%3" {

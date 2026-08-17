@@ -6,7 +6,10 @@
 
 # Per-user project config. Contains op_env, an ID pointing at your secrets.
 # Gitignored so that neither this repo nor any repo using claudemux can leak it.
-# See .project.yml.example for the format.
+# See .claudemux.yml.example for the format. .project.yml is the file's former
+# name, still read as a fallback and still ignored so an unmigrated checkout
+# cannot commit one by accident.
+.claudemux.yml
 .project.yml
 
 # Local agent/process artifacts

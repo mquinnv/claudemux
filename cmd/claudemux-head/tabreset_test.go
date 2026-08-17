@@ -63,8 +63,67 @@ func TestResolveProjectStyleLightColorPicksBlack(t *testing.T) {
 	}
 }
 
+// The resolver reads the current config name, not only the legacy one.
+func TestResolveProjectStyleReadsCurrentConfigName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, projectConfigName), []byte("color: purple\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runResolveStyle(t, dir)
+	if err != nil {
+		t.Fatalf("resolve_project_style: %v", err)
+	}
+	if got != "b34dff #ffffff" {
+		t.Errorf("style = %q, want %q", got, "b34dff #ffffff")
+	}
+}
+
+// A project mid-rename has both files. The current name wins, matching
+// projectConfigPath — otherwise the tab and the status bar could disagree about
+// a project's color depending on which reader ran.
+func TestResolveProjectStylePrefersCurrentConfigName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, projectConfigName), []byte("color: purple\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, legacyProjectConfigName), []byte("color: yellow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runResolveStyle(t, dir)
+	if err != nil {
+		t.Fatalf("resolve_project_style: %v", err)
+	}
+	if got != "b34dff #ffffff" {
+		t.Errorf("style = %q, want purple (the current name), got %q", got, got)
+	}
+}
+
+// A nearer legacy file beats a farther current one: the walk is by distance
+// first, name preference second. A worktree carrying its own .project.yml must
+// not be overruled by a .claudemux.yml further up the tree.
+func TestResolveProjectStyleNearestAncestorWins(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(parent, projectConfigName), []byte("color: purple\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, legacyProjectConfigName), []byte("color: yellow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runResolveStyle(t, child)
+	if err != nil {
+		t.Fatalf("resolve_project_style: %v", err)
+	}
+	if got != "ffd24d #000000" {
+		t.Errorf("style = %q, want yellow (the nearer file)", got)
+	}
+}
+
 // No project color anywhere up the tree: non-zero exit, no output. t.TempDir()
-// is under /var/folders, which has no .project.yml ancestors.
+// is under /var/folders, which has no project config ancestors.
 func TestResolveProjectStyleNoColor(t *testing.T) {
 	got, err := runResolveStyle(t, t.TempDir())
 	if err == nil {

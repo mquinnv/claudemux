@@ -25,6 +25,12 @@ type swSession struct {
 	Summary string    // the head's one-line summary (@claudemux_summary)
 	Prompt  string    // the last typed prompt (@claudemux_prompt)
 	Model   string    // raw model id (@claudemux_model); "" when unset
+	// Color is the session's project color as a bare 6-digit hex
+	// (@claudemux_color), "" when the project declares none or the head
+	// predates the option. The head resolves it from the project config once at
+	// start — the lobby never touches the filesystem, so this is the only route
+	// by which a project's color reaches a row.
+	Color string
 	// ClaudePane is the tmux pane id running claude, "" when the session has
 	// none. The lobby previews this pane rather than the session's active one:
 	// a session left focused on its shell would preview a shell prompt, and
@@ -79,7 +85,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -121,13 +127,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 7 || f[0] == "" {
+		if len(f) != 8 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
 			continue
 		}
-		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6]}
+		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7]}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {
 			sess.Context = ctx

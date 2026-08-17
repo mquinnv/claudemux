@@ -1096,3 +1096,34 @@ func TestSwModelViewShowsModeBadge(t *testing.T) {
 		t.Errorf("paused view missing PAUSED badge:\n%s", view)
 	}
 }
+
+// A session's project color tints its name cell, so a row is identifiable by
+// the same color as its tmux status bar and terminal tab.
+func TestSwNameStyleTintsWithProjectColor(t *testing.T) {
+	got := swNameStyle("b34dff", false).GetForeground()
+	if want := lipgloss.Color("#b34dff"); got != want {
+		t.Errorf("foreground = %v, want %v", got, want)
+	}
+}
+
+// @claudemux_color is a tmux user option: anything can write it. A value that
+// is not a bare 6-digit hex must render as a plain name rather than reaching
+// lipgloss, which would emit a broken escape sequence into the row.
+func TestSwNameStyleRejectsNonHexColor(t *testing.T) {
+	for _, in := range []string{"", "purple", "#b34dff", "b34df", "b34dfff", "zzzzzz"} {
+		if fg := swNameStyle(in, false).GetForeground(); fg != lipgloss.TerminalColor(lipgloss.NoColor{}) {
+			t.Errorf("swNameStyle(%q) foreground = %v, want none", in, fg)
+		}
+	}
+}
+
+// Selection must stay legible on every project color, so the highlight wins
+// outright rather than compositing with a tint.
+func TestSwNameStyleSelectionBeatsProjectColor(t *testing.T) {
+	if !swNameStyle("b34dff", true).GetReverse() {
+		t.Error("selected name lost its reverse highlight")
+	}
+	if fg := swNameStyle("b34dff", true).GetForeground(); fg != lipgloss.TerminalColor(lipgloss.NoColor{}) {
+		t.Errorf("selected name foreground = %v, want none", fg)
+	}
+}

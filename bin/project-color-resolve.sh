@@ -2,8 +2,14 @@
 # Shared project-color resolver. Source this, then call:
 #     resolve_project_hex "$start_dir"
 # It walks $start_dir and ancestors for the nearest project color, preferring
-# .project.yml (`color: <named|#hex>`) then legacy .project-color (#hex/named),
-# and echoes a 6-digit hex (no leading #). Returns 1 if nothing is found.
+# .claudemux.yml (`color: <named|#hex>`), then legacy .project.yml, then legacy
+# .project-color (#hex/named), and echoes a 6-digit hex (no leading #). Returns
+# 1 if nothing is found.
+#
+# The walk is by DISTANCE first, name second: a nearer .project.yml beats a
+# farther .claudemux.yml, so a directory that carries its own config is never
+# overruled from above. cmd/claudemux-head/projectconfig.go applies the same
+# name preference when reading a single directory. Keep the two in step.
 #
 # Single source of truth for the named palette — used by the tmux chrome hooks
 # and by claudemux. Tune the hexes here to taste.
@@ -40,13 +46,15 @@ name_to_hex() {
 }
 
 resolve_project_hex() {
-    local dir="$1" raw=""
+    local dir="$1" raw="" f=""
     while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-        if [ -f "$dir/.project.yml" ]; then
-            raw=$(sed -n 's/^[[:space:]]*color:[[:space:]]*//p' "$dir/.project.yml" \
+        for f in "$dir/.claudemux.yml" "$dir/.project.yml"; do
+            [ -f "$f" ] || continue
+            raw=$(sed -n 's/^[[:space:]]*color:[[:space:]]*//p' "$f" \
                   | head -1 | tr -d "\"' \r")
             [ -n "$raw" ] && break
-        fi
+        done
+        [ -n "$raw" ] && break
         if [ -f "$dir/.project-color" ]; then
             raw=$(tr -d '[:space:]' < "$dir/.project-color")
             [ -n "$raw" ] && break
