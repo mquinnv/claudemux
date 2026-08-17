@@ -120,6 +120,39 @@ func bgAgentResult(id string) map[string]any {
 	return map[string]any{"isAsync": true, "agentId": id}
 }
 
+// bgResumeResult is the harness record on a SendMessage that RESUMED a dormant
+// background agent — the id comes back under resumedAgentId.
+func bgResumeResult(id string) map[string]any {
+	return map[string]any{
+		"success": true, "message": "Resuming agent " + id, "resumedAgentId": id,
+		"pin": map[string]any{"id": id, "name": id, "ref": "38e480"},
+	}
+}
+
+// bgQueuedResult is the harness record on a SendMessage to an agent that is
+// ALREADY running: the message is queued, nothing is launched, and the record
+// carries a pin but no resumedAgentId.
+func bgQueuedResult(id string) map[string]any {
+	return map[string]any{
+		"success": true,
+		"message": "Message queued for delivery to " + id + " at its next tool round.",
+		"pin":     map[string]any{"id": id, "name": id, "ref": "e6bfb0"},
+	}
+}
+
+// bgSendMessageLaunch is one complete SendMessage turn: the tool_use, then its
+// acknowledgement carrying whichever harness record `result` describes.
+func bgSendMessageLaunch(t *testing.T, id, ts string, result map[string]any) []Event {
+	t.Helper()
+	use := "toolu_" + id
+	return bgParse(t,
+		bgToolUseLine(t, use, "SendMessage", ts, map[string]any{
+			"to": id, "summary": "Resume the task", "message": "carry on",
+		}),
+		bgResultLine(t, use, "Resuming agent "+id, ts, result),
+	)
+}
+
 // bgAgentLaunch is one complete async-agent launch: the Agent tool_use, then
 // its acknowledgement carrying the harness's isAsync/agentId record.
 func bgAgentLaunch(t *testing.T, id, ts string) []Event {
@@ -212,6 +245,16 @@ func bgAssertFixtureRegisters(t *testing.T, fixture, wantID string) {
 // the agent writes the same subagents/agent-<id>.jsonl liveness file. Missing
 // this shape made claudemux call a session Idle for the entire (often
 // hour-long) review the fork was running.
+//
+// launch-agent-resume is the fourth: a SendMessage that RESUMES an agent that
+// had stopped — the way a session picks work back up after the agent was
+// killed, or after the harness reports "No completion record was found ...
+// from the previous session". The harness runs the resumed agent in the
+// background exactly like a fresh async launch, and it notifies under the same
+// id, but the record says neither isAsync nor background — the id comes back
+// under `resumedAgentId` instead. 203 of these exist in this machine's
+// transcripts. Missing the shape is what made a session with a resumed agent
+// working for hours publish Idle to the switchboard.
 func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	tests := []struct {
 		fixture string
@@ -220,6 +263,7 @@ func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 		{"launch-shell.jsonl", "boigiwsir"},
 		{"launch-agent.jsonl", "a99a8221a00c2d373"},
 		{"launch-skill-fork.jsonl", "aaba848fe04645123"},
+		{"launch-agent-resume.jsonl", "aad446f291008f662"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
@@ -800,6 +844,61 @@ func TestBgAgentHardCap(t *testing.T) {
 	bgTouchAgentFile(t, b.subagentsDir, "agenteee", now.Add(-1*time.Minute))
 	if n, _ := b.outstanding(now); n != 0 {
 		t.Errorf("outstanding = %d, want 0: the hard cap must win over liveness", n)
+	}
+}
+
+// A resumed agent is an agent: it writes the same subagents/agent-<id>.jsonl
+// and runs for hours, so it must follow the liveness regime rather than the
+// 30-minute shell cap. Registering the resume but capping it like a shell
+// would still leave the session reading Idle for most of the agent's life.
+func TestBgResumedAgentFollowsAgentLiveness(t *testing.T) {
+	launch := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	now := launch.Add(2 * time.Hour)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgSendMessageLaunch(t, "agentres", "2026-08-17T10:00:00Z", bgResumeResult("agentres")), launch)
+	bgTouchAgentFile(t, b.subagentsDir, "agentres", now.Add(-1*time.Minute))
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: a resumed agent must count past 30m while its transcript advances", n)
+	}
+}
+
+// The other SendMessage outcome: the target agent is already running, so the
+// message is only queued. Nothing was launched — the session's busy-ness is
+// already accounted for by the launch that started that agent — and the record
+// says so by carrying a pin but no resumedAgentId.
+func TestBgQueuedSendMessageIsNotALaunch(t *testing.T) {
+	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgSendMessageLaunch(t, "agentrun", "2026-08-17T10:00:00Z", bgQueuedResult("agentrun")), now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: queueing a message to a running agent launches nothing", n)
+	}
+}
+
+// A named fork's task id is not alphanumeric — the harness builds it from the
+// prompt, e.g. `awhat-is-apiwebhookscallr-53690e0dfb7cf9f8`. An id-charset the
+// notification parser cannot express means that agent's completion never
+// retires it, and the session stays Background until an expiry timer catches
+// it minutes later.
+func TestBgCompletionAcceptsNonAlphanumericTaskID(t *testing.T) {
+	const id = "awhat-is-apiwebhookscallr-53690e0dfb7cf9f8"
+	got := bgCompletions(Event{Type: "queue-operation",
+		QueueText: "<task-notification>\n<task-id>" + id + "</task-id>\n<status>completed</status>\n</task-notification>"})
+	if len(got) != 1 || got[0] != id {
+		t.Fatalf("bgCompletions = %q, want [%s]", got, id)
+	}
+	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgSendMessageLaunch(t, id, "2026-08-17T10:00:00Z", bgResumeResult(id)), now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Fatalf("outstanding = %d, want 1", n)
+	}
+	b.observe([]Event{bgDoneEvent(id)}, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: a fork's own completion must retire it", n)
 	}
 }
 

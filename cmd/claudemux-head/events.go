@@ -338,6 +338,7 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 		IsAsync          bool   `json:"isAsync"`
 		Background       bool   `json:"background"`
 		AgentID          string `json:"agentId"`
+		ResumedAgentID   string `json:"resumedAgentId"`
 	}
 	if json.Unmarshal(toolUseResult, &res) != nil {
 		return
@@ -352,6 +353,23 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 	// to say false on both — from reading as a launch.
 	if res.IsAsync || res.Background {
 		ev.BgAgentID = res.AgentID
+	}
+	// A SendMessage that restarts a STOPPED agent is a launch in every way that
+	// matters here: the agent runs in the background, the main thread's turn
+	// ends, and the completion comes back as a task-notification under this
+	// same id. The harness records it under its own key — `resumedAgentId` —
+	// and sets neither isAsync nor background, so it needs its own read. Last,
+	// and guarded on non-empty, so it can only ever add an id: a record that
+	// somehow carried both keys must not have its async agentId overwritten.
+	//
+	// The key is written ONLY on a resume: 203 of these across every transcript
+	// on this machine, all with success true and a string id. The other two
+	// SendMessage outcomes carry no such key — a message queued to an agent
+	// that is ALREADY running (nothing starts; the launch that started it is
+	// already tracked) and an unreachable recipient (nothing starts at all) —
+	// which is exactly the distinction wanted.
+	if res.ResumedAgentID != "" {
+		ev.BgAgentID = res.ResumedAgentID
 	}
 }
 

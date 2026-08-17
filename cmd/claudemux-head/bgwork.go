@@ -16,8 +16,11 @@ import (
 //
 // Whether a launch happened is decided by the harness's own record on the
 // tool_result entry — Event.BgTaskID and Event.BgAgentID, read from the
-// top-level `toolUseResult` — never by the result's text. Completions are
-// recognized by the notification that carries the same id back. See
+// top-level `toolUseResult` — never by the result's text. That covers all four
+// ways background work starts: a backgrounded shell, an async agent, a forked
+// background skill, and a SendMessage that RESUMES a stopped agent (see
+// extractLaunch for each record's shape). Completions are recognized by the
+// notification that carries the same id back. See
 // docs/superpowers/specs/2026-08-11-background-work-state-design.md for the
 // verified event shapes.
 //
@@ -34,7 +37,14 @@ import (
 // bgTaskIDRe pulls the id out of a completion notification. That id is the same
 // string the launch recorded — verified across this machine's transcripts,
 // where every notified id matches either a backgroundTaskId or an agentId.
-var bgTaskIDRe = regexp.MustCompile(`<task-id>([A-Za-z0-9]+)</task-id>`)
+//
+// The id charset is deliberately "anything that isn't markup or whitespace",
+// not [A-Za-z0-9]: a NAMED fork is notified under an id the harness builds from
+// its prompt, e.g. `awhat-is-apiwebhookscallr-53690e0dfb7cf9f8`. An id the
+// pattern cannot express is worse than a missed launch — the completion goes
+// unrecognized, so the task is only ever retired by an expiry timer and the
+// session reads Background for minutes after its agent finished.
+var bgTaskIDRe = regexp.MustCompile(`<task-id>([^<>\s]+)</task-id>`)
 
 // bgNotificationPrefix opens a task-notification payload. Recognition is a
 // PREFIX check, never a substring search: the literal tag appears in ordinary
