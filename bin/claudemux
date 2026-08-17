@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claudemux [-n] [-d] [-w|-W] [dir|query ...]
+# Usage: claudemux [-n] [-d] [-w|-W] [switch|setup|dir|query ...]
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
 #
 # Each directory gets its own session named after the directory basename.
-# Layout: top-left = claudemux-head (short) | below it = claude (focused) | right = shell (full height)
+# Layout: claudemux-head is always a full-width, 4-row pane; `launch.layout`
+# in config.yml then chooses where claude and the optional shell go —
+# shell-right (default), no-shell, shell-bottom, or head-bottom. See
+# create_session's layout comment block below for what each one looks like.
 #
 # A bare arg that isn't a directory is resolved via zoxide (`z`) history.
 #
@@ -54,7 +57,7 @@ while getopts "ndwW" opt; do
     d) DETACHED=true ;;
     w) worktree_mode_set force ;;
     W) worktree_mode_set skip ;;
-    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [dir|query ...]" >&2; exit 1 ;;
+    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [switch|setup|dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -462,10 +465,16 @@ run_in_pane() {
 # matching the old synchronous behavior.
 deferred_launch() {
   local session="$1" work_dir="$2" claude_pane="$3" shell_pane="$4" claude_cmd="$5" holder="$6"
-  local shell_cmd0
-  shell_cmd0="$(pane_cmd "$shell_pane")"
+  local shell_cmd0=""
+  # shell_pane is "" in the no-shell layout — pane_cmd's own `2>/dev/null ||
+  # true` would swallow a bad `-t ""` target anyway, but skipping the calls
+  # outright is what keeps "no shell pane" and "shell pane that vanished"
+  # distinguishable without relying on tmux's handling of an empty target.
+  if [ -n "$shell_pane" ]; then
+    shell_cmd0="$(pane_cmd "$shell_pane")"
+  fi
   if inject_op_env "$session" "$work_dir"; then
-    if [ -n "$shell_cmd0" ] && [ "$(pane_cmd "$shell_pane")" = "$shell_cmd0" ]; then
+    if [ -n "$shell_pane" ] && [ -n "$shell_cmd0" ] && [ "$(pane_cmd "$shell_pane")" = "$shell_cmd0" ]; then
       tmux respawn-pane -k -t "$shell_pane"
     fi
   else
@@ -475,6 +484,38 @@ deferred_launch() {
   if [ "$(pane_cmd "$claude_pane")" = "$holder" ]; then
     tmux respawn-pane -k -t "$claude_pane" "exec $claude_cmd"
   fi
+  return 0
+}
+
+# maybe_onboard — run claudemux-head's interactive layout picker, once, when
+# this looks like a first run: `claudemux-head` is on PATH, stdin AND stdout
+# are both TTYs (a non-interactive caller — the switchboard's `n` prompt,
+# which shells out through `claudemux -d`, or any scripted invocation — must
+# never be handed a TUI), $DETACHED is false (same reason: `-d` callers want
+# a session name on stdout, not a picker stealing the terminal), and
+# `launch.layout` reads back empty with exit 0. That last check goes through
+# ch_config_get rather than a raw `claudemux-head config get` call so a
+# config.yml that fails to parse degrades to "skip onboarding, launch
+# proceeds" — ch_config_get already prints the diagnostic once — instead of
+# this function trying to interpret the failure itself.
+#
+# A cancelled (exit 1) or failed (exit 3) onboard is non-fatal: the launch
+# continues on the default layout either way, same as if nothing had been
+# offered. ONBOARD_ATTEMPTED guards against firing twice in one invocation —
+# both the no-args path and the argument path below call this, but they are
+# mutually exclusive branches today; the guard is what keeps that true if a
+# future call site is ever added rather than relying on that being an accident
+# of the current control flow.
+ONBOARD_ATTEMPTED=false
+maybe_onboard() {
+  [ "$ONBOARD_ATTEMPTED" = false ] || return 0
+  ONBOARD_ATTEMPTED=true
+  command -v claudemux-head >/dev/null 2>&1 || return 0
+  { [ -t 0 ] && [ -t 1 ]; } || return 0
+  [ "$DETACHED" = false ] || return 0
+  ch_config_get launch.layout
+  { [ -z "$CH_CONFIG_ERR" ] && [ -z "$CH_CONFIG_VALUE" ]; } || return 0
+  claudemux-head onboard || true
   return 0
 }
 
@@ -543,11 +584,26 @@ create_session() {
   fi
   claude_cmd="${worktree_env}${claude_cmd}"
 
-  # top-left = claudemux-head (4 rows: first prompt, last prompt, state line, meters),
-  # below it = claude, right = shell (full height, 30% wide — the head
-  # statusbar needs the extra width or it drops its right-side gauges).
-  # Track panes by ID — the short head pane sits above claude, so positional
-  # indices would shift under us.
+  # claudemux-head (4 rows: first prompt, last prompt, state line, meters) is
+  # ALWAYS full window width and exactly 4 rows — the four `launch.layout`
+  # values (config.go's legalLayouts; empty/unrecognized here defaults to
+  # shell-right, defense only, the head validates) only move it and the
+  # optional shell:
+  #   shell-right (default) — head across the top; claude below it; shell
+  #     30% wide on the right.
+  #   no-shell    — head across the top; claude below it; no shell pane.
+  #   shell-bottom — head across the top; claude in the middle; shell 20%
+  #     tall across the bottom.
+  #   head-bottom — claude and shell side by side on top; head full-width
+  #     across the bottom.
+  # Track panes by ID — the short head pane never sits at a fixed positional
+  # index across layouts, so positional indices would shift under us.
+  #
+  # Pane creation ORDER is what makes the head full width without a
+  # split-window -f: `split-window -v [-b] -l 4` run while the window still
+  # has a single column spans the whole width; run it after the claude|shell
+  # split instead and it would only span claude's column. So in every layout
+  # the head is split off claude FIRST, and the shell (if any) SECOND.
   #
   # The head and claude panes RUN their program (run_in_pane); only the shell
   # pane is a shell. Typing into a shell with send-keys was visible work: the
@@ -556,13 +612,35 @@ create_session() {
   # with a second prompt underneath it, all before anything started. A pane
   # created with a command never draws a prompt at all, so there is nothing to
   # hide.
-  local claude_pane head_pane shell_pane head_bin holder_cmd
+  local layout claude_pane head_pane shell_pane head_bin holder_cmd
+  ch_config_get launch.layout
+  layout="$CH_CONFIG_VALUE"
+  case "$layout" in
+    shell-right | no-shell | shell-bottom | head-bottom) ;;
+    *) layout="shell-right" ;;
+  esac
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
   tmux new-session -d -s "$session_name" -c "$work_dir" -x "$(tput cols)" -y "$(tput lines)"
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
-  shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
-  head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+  shell_pane=""
+  case "$layout" in
+    shell-right)
+      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+    no-shell)
+      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+    shell-bottom)
+      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      shell_pane="$(tmux split-window -v -l '20%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+    head-bottom)
+      head_pane="$(tmux split-window -v -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      shell_pane="$(tmux split-window -h -l '30%' -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      ;;
+  esac
   run_in_pane "$head_pane" "${worktree_env}$(printf '%q' "$head_bin")"
 
   # With an op_env, claude's launch is handed to a background injector so the
@@ -608,7 +686,7 @@ create_session() {
   attach "$session_name" "$work_dir"
 }
 
-# `claudemux switch` — the switchboard: a lobby session whose pane runs
+# open_switchboard — the switchboard: a lobby session whose pane runs
 # `claudemux-head switchboard`, auto-ferrying the attached client to sessions
 # waiting on input. The pane runs the program directly via exec (no shell),
 # matching the head/claude panes: exiting the switchboard closes the pane, and
@@ -618,7 +696,14 @@ create_session() {
 # "switchboard" already exists, `claudemux switch` attaches to that project
 # session instead and no switchboard ever runs (first-wins) — see the
 # exact-match guard in create_session for the other half of this hazard.
-if [ "${1:-}" = "switch" ]; then
+#
+# `switch` and `setup` are reserved words in their own right: both are
+# matched against $1 below before any directory or zoxide resolution runs, so
+# a project directory literally named "switch" or "setup" can never be
+# reached by `claudemux switch`/`claudemux setup` — cd into it and run bare
+# `claudemux`, or pass a path (`claudemux ./switch`), instead.
+open_switchboard() {
+  local head_bin tab_color_helper
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
   if ! tmux has-session -t '=switchboard' 2>/dev/null; then
@@ -649,29 +734,65 @@ if [ "${1:-}" = "switch" ]; then
     tmux set-hook -g client-session-changed \
       "run-shell -b '$tab_color_helper \"#{client_tty}\" \"#{session_path}\"'"
   fi
+  # -d's documented contract (see the option's help text above) is "create (or
+  # find) the session, print its name to stdout, and exit instead of
+  # attaching" — the switchboard is a session like any other, so it honors
+  # that the same way create_session's attach does. This must come before the
+  # attach/switch-client below, and after the lobby exists and its hooks are
+  # wired, so `claudemux switch -d` (which reaches open_switchboard the same
+  # way) behaves identically to bare `claudemux -d`.
+  if [ "$DETACHED" = true ]; then
+    printf '%s\n' switchboard
+    exit 0
+  fi
   if [ -n "${TMUX:-}" ]; then
     exec tmux switch-client -t '=switchboard'
   fi
   tmux attach -t '=switchboard'
   exit 0
+}
+
+# `claudemux switch` opens the switchboard directly (see open_switchboard's
+# header comment for the reserved-word/directory-collision hazard this and
+# `setup` share).
+if [ "${1:-}" = "switch" ]; then
+  open_switchboard
 fi
 
-# No args: attach the sole session if there's exactly one, else launch in $PWD.
-if [ "$#" -eq 0 ]; then
-  session_count="$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$session_count" -eq 1 ]; then
-    only_session="$(tmux list-sessions -F '#{session_name}' 2>/dev/null)"
-    only_path="$(tmux display-message -p -t "${only_session}:" '#{pane_current_path}' 2>/dev/null || true)"
-    attach "$only_session" "$only_path"
+# `claudemux setup` — claudemux-head's interactive layout picker, run
+# directly on this terminal with no tmux session involved. Just an exec: the
+# picker's own exit status (0 saved, 1 cancelled, 3 save failure or a broken
+# TUI) becomes claudemux's. Guarded by `command -v` like open_switchboard and
+# create_session's head_bin resolution — without it, a missing binary would
+# surface as bash's raw "command not found" (127) instead of a
+# claudemux-voiced error.
+if [ "${1:-}" = "setup" ]; then
+  if ! command -v claudemux-head >/dev/null 2>&1; then
+    echo "claudemux: claudemux-head not found on PATH — install it to run the layout picker" >&2
+    exit 1
   fi
-  create_session "$(pwd)"
+  exec claudemux-head onboard
 fi
 
-# Each argument becomes (or reattaches to) its own session. The first arg that
-# resolves calls create_session, which attaches and never returns; unresolved
-# args are reported and skipped. Falling through the loop means nothing
-# resolved — exit non-zero so the shell wrapper keeps this message visible
-# instead of closing the tab on a "successful" no-op.
+# Bare claudemux ALWAYS means the switchboard now — no attach-sole-session,
+# no create-in-$PWD. maybe_onboard runs first so a first-time user is offered
+# a layout choice before ever landing in the lobby; a cancelled or failed
+# onboard just means every session launched from here on uses the default
+# layout until `claudemux setup` is run by hand.
+if [ "$#" -eq 0 ]; then
+  maybe_onboard
+  open_switchboard
+fi
+
+# Each argument becomes (or reattaches to) its own session. maybe_onboard runs
+# once before the loop, for the same first-run reason as the no-args branch
+# above — this is the path a first-time `claudemux <dir>` takes without ever
+# passing through the switchboard. The first arg that resolves calls
+# create_session, which attaches and never returns; unresolved args are
+# reported and skipped. Falling through the loop means nothing resolved —
+# exit non-zero so the shell wrapper keeps this message visible instead of
+# closing the tab on a "successful" no-op.
+maybe_onboard
 for arg in "$@"; do
   if dir="$(resolve_dir "$arg")"; then
     create_session "$dir"

@@ -311,6 +311,65 @@ func TestAutoWorktreeUnknownKeyUnderLaunchIsFatal(t *testing.T) {
 	}
 }
 
+// Empty is "never chose" and must be legal — the launcher's onboarding probe
+// depends on an unset layout resolving without error.
+func TestLaunchLayoutDefaultsEmpty(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Launch.Layout != "" {
+		t.Errorf("Launch.Layout = %q, want empty by default", cfg.Launch.Layout)
+	}
+}
+
+func TestLaunchLayoutCanBeSet(t *testing.T) {
+	writeConfig(t, "launch:\n  layout: no-shell\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.Launch.Layout != "no-shell" {
+		t.Errorf("Launch.Layout = %q, want %q", cfg.Launch.Layout, "no-shell")
+	}
+}
+
+// Every legal layout name must round-trip through loadConfig without tripping
+// validate() — a regression here would reject a value the picker TUI can
+// legitimately write.
+func TestLaunchLayoutAllLegalValues(t *testing.T) {
+	for _, layout := range []string{"shell-right", "no-shell", "shell-bottom", "head-bottom"} {
+		writeConfig(t, "launch:\n  layout: "+layout+"\n")
+
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v for layout %q", err, layout)
+		}
+		if cfg.Launch.Layout != layout {
+			t.Errorf("Launch.Layout = %q, want %q", cfg.Launch.Layout, layout)
+		}
+	}
+}
+
+// A layout name outside the fixed set parses fine as YAML but names nothing
+// bin/claudemux knows how to build — reject it the same way an invalid
+// min_interval is rejected, rather than letting the launcher fall back to a
+// silent default.
+func TestLaunchLayoutInvalidValueIsFatal(t *testing.T) {
+	writeConfig(t, "launch:\n  layout: sideways\n")
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("loadConfig() error = nil, want an error for an unrecognized launch.layout value")
+	}
+	if !strings.Contains(err.Error(), "launch.layout") {
+		t.Errorf("error = %q, want it to mention launch.layout", err.Error())
+	}
+}
+
 func TestTeardownCommandDefaultsToDone(t *testing.T) {
 	cfg := defaultConfig()
 	if cfg.Teardown.Command != "/done" {

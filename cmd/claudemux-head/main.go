@@ -25,7 +25,10 @@ func main() {
 		if len(os.Args) > 2 && os.Args[2] == "get" {
 			os.Exit(runConfigGet(os.Args[3:], os.Stdout, os.Stderr))
 		}
-		fmt.Fprintln(os.Stderr, "usage: claudemux-head config get <dotted.path>")
+		if len(os.Args) > 2 && os.Args[2] == "set" {
+			os.Exit(runConfigSet(os.Args[3:], os.Stdout, os.Stderr))
+		}
+		fmt.Fprintln(os.Stderr, "usage: claudemux-head config get <dotted.path> | claudemux-head config set <dotted.path> <value>")
 		os.Exit(2)
 	}
 
@@ -46,6 +49,13 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "switchboard" {
 		os.Exit(runSwitchboard(os.Stderr))
+	}
+
+	// `onboard` is the layout picker, run by bin/claudemux on a session's
+	// first launch and by `claudemux setup` any time after. Dispatched
+	// before flag.Parse() alongside every other subcommand here.
+	if len(os.Args) > 1 && os.Args[1] == "onboard" {
+		os.Exit(runOnboard(os.Stderr))
 	}
 
 	// `banner` runs inside the switchboard's display-popup (see banner.go).

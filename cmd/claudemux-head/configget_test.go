@@ -172,3 +172,46 @@ func TestConfigGetLaunchAutoWorktreeDefault(t *testing.T) {
 		t.Errorf("config get launch.auto_worktree = %q, want %q — the key must resolve (exit 0) even when unset, so the launcher reads a definite false rather than an absent key", got, "false")
 	}
 }
+
+// This is the launcher's "never chose" probe: bin/claudemux calls `config get
+// launch.layout` on every launch to decide whether to offer onboarding, and
+// needs a quiet exit 0 with nothing on stdout — not exit 1 — because an unset
+// layout is a legal value (empty string), not an absent key.
+func TestConfigGetLaunchLayoutDefaultIsEmpty(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	var stdout, stderr bytes.Buffer
+	code := runConfigGet([]string{"launch.layout"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "" {
+		t.Errorf("stdout = %q, want empty for an unset launch.layout", got)
+	}
+}
+
+func TestConfigGetLaunchLayoutSet(t *testing.T) {
+	writeConfig(t, "launch:\n  layout: no-shell\n")
+
+	var stdout, stderr bytes.Buffer
+	code := runConfigGet([]string{"launch.layout"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "no-shell" {
+		t.Errorf("config get launch.layout = %q, want %q", got, "no-shell")
+	}
+}
+
+func TestConfigGetLaunchLayoutInvalidValueExitsThree(t *testing.T) {
+	writeConfig(t, "launch:\n  layout: sideways\n")
+
+	var stdout, stderr bytes.Buffer
+	code := runConfigGet([]string{"launch.layout"}, &stdout, &stderr)
+	if code != 3 {
+		t.Errorf("exit code = %d, want 3 for an invalid launch.layout", code)
+	}
+	if !strings.Contains(stderr.String(), "launch.layout") {
+		t.Errorf("stderr = %q, want it to mention launch.layout", stderr.String())
+	}
+}
