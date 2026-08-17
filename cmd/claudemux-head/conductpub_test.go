@@ -91,12 +91,20 @@ func TestConductChip(t *testing.T) {
 	if got := conductChip(fresh("paused"), now); !strings.Contains(got, "conduct") {
 		t.Errorf("conductChip(paused) = %q, want a visible conduct chip", got)
 	}
-	// Absence means "you won't be yanked anywhere": standby, a dead lobby's
-	// stale publish, and no lobby at all are indistinguishable on purpose.
+	// Standby is a state the user chose, so it reads back rather than going
+	// blank — and it must not read as conducting.
+	got := conductChip(fresh("standby"), now)
+	if !strings.Contains(got, "stay") {
+		t.Errorf("conductChip(standby) = %q, want a visible stay chip", got)
+	}
+	if strings.Contains(got, "conduct") {
+		t.Errorf("conductChip(standby) = %q, must not read as conducting", got)
+	}
+	// Absence means "there is no lobby to report on": a dead lobby's stale
+	// publish and no lobby at all stay indistinguishable on purpose.
 	for name, raw := range map[string]string{
-		"standby": fresh("standby"),
-		"stale":   fmt.Sprintf("conducting %d", now.Add(-time.Minute).Unix()),
-		"absent":  "",
+		"stale":  fmt.Sprintf("conducting %d", now.Add(-time.Minute).Unix()),
+		"absent": "",
 	} {
 		if got := conductChip(raw, now); got != "" {
 			t.Errorf("conductChip(%s) = %q, want empty", name, got)
@@ -188,8 +196,8 @@ func TestHeadSpaceRequestsConductToggle(t *testing.T) {
 	if m.conductPendingMode != "standby" {
 		t.Errorf("conductPendingMode = %q, want standby", m.conductPendingMode)
 	}
-	if got := conductChip(m.conductRawFor(now), now); got != "" {
-		t.Errorf("chip = %q, want it gone the instant standby was asked for", got)
+	if got := conductChip(m.conductRawFor(now), now); !strings.Contains(got, "stay") {
+		t.Errorf("chip = %q, want it reading stay the instant standby was asked for", got)
 	}
 	// And back: the pending mode is derived from what is on screen now, so a
 	// second press reverses the first even before the lobby has answered.
@@ -238,14 +246,14 @@ func TestHeadConductPendingWindow(t *testing.T) {
 	now := time.Now()
 	m := model{conductPendingMode: "standby", conductPendingUntil: now.Add(conductPendingWindow)}
 	m.conductRaw = fmt.Sprintf("conducting %d", now.Unix())
-	if got := conductChip(m.conductRawFor(now), now); got != "" {
+	if got := conductChip(m.conductRawFor(now), now); !strings.Contains(got, "stay") {
 		t.Errorf("chip = %q, want the pending standby to win over a stale read", got)
 	}
 	// Expired: reality wins again even though nothing cleared the fields.
 	late := now.Add(conductPendingWindow + time.Second)
 	m.conductRaw = fmt.Sprintf("conducting %d", late.Unix())
-	if got := conductChip(m.conductRawFor(late), late); got == "" {
-		t.Error("an unanswered request must expire back to what the lobby says")
+	if got := conductChip(m.conductRawFor(late), late); !strings.Contains(got, "conduct") {
+		t.Errorf("chip = %q, want an unanswered request to expire back to what the lobby says", got)
 	}
 }
 
@@ -271,8 +279,8 @@ func TestHeadConductPendingClearedByPoll(t *testing.T) {
 	}
 }
 
-// The head's state line carries the conduct chip while the lobby is live and
-// not in standby, and drops it otherwise.
+// The head's state line carries whichever chip the live lobby's mode calls
+// for, and nothing at all once no lobby is publishing.
 func TestRenderStateLineConductChip(t *testing.T) {
 	now := time.Now()
 	m := model{
@@ -285,8 +293,18 @@ func TestRenderStateLineConductChip(t *testing.T) {
 		t.Errorf("renderStateLine = %q, want the conduct chip", got)
 	}
 	m.conductRaw = fmt.Sprintf("standby %d", now.Unix())
-	if got := renderStateLine(m, now); strings.Contains(got, "conduct") {
+	got := renderStateLine(m, now)
+	if strings.Contains(got, "conduct") {
 		t.Errorf("renderStateLine = %q, want no conduct chip in standby", got)
+	}
+	if !strings.Contains(got, "stay") {
+		t.Errorf("renderStateLine = %q, want the stay chip in standby", got)
+	}
+	// No lobby: neither chip, because there is nothing to report on.
+	m.conductRaw = ""
+	got = renderStateLine(m, now)
+	if strings.Contains(got, "conduct") || strings.Contains(got, "stay") {
+		t.Errorf("renderStateLine = %q, want no chip with no lobby", got)
 	}
 }
 
