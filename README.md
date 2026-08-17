@@ -73,10 +73,27 @@ It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
 until it starts waiting again for a new reason.
 
-Every escorted arrival is announced: a small popup names the session you just
-landed in (`⇥ remix-2 · escorted by claudemux`) and closes after two seconds or
-on your first keypress, so a switch is never a silent teleport. Manual jumps
-(`Enter` on the lobby) skip the banner — you chose where you were going.
+Every escorted arrival is announced: a small popup pulls in a locomotive and
+introduces the session you just landed in — what it's working on, its name, and
+which model is driving at what context — closing after two seconds or on your
+first keypress, so a switch is never a silent teleport.
+
+```
+      o  O
+     o
+    o       _____
+   .][__n_n_|DD[  ====____
+  >(________|__|_[_______]|
+  _/oo OOOOO oo`  ooo  ooo
+▌ Fix idle detection in background agents
+remix-2 · escorted by claudemux
+opus 4.7 · 42% context
+```
+
+The topic and the session name wear the project's color, so you recognize where
+you've landed before you've read a word of it. Facts the session hasn't
+published yet are left out rather than shown blank. Manual jumps (`Enter` on the
+lobby) skip the banner — you chose where you were going.
 
 The iTerm2 tab color follows you as you're carried between sessions — each
 session paints its project color, and sessions without one (the lobby included)
