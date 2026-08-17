@@ -379,10 +379,18 @@ breaks; the color simply doesn't appear on the tab.
 ### Tab titles
 
 The status pane's summarizer also produces a short 2–4 word label for the
-session, and claudemux renames the tmux window to it — which the terminal shows
-as the tab title. As the session's focus settles, the tab goes from the launch
-default to something like `crm bundling`. Because the title comes from the tmux
-window name, it also appears as the window label in the tmux status bar.
+session, and claudemux renames the tmux window to it. As the session's focus
+settles, the label goes from the launch default to something like `crm
+bundling`. Because it is the tmux window name, it also appears as the window
+label in the tmux status bar.
+
+The terminal's tab and titlebar show that label behind the project it belongs
+to — `crm · crm bundling` — so a window announces its project from the moment it
+opens, before any label has landed, and two sessions that settle on the same
+topic stay tellable apart. The project is the `.claudemux.yml` `name:` when one
+is declared and the session name otherwise, the same pair the `r` reset uses
+below. Only the titlebar carries the prefix: the tmux status bar keeps showing
+the bare label, since the session name already sits a column to its left.
 
 This needs no tmux configuration — claudemux sets `set-titles` itself. It applies
 only inside tmux, and only while summaries are on; turn it off with

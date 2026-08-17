@@ -519,9 +519,30 @@ maybe_onboard() {
   return 0
 }
 
+# session_title_name DECLARED_NAME SESSION_NAME CLONE_SUFFIX — the project's
+# name as the terminal titlebar should show it. It mirrors restoreName
+# (cmd/claudemux-head/tabreset.go) so a titlebar and a tab that has just been
+# reset with `r` agree on what this project is called: the .claudemux.yml
+# `name:` when one is declared, otherwise the session name, which is already
+# unique. Clones (`claudemux -n`) share one .claudemux.yml, so the suffix that
+# made the session name unique rides along onto the declared name — "Remix 2",
+# rather than four titlebars all reading "Remix".
+#
+# Every "#" is doubled. The result is spliced into a tmux FORMAT string, where a
+# lone "#" opens a directive (#W, #S, #{...}) and would otherwise swallow the
+# character after it.
+session_title_name() {
+  local declared="$1" session="$2" suffix="$3" name="$2"
+  if [ -n "$declared" ]; then
+    name="$declared"
+    [ -n "$suffix" ] && name="$declared $suffix"
+  fi
+  printf '%s' "${name//#/##}"
+}
+
 create_session() {
   local work_dir="$1"
-  local session_name
+  local session_name clone_suffix=""
   session_name="$(basename "$work_dir")"
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
@@ -531,6 +552,11 @@ create_session() {
         ((i++))
       done
       session_name="${session_name}-${i}"
+      # Kept for the titlebar: it is the one place that pairs the suffix with
+      # the *declared* name, which carries no suffix of its own. attach() below
+      # exits, so reaching past this branch means the suffix is the whole story
+      # of how this session name differs from the directory basename.
+      clone_suffix="$i"
     else
       attach "$session_name" "$work_dir"
     fi
@@ -680,8 +706,16 @@ create_session() {
   # Let the terminal tab track the tmux window name — claudemux-head renames the
   # window to the Haiku `tab` label as the session's focus settles. Set here so
   # the user needs no ~/.tmux.conf change.
+  #
+  # The project rides in front of the label so a titlebar names its project
+  # before any label has landed, and so two sessions that settle on the same
+  # topic stay tellable apart from the window list. Only the titlebar gets the
+  # prefix — the window name itself stays the bare label, so the tmux status
+  # line does not spend width repeating a session name that already sits a
+  # column to its left.
   tmux set -t "$session_name" set-titles on
-  tmux set -t "$session_name" set-titles-string '#W'
+  tmux set -t "$session_name" set-titles-string \
+    "$(session_title_name "$proj_name" "$session_name" "$clone_suffix") · #W"
 
   attach "$session_name" "$work_dir"
 }
