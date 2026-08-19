@@ -407,6 +407,110 @@ func TestTeardownCommandOverride(t *testing.T) {
 	}
 }
 
+// Unset is "use the layout's own default" (30% beside claude, 20% below it),
+// so empty has to survive validate() the way an unset layout does.
+func TestLaunchShellPaneKeysDefaultEmpty(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Launch.ShellSize != "" {
+		t.Errorf("Launch.ShellSize = %q, want empty by default", cfg.Launch.ShellSize)
+	}
+	if cfg.Launch.ShellCommand != "" {
+		t.Errorf("Launch.ShellCommand = %q, want empty by default", cfg.Launch.ShellCommand)
+	}
+}
+
+// Both spellings tmux's `split-window -l` accepts: a percentage of the space
+// being split, and an absolute count of columns or rows.
+func TestLaunchShellSizeAcceptsPercentAndCount(t *testing.T) {
+	for _, size := range []string{"30%", "45%", "80", "5", "100%"} {
+		writeConfig(t, "launch:\n  shell_size: \""+size+"\"\n")
+
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v for shell_size %q", err, size)
+		}
+		if cfg.Launch.ShellSize != size {
+			t.Errorf("Launch.ShellSize = %q, want %q", cfg.Launch.ShellSize, size)
+		}
+	}
+}
+
+// Anything else would reach `tmux split-window -l` verbatim and fail at launch
+// with tmux's own error rather than this file's — reject it here, where the
+// message can name the key that is wrong.
+func TestLaunchShellSizeInvalidValueIsFatal(t *testing.T) {
+	for _, size := range []string{"wide", "30 %", "%30", "-10", "30%%", "1.5", "0"} {
+		writeConfig(t, "launch:\n  shell_size: \""+size+"\"\n")
+
+		_, err := loadConfig()
+		if err == nil {
+			t.Fatalf("loadConfig() error = nil for shell_size %q, want an error", size)
+		}
+		if !strings.Contains(err.Error(), "launch.shell_size") {
+			t.Errorf("error = %q, want it to mention launch.shell_size", err.Error())
+		}
+	}
+}
+
+// An explicitly empty size is the same as an absent one — the layout default —
+// not a value to reject.
+func TestLaunchShellSizeEmptyStringIsLegal(t *testing.T) {
+	writeConfig(t, "launch:\n  shell_size: \"\"\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v, want nil for an explicitly empty shell_size", err)
+	}
+	if cfg.Launch.ShellSize != "" {
+		t.Errorf("Launch.ShellSize = %q, want empty", cfg.Launch.ShellSize)
+	}
+}
+
+// The command is a shell command line, not a program name: it is spliced into
+// the pane's command verbatim, so arguments, flags and quoting all have to
+// survive decoding untouched.
+func TestLaunchShellCommandRoundTrips(t *testing.T) {
+	const cmd = `gh-hud --repo "$(basename $PWD)" -w`
+	writeConfig(t, "launch:\n  shell_command: '"+cmd+"'\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.Launch.ShellCommand != cmd {
+		t.Errorf("Launch.ShellCommand = %q, want %q", cfg.Launch.ShellCommand, cmd)
+	}
+}
+
+// bin/claudemux reads both keys through `config get`, so a value that loads
+// but cannot be resolved by its dotted path never reaches the launcher.
+func TestConfigGetResolvesShellPaneKeys(t *testing.T) {
+	writeConfig(t, "launch:\n  shell_size: 40%\n  shell_command: gh-hud\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	for path, want := range map[string]string{
+		"launch.shell_size":    "40%",
+		"launch.shell_command": "gh-hud",
+	} {
+		got, ok := configLookup(cfg, path)
+		if !ok {
+			t.Errorf("configLookup(%q) not found", path)
+			continue
+		}
+		if got != want {
+			t.Errorf("configLookup(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
 // project_dirs ships empty: without roots, resolve_dir behaves exactly as it
 // did before the setting existed.
 func TestLoadConfigProjectDirsDefaultEmpty(t *testing.T) {

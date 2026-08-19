@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -98,6 +99,27 @@ type LaunchConfig struct {
 	// offer onboarding. Values: shell-right, no-shell, shell-bottom,
 	// head-bottom.
 	Layout string `yaml:"layout"`
+	// ShellSize is how much of the split the shell pane takes, passed straight
+	// to `tmux split-window -l`: a percentage of the space being divided
+	// ("30%") or an absolute count ("80"). ONE key for what is a width in
+	// shell-right and head-bottom but a height in shell-bottom, because it is
+	// one thing to the person setting it — how big the shell pane is — and the
+	// layout already decides which dimension that means. no-shell ignores it.
+	//
+	// Empty means the layout's own default (30% beside claude, 20% below it),
+	// so a config that never mentions it builds exactly the sessions it built
+	// before this key existed.
+	ShellSize string `yaml:"shell_size"`
+	// ShellCommand is a command line the shell pane runs at launch instead of
+	// coming up at a bare prompt. It is a command LINE, not a program name:
+	// bin/claudemux splices it into the pane's command verbatim, so flags,
+	// quoting and substitutions are the user's to write and the user's to get
+	// right. The pane drops to a normal shell when it exits, so a typo or a
+	// missing binary costs an error message rather than the pane.
+	//
+	// Empty (the default) is a plain shell — the behavior this key was added
+	// to make optional.
+	ShellCommand string `yaml:"shell_command"`
 	// ProjectDirs are the roots bin/claudemux searches when a launch query is
 	// neither a real directory nor a zoxide hit — the last resort before the
 	// launcher gives up. Ships empty, which keeps resolution exactly as it was
@@ -108,6 +130,16 @@ type LaunchConfig struct {
 	// a leading `~`, so a caller never has to.
 	ProjectDirs []string `yaml:"project_dirs"`
 }
+
+// legalShellSize is the set of values `tmux split-window -l` accepts: a
+// positive count of columns/rows, optionally suffixed with % to make it a
+// share of the space being split. Zero is excluded — a zero-sized pane is
+// not a smaller shell pane, it is a request tmux refuses.
+//
+// bin/claudemux re-checks the SAME shape with a `case` glob for the
+// per-project override in .claudemux.yml, which never passes through this
+// file. Keep the two in step.
+var legalShellSize = regexp.MustCompile(`^[1-9][0-9]*%?$`)
 
 // legalLayouts are the pane arrangements bin/claudemux knows how to build.
 // Kept as a slice (not a map) because validate() also uses it to render the
@@ -288,6 +320,14 @@ func (c Config) validate() error {
 	if c.Launch.Layout != "" && !slices.Contains(legalLayouts, c.Launch.Layout) {
 		return fmt.Errorf("launch.layout is %q: must be one of %s",
 			c.Launch.Layout, strings.Join(legalLayouts, ", "))
+	}
+	// Empty is legal (use the layout's default size). Anything else reaches
+	// `tmux split-window -l` verbatim, where a bad value fails at launch with
+	// tmux's error and no mention of the file it came from — so it is rejected
+	// here instead, where the message can name the key.
+	if c.Launch.ShellSize != "" && !legalShellSize.MatchString(c.Launch.ShellSize) {
+		return fmt.Errorf("launch.shell_size is %q: must be a percentage (\"30%%\") or a column/row count (\"80\")",
+			c.Launch.ShellSize)
 	}
 	return nil
 }

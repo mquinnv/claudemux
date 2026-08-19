@@ -31,6 +31,11 @@ itself to 4 rows on every resize), `claude` runs below it, and a shell takes the
 of the remaining width, spanning that remaining height — it sits beside `claude`, not
 beside the head.
 
+That 30% is the default, not a fixed quantity: `launch.shell_size` resizes the shell pane
+and `launch.shell_command` gives it something to run instead of a bare prompt — both
+settable per project. See **Sizing the shell pane** and **Running something in the shell
+pane** below. The head's 4 rows are not configurable; that is what its four lines need.
+
 The head and `claude` panes **run their program directly** — they are not shells with a
 command typed into them, so a new session never shows a prompt or an echoed command. Two
 consequences: exiting `claude` closes its pane instead of dropping you at a prompt (the
@@ -59,6 +64,54 @@ The first time you launch `claudemux` — bare, or pointed at a directory — wi
 layout chosen yet, `setup` runs automatically before the session opens. Cancelling it
 (or a save failure) isn't fatal: the launch continues on `shell-right`, and you can run
 `claudemux setup` again whenever you want to change it.
+
+### Sizing the shell pane
+
+`launch.shell_size` in `config.yml` sets how much of the split the shell pane takes —
+`"40%"` of the space being divided, or `"80"` for an absolute count of columns or rows.
+Unset means the layout's own default: 30% beside `claude`, 20% below it.
+
+One setting, because there is one thing being sized. It's a *width* in `shell-right` and
+`head-bottom` and a *height* in `shell-bottom` — the layout already decides which
+dimension "how big is the shell pane" means, so a second key would always leave one of
+the two inert. `no-shell` ignores it.
+
+A project overrides it with `shell_size:` in its `.claudemux.yml`. A value that isn't a
+positive count with an optional `%` is rejected: in `config.yml` at startup, by name, the
+way every other bad key is; in a project file — which never passes through that check —
+it's ignored, and the next source down applies, so one project's typo can't throw away
+your global setting.
+
+### Running something in the shell pane
+
+`launch.shell_command` gives the shell pane a command to run at launch instead of coming
+up at a bare prompt — a dashboard, a log tail, a watcher. It's a command *line*, so flags,
+quoting and substitutions are yours to write:
+
+```yaml
+launch:
+  shell_size: 40%
+  shell_command: gh-hud
+```
+
+Set it per project with `shell_command:` in `.claudemux.yml`, which is where a
+project-scoped invocation belongs:
+
+```yaml
+shell_command: gh-hud --repo mquinnv/claudemux
+```
+
+**The pane is still your shell.** The command runs, and when it exits — you quit it, it
+finishes, it was never installed — you're left at a normal prompt in the project
+directory, with whatever the command printed above it. Ctrl-C quits the command, not the
+pane; the pane closes when you exit that shell, exactly as a shell pane always has.
+Nothing is typed into a prompt to make this happen, so there's no echoed command to watch
+scroll past at launch.
+
+The command is parsed by `sh`, not by your login shell, so write it in POSIX syntax even
+if you live in fish. And in a project with an `op_env`, it starts *after* the 1Password
+unlock rather than at launch — around 25 seconds in, alongside `claude` — so that it comes
+up with the secrets in its environment rather than without them.
 
 ## The switchboard
 
@@ -271,6 +324,8 @@ onepassword:
 launch:
   auto_worktree: false
   layout: ""
+  shell_size: ""
+  shell_command: ""
   project_dirs: []
 
 teardown:
@@ -304,6 +359,17 @@ teardown:
   new sessions: `shell-right` (default), `no-shell`, `shell-bottom`, or `head-bottom` —
   see **Layouts** above. Empty (never chosen) behaves as `shell-right`. Set it with
   `claudemux setup`, the interactive picker, rather than hand-editing this file.
+- `launch.shell_size` — consumed by `claudemux`, not the TUI. How much of the split the
+  shell pane takes: a percentage (`"40%"`) or a column/row count (`"80"`). Empty means the
+  layout's default — 30% beside `claude`, 20% below it. Overridden per project with
+  `shell_size:` in `.claudemux.yml`. A value that is neither is a startup error here; in a
+  project file it is ignored in favor of the next source down. See **Sizing the shell
+  pane** above.
+- `launch.shell_command` — consumed by `claudemux`, not the TUI. A command line the shell
+  pane runs at launch instead of coming up at a bare prompt. The pane drops to a normal
+  shell when the command exits, so a command that isn't installed costs an error message
+  rather than the pane. Overridden per project with `shell_command:` in `.claudemux.yml`.
+  Empty (the default) is a plain shell. See **Running something in the shell pane** above.
 - `launch.auto_worktree` — consumed by `claudemux`, not the TUI. When `true`, a launch
   in a git repo's main checkout **on its default branch** marks the session as wanting a
   worktree rather than creating one at launch: `claudemux` prefixes both the `claude`
@@ -366,9 +432,15 @@ launch it in. See [`.claudemux.yml.example`](.claudemux.yml.example) for the ful
 color: blue          # tmux status-bar / iTerm2 tab color
 name: my-project      # passed to `claude -n`
 worktree: true        # opt this project in/out of the auto-worktree marker (optional)
+shell_size: 40%       # how big this project's shell pane is (optional)
+shell_command: gh-hud --repo mquinnv/claudemux  # run it in that pane (optional)
 op_env: abcdefghijklmnopqrstuvwxyz  # 1Password Environment ID (optional)
 op_account: my.1password.com        # 1Password account for op_env (optional)
 ```
+
+`shell_size` and `shell_command` override `launch.shell_size` / `launch.shell_command`
+from `config.yml`, which is what makes a project-scoped invocation — a dashboard pointed
+at *this* repo — a property of the repo rather than of your global config.
 
 **`.claudemux.yml` is gitignored by this repo on purpose, and `op_env` should not be
 committed** — it's an identifier that points at your secrets. Copy the example instead
