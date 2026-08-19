@@ -192,9 +192,10 @@ pane too short to show both the box and the fleet, the box is dropped and the
 lobby renders exactly as it would with no preview at all.
 
 Press `n` to start a **new session** without leaving the lobby: the status
-line becomes a prompt, you type a project directory or zoxide query — the
-same thing you'd pass to `claudemux` on the command line — and `Enter` runs
-the equivalent of `claudemux -n` on it. The new session joins the list and
+line becomes a prompt, you type a project directory, zoxide query, or project
+name — the same thing you'd pass to `claudemux` on the command line — and `Enter` runs
+the equivalent of `claudemux -n` on it. A leading `~` expands here even though
+no shell is involved. The new session joins the list and
 you're switched straight to it; `Esc` cancels. While the prompt is open (or
 the launch is in flight) the conductor holds off dispatching you, so being
 carried away mid-keystroke isn't a thing. Under the hood this uses
@@ -266,7 +267,7 @@ they're your responsibility:
 | `claudemux-head` on `PATH` | `claudemux` | the head pane dies at "command not found" and is left on screen saying so; an `op_env` session shows that in place of its waiting screen, then still starts `claude` once the secrets land |
 | `jq` | `hooks/claudemux-map.sh`, `hooks/claudemux-worktree.sh`, `hooks/claudemux-ask.sh` | the hook exits silently; see below |
 | `git` | `claudemux` (1Password org inference) | `op_account` in `.claudemux.yml` or `onepassword.default_account` still work |
-| `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` only works for literal directories, not `z`-style queries |
+| `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` resolves literal directories and `launch.project_dirs` matches, but not `z`-style frecency queries |
 | `op` (1Password CLI) | `claudemux` (`op_env` injection) | sessions launch without injected secrets |
 | iTerm2 | `claudemux` (tab coloring) | other terminals silently ignore the OSC escape sequences |
 
@@ -325,6 +326,7 @@ launch:
   layout: ""
   shell_size: ""
   shell_command: ""
+  project_dirs: []
 
 teardown:
   command: /done
@@ -390,6 +392,28 @@ teardown:
   `claudemux -w <existing-session>` attaches without marking it, silently ignoring
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
+- `launch.project_dirs` — consumed by `claudemux`, not the TUI. The roots to search by
+  name when a launch query is neither a real directory nor a zoxide hit — the fallback
+  that keeps `claudemux <name>` (and the switchboard's `n` key) from simply failing on a
+  repo you have never opened from the shell. Ships empty, which leaves resolution exactly
+  as it was: directory, then zoxide, then nothing.
+
+  ```yaml
+  launch:
+    project_dirs:
+      - ~/Projects
+      - ~/work
+  ```
+
+  A leading `~` expands. Each root is searched two levels deep — `<root>/<project>` and
+  `<root>/<org>/<project>`, the layout you end up with once repos are grouped by GitHub
+  org — and dotted directories are skipped, so a project's own `.claude/worktrees` never
+  turns up as a launch target. A directory name matches the query exactly, by prefix, or
+  by substring, in that order of preference: *every* exact hit beats *every* prefix hit,
+  wherever it sits. Within one of those tiers the shallower path wins, then the earlier
+  root, then alphabetical — so a query always resolves to the same project, and the order
+  you list your roots in is the order they win ties. Nothing is ever ambiguous enough to
+  prompt you: it either launches one project or reports that nothing matched.
 - `teardown.command` — the wrap-up command the status pane types into the `claude`
   pane when you press `x`, and the one it watches for when you type it there yourself
   (see **Tearing down a session** below). Default `/done`. Set it to `""` to skip that
