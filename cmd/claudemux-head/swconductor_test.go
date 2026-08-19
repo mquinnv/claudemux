@@ -93,13 +93,97 @@ func TestConductorEscortAdvancesOnResolve(t *testing.T) {
 func TestConductorEscortReturnsToLobbyWhenQueueEmpty(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	c := newConductor()
-	c.step(snapAt("switchboard", waiting("a", 100)), now)
-	act, ok := c.step(snapAt("a", busy("a")), now)
+	// Two sessions in the fleet: the lobby is worth returning to, so the
+	// sole-session hold below does not apply.
+	c.step(snapAt("switchboard", waiting("a", 100), busy("b")), now)
+	act, ok := c.step(snapAt("a", busy("a"), busy("b")), now)
 	if !ok || act.Target != "switchboard" {
 		t.Fatalf("act = %+v ok=%v", act, ok)
 	}
 	if c.phase != swParked {
 		t.Errorf("phase = %v, want parked", c.phase)
+	}
+}
+
+func TestConductorHoldsOnSoleSession(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	// "a" hands back with nothing else in the fleet: the lobby has nothing
+	// to show and nothing to dispatch, so the client stays where it is.
+	if act, ok := c.step(snapAt("a", busy("a")), now); ok {
+		t.Fatalf("sole session must not be conducted away from, act=%+v", act)
+	}
+	if c.phase != swEscorting || c.escortee != "a" {
+		t.Errorf("phase=%v escortee=%q, want escorting/a", c.phase, c.escortee)
+	}
+	// The hold is not a one-tick reprieve.
+	if _, ok := c.step(snapAt("a", busy("a")), now.Add(time.Minute)); ok {
+		t.Error("hold must persist across ticks")
+	}
+}
+
+func TestConductorSoleSessionHoldReleasesWhenAnotherWaits(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	c.step(snapAt("a", busy("a")), now) // holding
+	act, ok := c.step(snapAt("a", busy("a"), waiting("b", 900)), now.Add(time.Minute))
+	if !ok || act.Target != "b" {
+		t.Fatalf("a new waiter must collect the user, act=%+v ok=%v", act, ok)
+	}
+	if c.phase != swEscorting || c.escortee != "b" {
+		t.Errorf("phase=%v escortee=%q, want escorting/b", c.phase, c.escortee)
+	}
+}
+
+// Holding keeps the escortee set, which is what lets the existing walk-away
+// branch still recognize the user moving themselves.
+func TestConductorSoleSessionHoldYieldsToManualLobbyReturn(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	c.step(snapAt("a", busy("a")), now) // holding
+	if _, ok := c.step(snapAt("switchboard", busy("a")), now.Add(time.Second)); ok {
+		t.Fatal("returning to the lobby yourself is not a dispatch")
+	}
+	if c.phase != swParked {
+		t.Errorf("phase = %v, want parked", c.phase)
+	}
+	// Parked again: a fresh waiting episode still dispatches normally.
+	act, ok := c.step(snapAt("switchboard", waiting("a", 300)), now.Add(2*time.Second))
+	if !ok || act.Target != "a" {
+		t.Errorf("act = %+v ok=%v", act, ok)
+	}
+}
+
+// A vanished sole session is not a session to hold on to: the client must be
+// returned to the lobby, or it sits in a tmux session that is being killed.
+func TestConductorSoleSessionGoneReturnsToLobby(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	act, ok := c.step(snapAt("a"), now)
+	if !ok || act.Target != "switchboard" {
+		t.Fatalf("act = %+v ok=%v", act, ok)
+	}
+	if c.phase != swParked {
+		t.Errorf("phase = %v, want parked", c.phase)
+	}
+}
+
+func TestStatusLineReportsSoleSessionHold(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	c.step(snapAt("a", busy("a")), now)
+	got := c.statusLine(snapAt("a", busy("a")), now)
+	if want := "holding — only session in the fleet"; got != want {
+		t.Errorf("statusLine = %q, want %q", got, want)
+	}
+	// Still escorting while the session actually waits.
+	if got := c.statusLine(snapAt("a", waiting("a", 100)), now); got != "escorting → a · 1 waiting" {
+		t.Errorf("statusLine = %q, want the escorting line", got)
 	}
 }
 

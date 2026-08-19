@@ -67,7 +67,10 @@ same thing, explicitly): a full-screen lobby session that watches
 every claudemux session and automatically carries your tmux client to whichever one
 is waiting on input — Claude's turn ended, or it asked you a question — oldest first.
 Answer, and it moves you to the next waiting session; when nothing waits, you're
-returned to the lobby.
+returned to the lobby — unless the session you're in is the only one there is, in
+which case you stay put. A lobby whose entire fleet is the session you were just
+carried out of has nothing to show you, so the conductor holds instead. The moment
+a second session starts waiting, it collects you as usual.
 
 It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
