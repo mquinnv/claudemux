@@ -67,7 +67,10 @@ same thing, explicitly): a full-screen lobby session that watches
 every claudemux session and automatically carries your tmux client to whichever one
 is waiting on input — Claude's turn ended, or it asked you a question — oldest first.
 Answer, and it moves you to the next waiting session; when nothing waits, you're
-returned to the lobby.
+returned to the lobby — unless the session you're in is the only one there is, in
+which case you stay put. A lobby whose entire fleet is the session you were just
+carried out of has nothing to show you, so the conductor holds instead. The moment
+a second session starts waiting, it collects you as usual.
 
 It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
@@ -516,6 +519,27 @@ work landed after the ready gate opened, so it was withdrawn rather than trusted
 
 Outside tmux `x` does nothing at all: there is no pane to type into and no session to
 kill.
+
+**Tearing down without a wrap-up.** Press `X` (capital) twice. The first press arms —
+`⏻ kill session? press X` — and the second sends `/exit`, waits for `claude` to be
+gone, and kills the tmux session. Nothing is typed into the `claude` pane, no wrap-up
+runs, and no gate has to open.
+
+This is the escape hatch for when the gated ladder can't get its evidence. The `x`
+ladder only offers the kill once it can *prove* the wrap-up succeeded, and that proof
+is destroyed by things that have nothing to do with whether the work is finished: a
+transcript rotation mid-wrap-up withdraws the watch, a `/done` that tidies up but
+leaves the branch unpushed never opens the gate, and a session with no worktree and no
+upstream can't open it at all. Re-running a wrap-up that has already run, to coax a
+chip out of the status pane, is the wrong fix — `X` says "I've decided this session is
+finished" and needs nothing but the two presses.
+
+The two ladders never cross. `X` does nothing while an `x` teardown is in flight, and
+`x` does nothing while `X` is armed, so the key that skips wrap-ups can never commit
+one that's still running. `esc` cancels either, and an `X` arm is withdrawn the moment
+any new prompt lands in the session — including the wrap-up command itself, which is
+exactly when a one-keystroke kill should stop being armed. Outside tmux `X` does
+nothing, same as `x`.
 
 ## tmux notes
 

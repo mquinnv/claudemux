@@ -207,6 +207,11 @@ func TestTeardownChip(t *testing.T) {
 		{"sent but blocked", teardownSent, true, false, "", "", time.Time{}, "⏻ worktree still present"},
 		{"ready", teardownReady, false, false, "", "", time.Time{}, "⏻ press x to tear down"},
 		{"exiting", teardownExiting, false, false, "", "", time.Time{}, "⏻ exiting claude…"},
+		// The direct ladder names its own key, so the chip doubles as the
+		// only place the second press is advertised.
+		{"direct", teardownDirect, false, false, "", "", time.Time{}, "⏻ kill session? press X"},
+		// Nothing was probed, so a stale blocked/auto flag cannot reword it.
+		{"direct ignores blocked and auto", teardownDirect, true, true, "dirty tree", "", time.Time{}, "⏻ kill session? press X"},
 		{"fresh abort note", teardownIdle, false, false, "", "claude didn't exit", now.Add(-2 * time.Second), "⏻ claude didn't exit"},
 		{"expired abort note", teardownIdle, false, false, "", "claude didn't exit", now.Add(-6 * time.Second), ""},
 		{"note is ignored mid-teardown", teardownSent, false, false, "", "stale", now, "⏻ wrapping up…"},

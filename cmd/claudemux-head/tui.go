@@ -1012,6 +1012,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, requestConductToggleCmd(now)
 		case "x":
 			return m.teardownKey()
+		case "X":
+			return m.teardownDirectKey()
 		case "r":
 			m.tabPinned = !m.tabPinned
 			if m.tabPinned {
@@ -1122,6 +1124,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					!teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
 					m = m.abortTeardown("session resumed", msg.time)
 				}
+				if m.teardown == teardownDirect && m.lastTyped != prevTyped {
+					m = m.abortTeardown("session resumed", msg.time)
+				}
 				m.lastUpdate = msg.time
 				return m, nil
 			}
@@ -1175,6 +1180,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.teardown {
 		case teardownReady:
 			if m.lastTyped != prevTyped && !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
+				return m.abortTeardown("session resumed", msg.time), allPub
+			}
+		case teardownDirect:
+			// No wrap-up exception here, unlike the ready phase above: a
+			// direct arm is a standing decision to end this session, and the
+			// wrap-up command starting up is precisely when a one-keystroke
+			// kill must stop being armed.
+			if m.lastTyped != prevTyped {
 				return m.abortTeardown("session resumed", msg.time), allPub
 			}
 		}
@@ -2086,6 +2099,45 @@ func (m model) teardownKey() (model, tea.Cmd) {
 		return m, teardownSendCmd(m.selfPane, m.paneDir, m.teardownCmdText)
 
 	case teardownReady:
+		m.teardown = teardownExiting
+		m.teardownAt = time.Now()
+		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
+	}
+	return m, nil
+}
+
+// teardownDirectKey advances the direct teardown ladder one press of `X`.
+//
+// Two presses, no wrap-up, no gate: the first arms, the second commits to the
+// same exit-then-kill sequence the gated ladder ends with. See teardownDirect
+// for why a ladder that skips the evidence exists at all.
+//
+// The two ladders are deliberately disjoint. `X` does nothing from
+// teardownSent / teardownReady / teardownExiting, and `x` does nothing from
+// teardownDirect (teardownKey's switch simply has no case for it), so a
+// wrap-up in flight can never be committed by the key that skips wrap-ups, and
+// an arm that proved nothing can never be mistaken for one that did. `esc`
+// cancels either.
+func (m model) teardownDirectKey() (model, tea.Cmd) {
+	switch m.teardown {
+	case teardownIdle:
+		if m.selfPane == "" {
+			return m, nil // not in tmux: nothing to kill, same as teardownKey
+		}
+		teardownLogf("direct-arm jsonl=%s", m.jsonlPath)
+		m.teardown = teardownDirect
+		m.teardownAt = time.Now()
+		// Nothing is probed on this ladder, so the fields the gate uses are
+		// cleared rather than captured: a stale blocked/auto reading left over
+		// from an earlier attempt must not reach the chip.
+		m.teardownBlocked = false
+		m.teardownBlockReason = ""
+		m.teardownAuto = false
+		m.teardownNote = ""
+		return m, nil
+
+	case teardownDirect:
+		teardownLogf("direct-commit jsonl=%s", m.jsonlPath)
 		m.teardown = teardownExiting
 		m.teardownAt = time.Now()
 		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")

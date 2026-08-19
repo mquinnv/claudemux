@@ -154,6 +154,25 @@ func (c *conductor) clearPaused() {
 	c.pausedHandedBack = false
 }
 
+// soleSession reports whether name is the entire fleet — the only claudemux
+// session the lobby can see. Conducting away from one is pure churn: the
+// destination lobby lists nothing but the session being left.
+func soleSession(s swSnapshot, name string) bool {
+	return len(s.Sessions) == 1 && s.Sessions[0].Name == name
+}
+
+// holdingSole reports whether the conductor is sitting on the fleet's only
+// session with its turn over — the state step() enters instead of returning
+// the client to a lobby with nothing in it. Derived rather than stored so
+// there is one definition of the hold, and so it goes away the instant the
+// fleet grows or the session starts waiting again.
+func (c *conductor) holdingSole(s swSnapshot) bool {
+	if c.phase != swEscorting || !soleSession(s, c.escortee) {
+		return false
+	}
+	return !isWaiting(s.Sessions[0].State)
+}
+
 // step advances the conductor by one poll. ok=true carries the single
 // switch-client to issue this tick.
 func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
@@ -205,11 +224,21 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 			return swAction{}, false
 		}
 		if sess, ok := s.session(c.escortee); !ok || !isWaiting(sess.State) {
-			c.escortee = ""
 			if len(queue) > 0 {
 				c.escortee = queue[0].Name
 				return swAction{Client: c.client, Target: c.escortee}, true
 			}
+			// Nowhere else to be: the escortee is the whole fleet, so the
+			// lobby would show one row for the session the client is already
+			// sitting in. Hold instead of bouncing the user out of the work
+			// they just handed back. The escortee is deliberately KEPT — it is
+			// what the walk-away branch above compares against, so a manual
+			// return to the lobby still parks, and the next session to start
+			// waiting still comes through this same branch and collects them.
+			if soleSession(s, c.escortee) {
+				return swAction{}, false
+			}
+			c.escortee = ""
 			c.phase = swParked
 			return swAction{Client: c.client, Target: s.Lobby}, true
 		}
@@ -263,6 +292,9 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	case swPaused:
 		return "paused — you navigated away; finish there or return here to resume"
 	case swEscorting:
+		if c.holdingSole(s) {
+			return "holding — only session in the fleet"
+		}
 		return fmt.Sprintf("escorting → %s · %d waiting%s", c.escortee, n, suffix)
 	}
 	return fmt.Sprintf("conducting · %d waiting%s", n, suffix)

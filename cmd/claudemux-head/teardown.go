@@ -135,8 +135,9 @@ func gitCleanReason(ctx context.Context, dir string) string {
 }
 
 // teardownPhase is where a session teardown has got to. It advances on the `x`
-// key and on poll ticks; every phase but teardownIdle is visible in the status
-// line, because a key that arms a kill-session must never be armed silently.
+// and `X` keys and on poll ticks; every phase but teardownIdle is visible in
+// the status line, because a key that arms a kill-session must never be armed
+// silently.
 type teardownPhase int
 
 const (
@@ -151,6 +152,22 @@ const (
 	// teardownExiting: /exit has been sent; waiting for claude to actually be
 	// gone before killing the session.
 	teardownExiting
+	// teardownDirect: `X` armed a teardown that skips the wrap-up entirely —
+	// nothing typed into the claude pane, no ready gate to earn. The next `X`
+	// exits claude and kills the session.
+	//
+	// It exists because the gated ladder's evidence is not always obtainable.
+	// That ladder only offers the kill once it can prove the wrap-up
+	// succeeded (the worktree is gone, or the tree is clean and pushed), and
+	// several things legitimately destroy the proof: a transcript rotation
+	// mid-wrap-up aborts the watch, a `/done` that finishes its work but
+	// leaves the branch unpushed never opens the gate, and a session with no
+	// worktree and no upstream cannot open it at all. The user is then left
+	// re-running a wrap-up that has already run to coax a chip out of the
+	// head. This ladder answers the different question — "I have decided this
+	// session is finished, end it" — and so needs no evidence beyond two
+	// deliberate presses of a key nothing else uses.
+	teardownDirect
 )
 
 // teardownNoteTTL is how long an abort reason stays on the status line. Long
@@ -329,6 +346,12 @@ func teardownChip(p teardownPhase, blocked, auto bool, reason, note string, note
 		return "⏻ press x to tear down"
 	case teardownExiting:
 		return "⏻ exiting claude…"
+	case teardownDirect:
+		// Names its own key: `x` here is a deliberate no-op (see
+		// teardownDirectKey), so the chip has to say which press commits.
+		// blocked/auto are ignored — nothing was probed, so neither can be
+		// anything but stale.
+		return "⏻ kill session? press X"
 	}
 	if note != "" && now.Sub(noteAt) < teardownNoteTTL {
 		return "⏻ " + note

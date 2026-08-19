@@ -2542,6 +2542,114 @@ func TestTeardownKeyFromReadyExits(t *testing.T) {
 	}
 }
 
+// The direct ladder: `X` arms and `X` confirms, with no wrap-up command typed
+// and no ready gate to earn. It exists because the gated ladder depends on
+// evidence that a `/done` can fail to leave behind — see teardownDirect.
+func TestTeardownDirectKeyArmsFromIdle(t *testing.T) {
+	m := teardownTestModel()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	got := next.(model)
+	if got.teardown != teardownDirect {
+		t.Errorf("phase = %v, want teardownDirect", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("arming the direct ladder must type nothing into the claude pane")
+	}
+	if got.teardownAuto {
+		t.Error("a keypress is not an auto-arm")
+	}
+}
+
+// Outside tmux there is nothing to kill, same as the gated ladder.
+func TestTeardownDirectKeyInertOutsideTmux(t *testing.T) {
+	m := teardownTestModel()
+	m.selfPane = ""
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	if got := next.(model); got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("command issued outside tmux")
+	}
+}
+
+func TestTeardownDirectKeyConfirmExits(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownDirect
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	if got := next.(model); got.teardown != teardownExiting {
+		t.Errorf("phase = %v, want teardownExiting", got.teardown)
+	}
+	if cmd == nil {
+		t.Error("no command issued to exit claude")
+	}
+}
+
+// The two ladders never cross: a half-finished wrap-up cannot be committed by
+// `X`, and a direct arm cannot be committed by `x`.
+func TestTeardownLaddersDoNotCross(t *testing.T) {
+	for _, phase := range []teardownPhase{teardownSent, teardownReady, teardownExiting} {
+		m := teardownTestModel()
+		m.teardown = phase
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+		if got := next.(model); got.teardown != phase {
+			t.Errorf("X from %v moved to %v", phase, got.teardown)
+		}
+		if cmd != nil {
+			t.Errorf("X from %v issued a command", phase)
+		}
+	}
+	m := teardownTestModel()
+	m.teardown = teardownDirect
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if got := next.(model); got.teardown != teardownDirect {
+		t.Errorf("x from teardownDirect moved to %v", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("x from teardownDirect issued a command")
+	}
+}
+
+func TestEscCancelsDirectTeardown(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownDirect
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if got := next.(model); got.teardown != teardownIdle {
+		t.Errorf("phase = %v, want teardownIdle", got.teardown)
+	}
+	if cmd != nil {
+		t.Error("esc during a direct teardown issued a command (quit?)")
+	}
+}
+
+// A direct arm carries no evidence at all — it is a standing decision to kill
+// this session. Any prompt landing afterwards means the session is being used
+// again, so the decision is dropped. Unlike the gated ladder there is no
+// exception for the wrap-up command: a `/done` starting up is exactly when a
+// one-keystroke kill must not stay armed.
+func TestTeardownDirectAbortsOnResumedWork(t *testing.T) {
+	base, _ := pollPrompt(teardownTestModel(), "start the work", time.Now())
+
+	for _, prompt := range []string{"one more thing", "/done"} {
+		m := base
+		m.teardown = teardownDirect
+		got, _ := pollPrompt(m, prompt, time.Now())
+		if got.teardown != teardownIdle {
+			t.Errorf("prompt %q: phase = %v, want teardownIdle", prompt, got.teardown)
+		}
+		if got.teardownNote != "session resumed" {
+			t.Errorf("prompt %q: note = %q, want %q", prompt, got.teardownNote, "session resumed")
+		}
+	}
+
+	m := base
+	m.teardown = teardownDirect
+	got, _ := pollPrompt(m, "", time.Now())
+	if got.teardown != teardownDirect {
+		t.Errorf("phase = %v, want teardownDirect unchanged when lastTyped didn't move", got.teardown)
+	}
+}
+
 // esc cancels an armed teardown instead of quitting the head.
 func TestEscCancelsTeardown(t *testing.T) {
 	m := teardownTestModel()
