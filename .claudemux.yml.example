@@ -18,6 +18,20 @@ name: my-project
 # applies); `false` exempts this project. Omit to follow the global setting.
 # worktree: true
 
+# How much of the split this project's shell pane takes: a percentage of the
+# space being divided, or an absolute count of columns/rows ("80"). Overrides
+# launch.shell_size in ~/.config/claudemux/config.yml. Omit for the layout's
+# own default — 30% beside claude, 20% below it. It sizes a WIDTH in
+# shell-right and head-bottom, a HEIGHT in shell-bottom.
+# shell_size: 40%
+
+# A command line to run in the shell pane at launch instead of leaving it at a
+# bare prompt — a dashboard scoped to this repo, a log tail, a watcher.
+# Overrides launch.shell_command. The pane drops to a normal shell when the
+# command exits, so quitting it (or mistyping it) leaves you a prompt rather
+# than closing the pane. Parsed by sh, not by your login shell.
+# shell_command: gh-hud --repo mquinnv/claudemux
+
 # 1Password Environment ID. When set, claudemux reads that Environment once at
 # launch and injects its variables into the tmux session environment, so every
 # pane inherits them and Claude never calls `op` itself. Omit to launch without
