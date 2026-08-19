@@ -128,6 +128,19 @@ ensure_hook
 # themselves live in cmd/claudemux-head/projectfind.go.
 resolve_dir() {
   local q="$1"
+  # A leading ~ has to be expanded here, not left to the shell: callers that
+  # are not shells reach this too. The switchboard's `n` key runs the launcher
+  # through exec() with no shell in between, so a path typed as ~/Projects/foo
+  # at that prompt arrives literally and would fail every lookup below. On the
+  # command line the user's shell has already done this, so it is a no-op.
+  # SC2088 fires on the quoted ~ below, but these are case PATTERNS: a literal
+  # tilde is precisely what has to be matched, and expanding it here would make
+  # the patterns match nothing.
+  # shellcheck disable=SC2088
+  case "$q" in
+    "~")   q="$HOME" ;;
+    "~/"*) q="$HOME/${q#\~/}" ;;
+  esac
   if [ -d "$q" ]; then
     (cd "$q" && pwd)
     return 0

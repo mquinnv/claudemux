@@ -141,7 +141,8 @@ lobby renders exactly as it would with no preview at all.
 Press `n` to start a **new session** without leaving the lobby: the status
 line becomes a prompt, you type a project directory, zoxide query, or project
 name — the same thing you'd pass to `claudemux` on the command line — and `Enter` runs
-the equivalent of `claudemux -n` on it. The new session joins the list and
+the equivalent of `claudemux -n` on it. A leading `~` expands here even though
+no shell is involved. The new session joins the list and
 you're switched straight to it; `Esc` cancels. While the prompt is open (or
 the launch is in flight) the conductor holds off dispatching you, so being
 carried away mid-keystroke isn't a thing. Under the hood this uses
