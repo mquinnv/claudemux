@@ -98,6 +98,15 @@ type LaunchConfig struct {
 	// offer onboarding. Values: shell-right, no-shell, shell-bottom,
 	// head-bottom.
 	Layout string `yaml:"layout"`
+	// ProjectDirs are the roots bin/claudemux searches when a launch query is
+	// neither a real directory nor a zoxide hit — the last resort before the
+	// launcher gives up. Ships empty, which keeps resolution exactly as it was
+	// before this existed: a query zoxide misses still fails.
+	//
+	// Searched in the order written, and that order is meaningful — it breaks
+	// ties between equally good matches (see findProject). loadConfig expands
+	// a leading `~`, so a caller never has to.
+	ProjectDirs []string `yaml:"project_dirs"`
 }
 
 // legalLayouts are the pane arrangements bin/claudemux knows how to build.
@@ -174,6 +183,7 @@ func loadConfig() (Config, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			resolveAPIKeyFile(&cfg, dir)
+			resolveProjectDirs(&cfg)
 			return cfg, nil
 		}
 		return defaultConfig(), fmt.Errorf("opening %s: %w", path, err)
@@ -199,6 +209,7 @@ func loadConfig() (Config, error) {
 		return defaultConfig(), fmt.Errorf("%s: %w", path, err)
 	}
 	resolveAPIKeyFile(&cfg, dir)
+	resolveProjectDirs(&cfg)
 	return cfg, nil
 }
 
@@ -214,12 +225,50 @@ func resolveAPIKeyFile(cfg *Config, dir string) {
 		cfg.Summary.APIKeyFile = filepath.Join(dir, "env")
 		return
 	}
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
-		}
+	cfg.Summary.APIKeyFile = expandTilde(p)
+}
+
+// expandTilde turns a leading `~` into the user's home directory, leaving every
+// other path (absolute, relative, or `~user`, which this deliberately does not
+// understand) alone. A home directory that cannot be resolved leaves the path
+// as written rather than mangling it.
+func expandTilde(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
 	}
-	cfg.Summary.APIKeyFile = p
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	return filepath.Join(home, strings.TrimPrefix(p, "~"))
+}
+
+// resolveProjectDirs expands and tidies launch.project_dirs in place, so
+// findProject only ever walks absolute paths — and, more to the point, only
+// ever ANSWERS with one. The launcher hands what it resolves to `tmux
+// new-session -c`, and the tmux *server* resolves a relative path against its
+// own working directory, not the launcher's: a relative root would open the
+// session's panes somewhere else entirely.
+//
+// Blank entries are dropped: a stray `- ""` would otherwise absolutize to the
+// process's working directory and quietly offer its children as projects.
+func resolveProjectDirs(cfg *Config) {
+	dirs := cfg.Launch.ProjectDirs[:0]
+	for _, d := range cfg.Launch.ProjectDirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		d = expandTilde(d)
+		// A path that cannot be absolutized (an unreadable working directory)
+		// is kept as written rather than dropped: it may still not match
+		// anything, but silently discarding a configured root would be worse.
+		if abs, err := filepath.Abs(d); err == nil {
+			d = abs
+		}
+		dirs = append(dirs, d)
+	}
+	cfg.Launch.ProjectDirs = dirs
 }
 
 // validate rejects configurations that parse but cannot mean what they say.

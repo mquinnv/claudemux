@@ -11,7 +11,8 @@
 # shell-right (default), no-shell, shell-bottom, or head-bottom. See
 # create_session's layout comment block below for what each one looks like.
 #
-# A bare arg that isn't a directory is resolved via zoxide (`z`) history.
+# A bare arg that isn't a directory is resolved via zoxide (`z`) history, and
+# failing that, by name against the roots in `launch.project_dirs`.
 #
 # Options:
 #   -n   Create a new session even if one with the same name exists
@@ -115,23 +116,73 @@ ensure_hook() {
 }
 ensure_hook
 
-# resolve_dir QUERY — echo an existing directory for QUERY: itself if it's a
-# real dir, otherwise the best zoxide match. Non-zero exit if unresolved.
+# resolve_dir QUERY — echo an existing directory for QUERY, trying in order:
+# QUERY itself if it's a real dir, the best zoxide match, then the best project
+# under launch.project_dirs. Non-zero exit if all three miss.
+#
+# The project search is last because it is the only one that can name a
+# directory you have never opened: zoxide's frecency is a better answer than a
+# name match whenever it has one, and this is the fallback for the case it
+# doesn't — a repo you just cloned, or one you have only ever visited from an
+# editor. project_find_dir owns talking to the head binary; the matching rules
+# themselves live in cmd/claudemux-head/projectfind.go.
 resolve_dir() {
   local q="$1"
   if [ -d "$q" ]; then
     (cd "$q" && pwd)
     return 0
   fi
+  local hit
   if command -v zoxide >/dev/null 2>&1; then
-    local hit
     hit="$(zoxide query -- "$q" 2>/dev/null || true)"
     if [ -n "$hit" ] && [ -d "$hit" ]; then
       echo "$hit"
       return 0
     fi
   fi
+  hit="$(project_find_dir "$q")"
+  if [ -n "$hit" ] && [ -d "$hit" ]; then
+    echo "$hit"
+    return 0
+  fi
   return 1
+}
+
+# project_find_dir QUERY — echo the best directory for QUERY under
+# launch.project_dirs, or nothing at all.
+#
+# Its exit codes are inspected rather than discarded, for the same reason
+# ch_config_get inspects `config get`'s — and everything but a broken config is
+# deliberately silent:
+#
+#   1 — nothing matched. Every call that gets here is a query zoxide already
+#       missed, so this is the ordinary outcome; resolve_dir's caller prints
+#       its own message once all three lookups have failed.
+#   2 — an installed claudemux-head older than this script, which has never
+#       heard of `project find` and says so on stderr. Reporting that on every
+#       unresolved query — including a plain typo from someone who has not
+#       configured project_dirs at all — would be noise, so an old binary just
+#       resolves nothing, exactly as this worked before the setting existed.
+#   3 — a config.yml that does not parse. That one must surface, or a typo in
+#       the config is indistinguishable from a query that simply missed.
+#
+# CH_CONFIG_ERR suppression: resolve_dir is always called inside a command
+# substitution, so this cannot report a broken config back to the caller the
+# way ch_config_get does — but it does INHERIT the flag, which is what keeps a
+# launch that already printed the diagnostic (maybe_onboard reads
+# launch.layout before we get here) from printing it a second time.
+project_find_dir() {
+  command -v claudemux-head >/dev/null 2>&1 || return 0
+  local err out rc=0
+  err="$(mktemp)"
+  out="$(claudemux-head project find "$1" 2>"$err")" || rc=$?
+  if [ "$rc" -eq 3 ] && [ -z "$CH_CONFIG_ERR" ]; then
+    cat "$err" >&2
+    CH_CONFIG_ERR=1
+  fi
+  rm -f "$err"
+  [ "$rc" -eq 0 ] && printf '%s\n' "$out"
+  return 0
 }
 
 # apply_status_color SESSION DIR — set SESSION's tmux status bar and active
@@ -831,7 +882,7 @@ for arg in "$@"; do
   if dir="$(resolve_dir "$arg")"; then
     create_session "$dir"
   else
-    echo "claudemux: '$arg' is not a directory and has no zoxide match" >&2
+    echo "claudemux: '$arg' is not a directory and matched nothing in zoxide or launch.project_dirs" >&2
   fi
 done
 exit 1

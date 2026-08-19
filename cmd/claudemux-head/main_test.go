@@ -28,6 +28,7 @@ func TestUnknownSubcommand(t *testing.T) {
 		{"flag terminator", []string{"claudemux-head", "--"}, ""},
 		// A subcommand's own arguments are its business, not this guard's.
 		{"subcommand with args", []string{"claudemux-head", "config", "get", "launch.layout"}, ""},
+		{"project find", []string{"claudemux-head", "project", "find", "core"}, ""},
 
 		// The case this exists for: an installed binary older than
 		// bin/claudemux, asked for a subcommand it has never heard of.

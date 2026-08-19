@@ -17,7 +17,7 @@ var version = "dev"
 // must be kept in step with the dispatch chain at the top of main — a
 // subcommand added there but not here becomes a usage error, which
 // TestKnownSubcommandsAreAccepted is what catches.
-var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner"}
+var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner", "project"}
 
 // unknownSubcommand reports a first argument that reads as a subcommand — a
 // bare word, not a flag — that this binary does not implement. Anything
@@ -56,6 +56,18 @@ func main() {
 			os.Exit(runConfigSet(os.Args[3:], os.Stdout, os.Stderr))
 		}
 		fmt.Fprintln(os.Stderr, "usage: claudemux-head config get <dotted.path> | claudemux-head config set <dotted.path> <value>")
+		os.Exit(2)
+	}
+
+	// `project find` is the last step of bin/claudemux's resolve_dir: it turns
+	// a launch query zoxide could not place into a directory under the user's
+	// configured launch.project_dirs. Dispatched here for the same reason
+	// `config` is — the launcher calls it as a bare first argument.
+	if len(os.Args) > 1 && os.Args[1] == "project" {
+		if len(os.Args) > 2 && os.Args[2] == "find" {
+			os.Exit(runProjectFind(os.Args[3:], os.Stdout, os.Stderr))
+		}
+		fmt.Fprintln(os.Stderr, "usage: claudemux-head project find <query>")
 		os.Exit(2)
 	}
 

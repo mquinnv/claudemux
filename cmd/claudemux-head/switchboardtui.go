@@ -341,7 +341,8 @@ func swLastLine(out string) string {
 // collision, exactly like the user's own `claudemux -n`) and prints its name
 // instead of attaching — attaching is impossible from inside tmux, and the
 // caller here wants to switch-client anyway. The query resolves the same way
-// it does on the command line: a real directory, else the best zoxide match.
+// it does on the command line: a real directory, else the best zoxide match,
+// else the best project under launch.project_dirs.
 // The fleet list needs no help picking the session up; the next poll sees it.
 func swCreateCmd(query string) tea.Cmd {
 	return func() tea.Msg {

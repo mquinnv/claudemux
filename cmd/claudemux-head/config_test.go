@@ -406,3 +406,61 @@ func TestTeardownCommandOverride(t *testing.T) {
 		t.Errorf("summary.model = %q, want default", cfg.Summary.Model)
 	}
 }
+
+// project_dirs ships empty: without roots, resolve_dir behaves exactly as it
+// did before the setting existed.
+func TestLoadConfigProjectDirsDefaultEmpty(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config.yml
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(cfg.Launch.ProjectDirs) != 0 {
+		t.Errorf("launch.project_dirs = %v, want empty by default", cfg.Launch.ProjectDirs)
+	}
+}
+
+// Roots are expanded at load, once, for the same reason api_key_file is: a
+// literal "~/Projects" would be opened as a relative directory named "~" and
+// silently match nothing.
+func TestLoadConfigProjectDirsExpandTilde(t *testing.T) {
+	writeConfig(t, "launch:\n  project_dirs:\n    - ~/Projects\n    - /srv/code\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(home, "Projects"), "/srv/code"}
+	if len(cfg.Launch.ProjectDirs) != len(want) {
+		t.Fatalf("launch.project_dirs = %v, want %v", cfg.Launch.ProjectDirs, want)
+	}
+	for i := range want {
+		if cfg.Launch.ProjectDirs[i] != want[i] {
+			t.Errorf("launch.project_dirs[%d] = %q, want %q", i, cfg.Launch.ProjectDirs[i], want[i])
+		}
+	}
+}
+
+// A relative root would make findProject answer with a relative path, and the
+// launcher hands that straight to `tmux new-session -c` — which the tmux
+// SERVER resolves against its own working directory, not the launcher's. The
+// panes would open somewhere else entirely.
+func TestLoadConfigProjectDirsAreAbsolute(t *testing.T) {
+	writeConfig(t, "launch:\n  project_dirs:\n    - Projects\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(cfg.Launch.ProjectDirs) != 1 {
+		t.Fatalf("launch.project_dirs = %v, want one entry", cfg.Launch.ProjectDirs)
+	}
+	if !filepath.IsAbs(cfg.Launch.ProjectDirs[0]) {
+		t.Errorf("launch.project_dirs[0] = %q, want an absolute path", cfg.Launch.ProjectDirs[0])
+	}
+}
