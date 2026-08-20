@@ -535,6 +535,21 @@ func (m *model) moveSession(jsonlPath string, now time.Time) {
 	m.reader = r
 	m.allEvents = seeded
 	m.firstPrompt = r.FirstPrompt()
+	// The tracker's liveness source is derived from the transcript path, so a
+	// move invalidates it: left pointing at the old directory, every later
+	// agent launch stats a file that will never appear and expires via
+	// bgAgentSpawnGrace ~2 minutes in, calling a busy session Idle. Entering a
+	// worktree moves the transcript to a different project directory, which is
+	// exactly this case, and the session then runs for hours under the stale
+	// path.
+	//
+	// The tracked tasks are KEPT, unlike switchSession's clean slate: this is
+	// the same session at a new path, so work it launched before the move is
+	// still running after it. Re-observing the reseed on top is idempotent —
+	// launches and completions replay in order — and recovers anything the old
+	// reader missed between its last tail and the move.
+	m.bg.subagentsDir = subagentsDirFor(jsonlPath)
+	m.bg.observe(seeded, now)
 	m.recomputeFromEvents(now)
 }
 

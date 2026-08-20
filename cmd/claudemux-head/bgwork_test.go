@@ -909,3 +909,44 @@ func TestSubagentsDirFor(t *testing.T) {
 		t.Errorf("subagentsDirFor = %q, want %q", got, want)
 	}
 }
+
+// A session that ENTERS A WORKTREE keeps its id but gets its transcript moved
+// to a different project directory, so the head re-binds through moveSession.
+// The bg tracker's liveness source is derived from the transcript path, so a
+// move that leaves it pointing at the old directory makes every later agent
+// launch stat a file that will never exist: the agent expires via
+// bgAgentSpawnGrace ~2 minutes in and the session reads Idle while its agent
+// is still running. Observed live on 2026-08-20 — a 45-minute background agent
+// published Background for two minutes, then Idle for the remaining 43.
+func TestBgTrackerFollowsMovedTranscript(t *testing.T) {
+	root := t.TempDir()
+	sid := "5639283b-9222-46d8-8052-fc5415fc9884"
+	oldPath := filepath.Join(root, "old", sid+".jsonl")
+	newPath := filepath.Join(root, "new", sid+".jsonl")
+	for _, p := range []string{oldPath, newPath} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(`{"type":"assistant","timestamp":"2026-08-20T13:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	launch := time.Date(2026, 8, 20, 13, 34, 13, 0, time.UTC)
+	m := model{bg: newBgTracker(), jsonlPath: oldPath, sessionID: sid}
+	m.bg.subagentsDir = subagentsDirFor(oldPath)
+
+	// The worktree move: same session id, new path.
+	m.moveSession(newPath, launch)
+
+	// A launch that arrives AFTER the move, by incremental tail.
+	m.bg.observe(bgAgentLaunch(t, "a48070ee992d02136", "2026-08-20T13:34:13Z"), launch)
+
+	now := launch.Add(5 * time.Minute)
+	bgTouchAgentFile(t, subagentsDirFor(newPath), "a48070ee992d02136", now.Add(-10*time.Second))
+	m.recomputeFromEvents(now)
+
+	if m.state.Kind != StateBackground {
+		t.Errorf("state = %v, want StateBackground: a live agent must keep counting after the transcript moves", m.state.Kind)
+	}
+}
