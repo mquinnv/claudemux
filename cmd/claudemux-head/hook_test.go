@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -187,6 +188,39 @@ func TestHookEnsureIsIdempotent(t *testing.T) {
 	s := readSettings(t, p)
 	if got := len(hookCommands(t, s, "SessionStart")); got != 1 {
 		t.Errorf("SessionStart has %d commands after two runs, want 1 — the entry was duplicated", got)
+	}
+}
+
+// The statusline artifact is this whole binary (potentially tens of MB), and
+// hook ensure runs on every launch of bin/claudemux — so a second run must
+// not rewrite it when it is already current. copyExecutableIfChanged must
+// skip the write; an mtime that survives the second run is the proof.
+func TestHookEnsureDoesNotRewriteUnchangedStatusline(t *testing.T) {
+	writeSettings(t, "")
+	script := stubScript(t)
+
+	var b1, b2 bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &b1, &b1); code != 0 {
+		t.Fatalf("first runHookEnsure() = %d, want 0 (stderr %s)", code, b1.String())
+	}
+
+	home, _ := os.UserHomeDir()
+	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
+	before, err := os.Stat(slPath)
+	if err != nil {
+		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
+	}
+
+	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+		t.Fatalf("second runHookEnsure() = %d, want 0 (stderr %s)", code, b2.String())
+	}
+	after, err := os.Stat(slPath)
+	if err != nil {
+		t.Fatalf("statusline artifact missing after second run: %v", err)
+	}
+
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("statusline artifact mtime changed (%v -> %v) — it was rewritten despite being unchanged", before.ModTime(), after.ModTime())
 	}
 }
 
@@ -534,5 +568,80 @@ func TestHookEnsureResolvesScriptsViaClaudemuxOnPath(t *testing.T) {
 	ups := hookCommands(t, settings, "UserPromptSubmit")
 	if len(ups) != 3 {
 		t.Errorf("UserPromptSubmit = %v, want all three scripts registered from the PATH-resolved layout", ups)
+	}
+}
+
+// statusLineCommand digs the registered command back out of a settings map.
+func statusLineCommand(t *testing.T, settings map[string]any) (string, bool) {
+	t.Helper()
+	sl, ok := settings["statusLine"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	cmd, ok := sl["command"].(string)
+	return cmd, ok
+}
+
+func TestSetStatusLineClaimsWhenAbsent(t *testing.T) {
+	settings := map[string]any{}
+	var errBuf bytes.Buffer
+	if !setStatusLine(settings, "/h/.claude/hooks/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported no change, want it to claim an empty slot")
+	}
+	cmd, ok := statusLineCommand(t, settings)
+	if !ok || cmd != "/h/.claude/hooks/claudemux-statusline" {
+		t.Errorf("statusLine command = %q (ok=%v), want ours", cmd, ok)
+	}
+	sl := settings["statusLine"].(map[string]any)
+	if sl["type"] != "command" {
+		t.Errorf("statusLine type = %v, want \"command\"", sl["type"])
+	}
+}
+
+// abtop's shim is exactly what we are replacing, matched by basename so the
+// user's install prefix does not matter.
+func TestSetStatusLineReplacesAbtop(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/Users/x/.claude/abtop-statusline.sh",
+	}}
+	var errBuf bytes.Buffer
+	if !setStatusLine(settings, "/h/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported no change, want it to replace abtop's shim")
+	}
+	if cmd, _ := statusLineCommand(t, settings); cmd != "/h/claudemux-statusline" {
+		t.Errorf("statusLine command = %q, want ours", cmd)
+	}
+}
+
+// A statusline someone actually built is never clobbered. The user is told why
+// their meters are dark instead.
+func TestSetStatusLineLeavesThirdPartyAlone(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/Users/x/bin/my-fancy-statusline",
+	}}
+	var errBuf bytes.Buffer
+	if setStatusLine(settings, "/h/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported a change, want a third-party slot untouched")
+	}
+	if cmd, _ := statusLineCommand(t, settings); cmd != "/Users/x/bin/my-fancy-statusline" {
+		t.Errorf("statusLine command = %q, want it unchanged", cmd)
+	}
+	if !strings.Contains(errBuf.String(), "my-fancy-statusline") {
+		t.Errorf("stderr = %q, want it to name the command it declined to replace", errBuf.String())
+	}
+}
+
+// Already ours: no change, no write, no noise. hook ensure runs on every
+// launch, so this is the overwhelmingly common case.
+func TestSetStatusLineIdempotent(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/h/claudemux-statusline",
+	}}
+	var errBuf bytes.Buffer
+	if setStatusLine(settings, "/h/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported a change on a slot it already owns")
+	}
+	if errBuf.String() != "" {
+		t.Errorf("stderr = %q, want silence", errBuf.String())
 	}
 }
