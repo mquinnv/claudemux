@@ -194,7 +194,18 @@ func TestHookEnsureIsIdempotent(t *testing.T) {
 // The statusline artifact is this whole binary (potentially tens of MB), and
 // hook ensure runs on every launch of bin/claudemux — so a second run must
 // not rewrite it when it is already current. copyExecutableIfChanged must
-// skip the write; an mtime that survives the second run is the proof.
+// skip the write.
+//
+// An mtime comparison is not strong enough evidence: on a filesystem with
+// coarse mtime resolution, two writes inside the same tick produce identical
+// mtimes, so a regression to an unconditional copy could still pass this
+// test. Instead the destination is made read-only after the first run: if
+// the write is correctly skipped, the second run still succeeds (exit 0)
+// even though it could not have written; if the copy regressed to
+// unconditional, os.WriteFile against a read-only file fails and
+// runHookEnsure returns 4. The exit code alone proves the write was
+// skipped, not merely that it wrote identical bytes again — and the byte
+// comparison confirms the destination still holds the current binary.
 func TestHookEnsureDoesNotRewriteUnchangedStatusline(t *testing.T) {
 	writeSettings(t, "")
 	script := stubScript(t)
@@ -206,21 +217,29 @@ func TestHookEnsureDoesNotRewriteUnchangedStatusline(t *testing.T) {
 
 	home, _ := os.UserHomeDir()
 	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
-	before, err := os.Stat(slPath)
+	wantBytes, err := os.ReadFile(slPath)
 	if err != nil {
 		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
 	}
 
-	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
-		t.Fatalf("second runHookEnsure() = %d, want 0 (stderr %s)", code, b2.String())
+	if err := os.Chmod(slPath, 0o444); err != nil {
+		t.Fatalf("chmod %s read-only: %v", slPath, err)
 	}
-	after, err := os.Stat(slPath)
-	if err != nil {
-		t.Fatalf("statusline artifact missing after second run: %v", err)
+	// Restore write permission before t.TempDir()'s own cleanup tries to
+	// remove the directory tree; t.Cleanup runs LIFO, so this (registered
+	// after writeSettings/stubScript's t.TempDir calls) runs first.
+	t.Cleanup(func() { _ = os.Chmod(slPath, 0o755) })
+
+	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+		t.Fatalf("second runHookEnsure() = %d, want 0 — the write must be skipped when the artifact is already current, even with the destination read-only (stderr %s)", code, b2.String())
 	}
 
-	if !before.ModTime().Equal(after.ModTime()) {
-		t.Errorf("statusline artifact mtime changed (%v -> %v) — it was rewritten despite being unchanged", before.ModTime(), after.ModTime())
+	got, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantBytes) {
+		t.Error("statusline artifact content changed after the second run, want it untouched")
 	}
 }
 
@@ -516,6 +535,15 @@ func TestHookEnsureMissingScriptCopiesNothing(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(hooksDir, hs.name)); !os.IsNotExist(err) {
 			t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", hs.name, hooksDir)
 		}
+	}
+
+	// The statusline artifact must be absent too. The current code is safe by
+	// ordering — validation returns 4 strictly before any copy, including the
+	// statusline's — but that guarantee is only real if a test pins it; without
+	// this a future reordering that copied the statusline before validation
+	// finished would go undetected.
+	if _, err := os.Stat(filepath.Join(hooksDir, statuslineScriptName)); !os.IsNotExist(err) {
+		t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", statuslineScriptName, hooksDir)
 	}
 }
 
