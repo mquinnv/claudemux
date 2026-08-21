@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -224,6 +225,124 @@ func parseUsageResponse(blob []byte, now time.Time) (PlanUsage, error) {
 			w.ResetsAt = t
 		}
 		usage.Models = append(usage.Models, w)
+	}
+	return usage, nil
+}
+
+// usageTTL is how long a cached usage read stays authoritative.
+//
+// Fifteen minutes because a poll is not free: it spawns a Claude Code (~2.2s)
+// and fires every SessionStart hook the user has installed. Suppressing those
+// hooks means isolating CLAUDE_CONFIG_DIR, which also loses the OAuth profile
+// and so loses the answer. Weekly windows move slowly enough that this costs
+// nothing in freshness, and the fast-moving 5h meter does not come from here at
+// all — it rides the free statusline path.
+const usageTTL = 15 * time.Minute
+
+// usageLockStale is when a lock file is presumed abandoned by a crashed poller.
+const usageLockStale = 2 * time.Minute
+
+// rawUsageCache is the on-disk shape. Timestamps are Unix seconds so the file
+// stays readable by eye and by jq.
+type rawUsageCache struct {
+	FetchedAt int64 `json:"fetched_at"`
+	Available bool  `json:"available"`
+	Models    []struct {
+		Name        string `json:"name"`
+		UsedPercent int    `json:"used_percent"`
+		ResetsAt    int64  `json:"resets_at"`
+	} `json:"models"`
+}
+
+// usageClaudeBin is the Claude Code the poller spawns. Resolved from PATH by
+// default; the env override is what lets a dev point the poller at a specific
+// build without touching PATH.
+func usageClaudeBin() string {
+	if p := os.Getenv("CLAUDEMUX_CLAUDE_BIN"); p != "" {
+		return p
+	}
+	return "claude"
+}
+
+func defaultUsageCachePath() string {
+	if p := os.Getenv("CLAUDEMUX_USAGE_CACHE_PATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "claudemux", "usage.json")
+}
+
+func writeUsageCache(path string, u PlanUsage) error {
+	raw := rawUsageCache{FetchedAt: u.FetchedAt.Unix(), Available: u.Available}
+	for _, m := range u.Models {
+		var resets int64
+		if !m.ResetsAt.IsZero() {
+			resets = m.ResetsAt.Unix()
+		}
+		raw.Models = append(raw.Models, struct {
+			Name        string `json:"name"`
+			UsedPercent int    `json:"used_percent"`
+			ResetsAt    int64  `json:"resets_at"`
+		}{Name: m.Name, UsedPercent: m.UsedPercent, ResetsAt: resets})
+	}
+	return writeJSONAtomic(path, raw)
+}
+
+// readUsageCache loads the cache. The second return reports whether it is
+// within the TTL; the rows are returned either way, because a fifteen-minute-old
+// Fable percentage is far more useful than a missing meter.
+func readUsageCache(path string, now time.Time) (PlanUsage, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return PlanUsage{}, false
+	}
+	var raw rawUsageCache
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return PlanUsage{}, false
+	}
+	u := PlanUsage{Available: raw.Available, FetchedAt: time.Unix(raw.FetchedAt, 0)}
+	for _, m := range raw.Models {
+		w := ModelWindow{Name: m.Name, UsedPercent: m.UsedPercent}
+		if m.ResetsAt != 0 {
+			w.ResetsAt = time.Unix(m.ResetsAt, 0)
+		}
+		u.Models = append(u.Models, w)
+	}
+	age := now.Sub(u.FetchedAt)
+	return u, age >= 0 && age < usageTTL
+}
+
+// refreshUsageCache fetches and caches, taking a lock first so that N head
+// panes on one machine cause one spawn rather than N. A caller that loses the
+// race returns the current cache immediately instead of waiting.
+func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Time) (PlanUsage, error) {
+	lock := path + ".lock"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return PlanUsage{}, err
+	}
+	f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		// Someone else holds it — unless they crashed and left it behind.
+		if st, statErr := os.Stat(lock); statErr == nil && now.Sub(st.ModTime()) > usageLockStale {
+			os.Remove(lock)
+		}
+		cached, _ := readUsageCache(path, now)
+		return cached, nil
+	}
+	f.Close()
+	defer os.Remove(lock)
+
+	usage, err := fetchPlanUsage(ctx, claudeBin, now)
+	if err != nil {
+		return PlanUsage{}, err
+	}
+	if writeErr := writeUsageCache(path, usage); writeErr != nil {
+		// The fetch succeeded; a cache we could not persist still serves this
+		// process for this tick.
+		return usage, nil
 	}
 	return usage, nil
 }

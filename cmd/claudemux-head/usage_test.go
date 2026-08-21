@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -174,4 +175,118 @@ func TestFetchPlanUsageChildFails(t *testing.T) {
 	if _, err := fetchPlanUsage(context.Background(), fakeClaude(t, "", 0, 1), time.Now()); err == nil {
 		t.Fatal("fetchPlanUsage returned nil error for a failing child, want an error")
 	}
+}
+
+// A cache written inside the TTL is served as-is: no spawn.
+func TestReadUsageCacheFresh(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	want := PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}},
+		FetchedAt: now.Add(-5 * time.Minute),
+	}
+	if err := writeUsageCache(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, fresh := readUsageCache(path, now)
+	if !fresh {
+		t.Fatal("fresh = false for a 5-minute-old cache, want true")
+	}
+	if len(got.Models) != 1 || got.Models[0].Name != "Fable" || got.Models[0].UsedPercent != 26 {
+		t.Errorf("Models = %+v, want the Fable row round-tripped", got.Models)
+	}
+	if !got.Models[0].ResetsAt.Equal(want.Models[0].ResetsAt) {
+		t.Errorf("ResetsAt = %v, want %v", got.Models[0].ResetsAt, want.Models[0].ResetsAt)
+	}
+}
+
+// Past the TTL the rows are still returned — a stale Fable percentage beats no
+// meter — but the caller is told to refresh.
+func TestReadUsageCacheStaleStillReturnsRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if err := writeUsageCache(path, PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+		FetchedAt: now.Add(-usageTTL - time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, fresh := readUsageCache(path, now)
+	if fresh {
+		t.Error("fresh = true past the TTL, want false")
+	}
+	if len(got.Models) != 1 {
+		t.Errorf("Models = %+v, want the stale row still served", got.Models)
+	}
+}
+
+func TestReadUsageCacheMissing(t *testing.T) {
+	got, fresh := readUsageCache(filepath.Join(t.TempDir(), "absent.json"), time.Now())
+	if fresh {
+		t.Error("fresh = true for a missing cache, want false")
+	}
+	if len(got.Models) != 0 {
+		t.Errorf("Models = %+v, want none", got.Models)
+	}
+}
+
+// A truncated or hand-mangled cache must not wedge the poller.
+func TestReadUsageCacheCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, fresh := readUsageCache(path, time.Now()); fresh {
+		t.Error("fresh = true for a corrupt cache, want false")
+	}
+}
+
+// The whole point of the lock: ten head panes must cause one spawn. The fake
+// appends a line per invocation so we can count them.
+func TestRefreshUsageCacheIsSingleFlight(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+
+	bin := filepath.Join(dir, "counting-claude")
+	body := fixture(t, "get_usage_response.json")
+	script := "#!/bin/sh\necho x >> " + counter + "\nsleep 1\ncat <<'FAKEEOF'\n" + body + "\nFAKEEOF\ncat >/dev/null\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	done := make(chan struct{})
+	for i := 0; i < 5; i++ {
+		go func() {
+			defer signalDone(done)
+			_, _ = refreshUsageCache(context.Background(), path, bin, now)
+		}()
+	}
+	for i := 0; i < 5; i++ {
+		<-done
+	}
+
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatalf("no spawn recorded at all: %v", err)
+	}
+	if n := len(splitLines(string(data))); n != 1 {
+		t.Errorf("spawned %d times, want exactly 1 (the lock did not hold)", n)
+	}
+}
+
+// signalDone signals one completion on a shared channel without closing it.
+func signalDone(ch chan struct{}) { ch <- struct{}{} }
+
+func splitLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }
