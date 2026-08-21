@@ -190,7 +190,7 @@ panels pick this up from one change.
 Model rows render after `wk`, in the established shape — bar, percent, reset:
 
 ```
-5h ▇▇▁▁▁▁ 12%→7:10p · wk ▇▇▇▇▁▁ 62%→Mon · fab ▇▇▁▁▁▁ 26%→Mon · empty in 3h12m
+5h ▇▇▁▁▁▁ 12%→7:10p · wk ▇▇▇▇▁▁ 62%→Mon · fable ▇▇▁▁▁▁ 26%→Mon · empty in 3h12m
 ```
 
 The drop order for narrow panes extends the existing fixed order and stays

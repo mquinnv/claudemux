@@ -1890,7 +1890,7 @@ func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now ti
 	for _, mw := range models {
 		pct := float64(mw.UsedPercent)
 		seg := fmt.Sprintf("%s %s %d%%",
-			shortModelMeter(mw.Name), renderBar(barW, pct, thresholdColor(pct)), mw.UsedPercent)
+			modelMeterLabel(mw.Name), renderBar(barW, pct, thresholdColor(pct)), mw.UsedPercent)
 		// A row with a percent but no parseable reset time still earns its
 		// meter; only the arrow is dropped.
 		if !mw.ResetsAt.IsZero() {
@@ -1910,15 +1910,29 @@ func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now ti
 	return gaugeSet{parts: parts, barred: barred}
 }
 
-// shortModelMeter renders a server-supplied model label as a three-cell gauge
-// prefix matching "5h" and "wk" in weight: "Fable" → "fab", "Opus" → "opu".
-// The label is whatever the server sent, so this must not assume a known set;
-// the truncation counts runes rather than bytes so a non-ASCII label cannot be
+// modelMeterLabelCells bounds a model gauge's label. The name is whatever the
+// server sent, so a pathological one must not be allowed to eat the meter
+// line; 12 is far above every name seen in practice ("Sonnet" is the longest
+// at 6), so in real use this never truncates.
+const modelMeterLabelCells = 12
+
+// modelMeterLabel renders a server-supplied model label as a gauge prefix,
+// lowercased to sit at the same weight as "5h", "wk" and "ctx" beside it:
+// "Fable" → "fable", "Opus" → "opus".
+//
+// The name is spelled out rather than abbreviated. It used to be cut to three
+// cells for compactness, which produced "fab" — read as noise next to "5h" and
+// "wk" rather than as the name of a model, which is the whole point of the
+// gauge. The meter line has a drop order for when space is genuinely tight;
+// buying a few cells by making every label unreadable is not a trade worth
+// making.
+//
+// The truncation counts runes rather than bytes so a non-ASCII label cannot be
 // cut mid-rune into mojibake.
-func shortModelMeter(name string) string {
+func modelMeterLabel(name string) string {
 	lower := []rune(strings.ToLower(name))
-	if len(lower) > 3 {
-		lower = lower[:3]
+	if len(lower) > modelMeterLabelCells {
+		lower = lower[:modelMeterLabelCells]
 	}
 	return string(lower)
 }

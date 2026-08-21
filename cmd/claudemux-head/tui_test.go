@@ -4038,13 +4038,13 @@ func TestRateGaugesOrdersModelRowsAfterWeek(t *testing.T) {
 	if !strings.Contains(gs.parts[1], "wk") {
 		t.Errorf("parts[1] = %q, want the wk gauge", gs.parts[1])
 	}
-	if !strings.Contains(gs.parts[2], "fab") || !strings.Contains(gs.parts[2], "26%") {
+	if !strings.Contains(gs.parts[2], "fable") || !strings.Contains(gs.parts[2], "26%") {
 		t.Errorf("parts[2] = %q, want the Fable gauge at 26%%", gs.parts[2])
 	}
 	if !strings.Contains(gs.parts[3], "empty in") {
 		t.Errorf("parts[3] = %q, want the eta", gs.parts[3])
 	}
-	// 5h, wk and fab carry bars; the eta is plain text.
+	// 5h, wk and fable carry bars; the eta is plain text.
 	if gs.barred != 3 {
 		t.Errorf("barred = %d, want 3", gs.barred)
 	}
@@ -4075,25 +4075,39 @@ func TestRateGaugesModelWithoutResetTime(t *testing.T) {
 	gs := rateGauges(rl, []ModelWindow{{Name: "Fable", UsedPercent: 26}}, nil, now, defaultBarW)
 	found := false
 	for _, p := range gs.parts {
-		if strings.Contains(p, "fab") && strings.Contains(p, "26%") {
+		if strings.Contains(p, "fable") && strings.Contains(p, "26%") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("parts = %q, want a fab gauge despite the zero reset time", gs.parts)
+		t.Errorf("parts = %q, want a fable gauge despite the zero reset time", gs.parts)
 	}
 }
 
-func TestShortModelMeter(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"Fable", "fab"},
-		{"Opus", "opu"},
-		{"Sonnet", "son"},
-		{"X", "x"},
+func TestModelMeterLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Spelled out, not abbreviated: "fable" read as noise beside "5h" and
+		// "wk" rather than as the name of a model.
+		{"fable", "Fable", "fable"},
+		{"opus", "Opus", "opus"},
+		{"sonnet", "Sonnet", "sonnet"},
+		{"single char", "X", "x"},
+		// The label is whatever the server sent, so a pathological name must
+		// not be allowed to eat the meter line.
+		{"absurdly long", "Supercalifragilistic", "supercalifra"},
+		// Counting runes, not bytes, so a multi-byte name cannot be cut
+		// mid-rune into mojibake.
+		{"multi-byte", "日本語モデルの名前です長い", "日本語モデルの名前です長"},
 	} {
-		if got := shortModelMeter(tc.in); got != tc.want {
-			t.Errorf("shortModelMeter(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := modelMeterLabel(tc.in); got != tc.want {
+				t.Errorf("modelMeterLabel(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -4104,7 +4118,7 @@ func TestMetersLineDropOrderWithModels(t *testing.T) {
 	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
 
 	full := renderMetersLine(m, now)
-	for _, want := range []string{"5h", "wk", "fab", "empty in"} {
+	for _, want := range []string{"5h", "wk", "fable", "empty in"} {
 		if !strings.Contains(full, want) {
 			t.Fatalf("full meters line = %q, want %q", full, want)
 		}
@@ -4116,22 +4130,22 @@ func TestMetersLineDropOrderWithModels(t *testing.T) {
 		line := renderMetersLine(m, now)
 		if !sawEta && !strings.Contains(line, "empty in") {
 			sawEta = true
-			if !strings.Contains(line, "fab") {
-				t.Fatalf("at width %d the eta dropped but fab went with it: %q", w, line)
+			if !strings.Contains(line, "fable") {
+				t.Fatalf("at width %d the eta dropped but fablele went with it: %q", w, line)
 			}
 		}
-		if sawEta && !sawFab && !strings.Contains(line, "fab") {
+		if sawEta && !sawFab && !strings.Contains(line, "fable") {
 			sawFab = true
 			if !strings.Contains(line, "wk") {
-				t.Fatalf("at width %d fab dropped but wk went with it: %q", w, line)
+				t.Fatalf("at width %d fable dropped but wk went with it: %q", w, line)
 			}
 		}
-		if sawFab && strings.Contains(line, "fab") {
-			t.Fatalf("at width %d fab came back after dropping: %q", w, line)
+		if sawFab && strings.Contains(line, "fable") {
+			t.Fatalf("at width %d fable came back after dropping: %q", w, line)
 		}
 	}
 	if !sawEta || !sawFab {
-		t.Fatalf("never observed the eta and fab drops (eta=%v fab=%v)", sawEta, sawFab)
+		t.Fatalf("never observed the eta and fable drops (eta=%v fab=%v)", sawEta, sawFab)
 	}
 }
 
@@ -4340,7 +4354,7 @@ func TestMetersLineWidensEveryBarIncludingModelRows(t *testing.T) {
 		line := renderMetersLine(m, now)
 		// The premise: every gauge survives at these widths, so four bars are
 		// on screen and the eta is the only bar-less part.
-		for _, want := range []string{"ctx", "5h", "wk", "fab", "empty in"} {
+		for _, want := range []string{"ctx", "5h", "wk", "fable", "empty in"} {
 			if !strings.Contains(line, want) {
 				t.Fatalf("at width %d the %q gauge is missing: %q", w, want, line)
 			}

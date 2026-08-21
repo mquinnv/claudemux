@@ -337,7 +337,7 @@ Two consequences worth stating plainly:
 
 ### Per-model weekly meters, and the `claude` process behind them
 
-Max plans carry per-model weekly windows (a `fab` gauge for Fable, for example) that the
+Max plans carry per-model weekly windows (a `fable` gauge, for example) that the
 statusline payload does not include — Claude Code narrows it to the 5-hour and 7-day
 windows before handing it over. The only place those rows exist is Claude Code's own
 `get_usage` control request, so **claudemux runs a short-lived `claude` process to ask
