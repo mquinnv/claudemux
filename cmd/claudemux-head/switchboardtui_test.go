@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func swTestModel() swModel {
@@ -1125,5 +1126,40 @@ func TestSwNameStyleSelectionBeatsProjectColor(t *testing.T) {
 	}
 	if fg := swNameStyle("b34dff", true).GetForeground(); fg != lipgloss.TerminalColor(lipgloss.NoColor{}) {
 		t.Errorf("selected name foreground = %v, want none", fg)
+	}
+}
+
+// The topic is what the lobby is FOR — it is how you tell one session from
+// another when every row says "Thinking". It was rendered in swUnknownStyle,
+// the same dim gray the row uses for an age, a model, and a state it could not
+// read, which made the one field carrying the answer the quietest thing on the
+// line. It carries weight instead.
+func TestSwModelViewEmphasizesTheTopic(t *testing.T) {
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(orig)
+
+	m := swTestModel()
+	view := m.View()
+
+	if !strings.Contains(view, swTopicStyle.Render("build fixes")) {
+		t.Errorf("topic is not rendered with swTopicStyle:\n%s", view)
+	}
+	if strings.Contains(view, swUnknownStyle.Render("build fixes")) {
+		t.Errorf("topic is still rendered in the dim unknown style:\n%s", view)
+	}
+}
+
+// Same rule as the head pane's promptEmphasisStyle: emphasis through weight,
+// with no Foreground of its own. The lobby is full-screen over the terminal's
+// own background, so a hardcoded light color reads as emphasis on a dark
+// terminal and disappears on a light one; the terminal's default foreground is
+// the most prominent color available under either.
+func TestSwTopicStyleHasNoHardcodedColor(t *testing.T) {
+	if !swTopicStyle.GetBold() {
+		t.Error("swTopicStyle is not bold, so the topic has no emphasis at all")
+	}
+	if fg := swTopicStyle.GetForeground(); fg != lipgloss.TerminalColor(lipgloss.NoColor{}) {
+		t.Errorf("swTopicStyle sets Foreground(%v); it must stay unset so the terminal default applies", fg)
 	}
 }

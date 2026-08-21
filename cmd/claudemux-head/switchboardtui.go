@@ -93,6 +93,16 @@ var (
 	swUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	swSelStyle     = lipgloss.NewStyle().Reverse(true)
 	swStatusStyle  = lipgloss.NewStyle().Faint(true)
+	// The topic is the field the lobby exists to show: with a fleet of
+	// sessions all reporting "Thinking", it is the only thing on the row that
+	// says which one you want. It gets weight and nothing else — no
+	// Foreground, so it inherits the terminal's default, which is the most
+	// prominent color available whichever theme is in use (near white on a
+	// dark background, near black on a light one). A hardcoded bright color
+	// would emphasize the row on one theme and erase it on the other. This
+	// matches the head pane's promptEmphasisStyle and the arrival banner,
+	// which has always drawn the topic bold and first.
+	swTopicStyle = lipgloss.NewStyle().Bold(true)
 	// Mode badge and status-line tints: conduct-vs-standby must be readable at
 	// a glance from either end of the screen, not inferable from one faint
 	// word at the bottom.
@@ -889,7 +899,7 @@ func (m swModel) View() string {
 		}
 		topic := ""
 		if sess.Topic != "" {
-			topic = "  " + swUnknownStyle.Render(sess.Topic)
+			topic = "  " + swTopicStyle.Render(sess.Topic)
 		}
 		// Unset model (pre-publish head) renders a blank cell of the same
 		// width, like context: the topics after it must not shift.
