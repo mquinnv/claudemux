@@ -304,7 +304,50 @@ func copyExecutable(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, 0o755)
+	return writeExecutableAtomic(dst, b)
+}
+
+// writeExecutableAtomic installs blob at path as an executable via a temp file
+// in the same directory and a rename, the way writeJSONAtomic installs the
+// rate-limit cache.
+//
+// Rename rather than overwrite because these files are being EXECUTED while we
+// replace them. Opening a running executable for writing fails with ETXTBSY,
+// and the statusline artifact is this whole ~16MB binary, which Claude Code
+// runs on every statusline render of every session on the machine — so an
+// in-place rewrite is a coin flip that hook ensure loses at exactly the moment
+// the user is using Claude Code most. Losing it used to cost more than the
+// copy: runHookEnsure returns 4 on that error, BEFORE setStatusLine runs and
+// before settings.json is written, so a single ETXTBSY silently dropped that
+// launch's entire hook registration. A rename needs write permission on the
+// directory, not on the file, cannot be observed half-done by a reader, and
+// leaves any process already executing the old inode running it untouched.
+func writeExecutableAtomic(path string, blob []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	// CreateTemp makes the file 0600; the mode has to be set before the
+	// rename, since the destination inherits the temp file's.
+	if err := os.Chmod(name, 0o755); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // copyExecutableIfChanged behaves like copyExecutable but skips the write
@@ -317,7 +360,9 @@ func copyExecutable(src, dst string) error {
 // build); content is compared only when sizes match. Any error reading dst
 // (most commonly: it does not exist yet) is treated as "not identical" so
 // the copy proceeds — this must never change observable behavior, only skip
-// redundant writes.
+// redundant writes. The write itself goes through writeExecutableAtomic: the
+// skip above removes MOST of the exposure to a concurrent statusline render,
+// and the rename removes the rest.
 func copyExecutableIfChanged(src, dst string) error {
 	srcBytes, err := os.ReadFile(src)
 	if err != nil {
@@ -328,7 +373,7 @@ func copyExecutableIfChanged(src, dst string) error {
 			return nil
 		}
 	}
-	return os.WriteFile(dst, srcBytes, 0o755)
+	return writeExecutableAtomic(dst, srcBytes)
 }
 
 // setStatusLine points settings["statusLine"] at our command, mutating settings

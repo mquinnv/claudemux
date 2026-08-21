@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,13 +16,31 @@ func runStatuslineInto(t *testing.T, payload string) (int, string, []byte) {
 	cache := filepath.Join(dir, "nested", "rate-limits.json")
 	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", cache)
 
-	var out, errBuf bytes.Buffer
-	code := runStatusline(nil, strings.NewReader(payload), &out, &errBuf)
+	// The process's REAL stdout, not an injected writer: runStatusline takes
+	// no writers any more, so the only way it could break the user's status
+	// line is by printing to os.Stdout — which is also the one route a stray
+	// fmt.Println would have taken straight past the injected buffer this
+	// used to assert on.
+	captured := filepath.Join(dir, "stdout")
+	f, err := os.Create(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realOut := os.Stdout
+	os.Stdout = f
+	code := runStatusline(strings.NewReader(payload))
+	os.Stdout = realOut
+	f.Close()
+	out, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	data, err := os.ReadFile(cache)
 	if err != nil {
 		data = nil
 	}
-	return code, out.String(), data
+	return code, string(out), data
 }
 
 // The statusline command must stay silent on stdout: whatever it prints is

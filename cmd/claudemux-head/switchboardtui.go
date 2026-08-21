@@ -148,20 +148,23 @@ type swModel struct {
 	width    int
 	height   int
 	lastErr  string
-	// Account budget meters, same source and shape as the head's: the abtop
-	// rate-limits cache re-read on every poll, plus the recent five-hour
-	// samples that feed the "empty in X" burn-rate ETA.
+	// Account budget meters, same source and shape as the head's: the
+	// rate-limits cache our `statusline` subcommand writes (or abtop's older
+	// file, while ours does not exist yet) re-read on every poll, plus the
+	// recent five-hour samples that feed the "empty in X" burn-rate ETA.
+	// rateLimitsPath is re-resolved on every tick while it holds that
+	// fallback — see refreshedRateLimitsPath.
 	rateLimitsPath string
 	rateLimits     RateLimits
 	rateOK         bool
 	pctSamples     []pctSample
-	// usageCachePath, modelWindows and usageUnavailable mirror the head's:
+	// usageCachePath, modelWindows and usageQuietUntil mirror the head's:
 	// the per-model weekly rows come from the shared usage cache, refreshed by
 	// whichever pane's loop finds it stale first. Empty rows whenever that
 	// path is unavailable or broken, which must never affect the gauges above.
-	usageCachePath   string
-	modelWindows     []ModelWindow
-	usageUnavailable bool
+	usageCachePath  string
+	modelWindows    []ModelWindow
+	usageQuietUntil time.Time
 	// conductReq is the last head-requested toggle this lobby applied, kept as
 	// the already-applied marker: the head leaves its request published, so
 	// every poll re-reads the same press and only an unseen value may toggle.
@@ -268,7 +271,14 @@ func (m *swModel) toggleStandby() {
 // out of swPollCmd so a tmux listing failure can never stall the per-model
 // rows and a usage spawn can never delay a fleet poll.
 func (m swModel) Init() tea.Cmd {
-	return tea.Batch(swPollCmd(m.selfPane, m.rateLimitsPath), usageCmd(m.usageCachePath))
+	return tea.Batch(swPollCmd(m.selfPane, m.rateLimitsPath),
+		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())))
+}
+
+// usageMaySpawn is the lobby's half of the head's gate: it may spawn a Claude
+// Code only when its own gauges render and it is not inside a quiet window.
+func (m swModel) usageMaySpawn(now time.Time) bool {
+	return usageMaySpawn(m.rateOK, m.usageQuietUntil, now)
 }
 
 // selectedPane returns the claude pane of the selected session — "" when there
@@ -502,6 +512,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case swTickMsg:
+		// Re-resolved every tick while the lobby is still on abtop's file, for
+		// the reason the head does it — see refreshedRateLimitsPath.
+		m.rateLimitsPath = refreshedRateLimitsPath(m.rateLimitsPath)
 		return m, swPollCmd(m.selfPane, m.rateLimitsPath)
 	case swSnapshotMsg:
 		// Rate limits first, before the tmux-error early return: the meters
@@ -571,12 +584,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(swNextTick(), pv, pub)
 	case usageTickMsg:
-		if m.usageUnavailable {
-			// See the head's usageTickMsg case: a stray tick must not restart
-			// the spawns the unavailable latch exists to stop.
-			return m, nil
-		}
-		return m, usageCmd(m.usageCachePath)
+		// See the head's usageTickMsg case: the tick is a file read and never
+		// stops; usageMaySpawn is the only gate on spawning.
+		return m, usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))
 	case usageMsg:
 		if msg.err != nil {
 			// Keep whatever rows we already have and try again next tick; the
@@ -588,10 +598,23 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// usageAnswered. Keep the rows we have rather than blanking them.
 			return m, usageTick()
 		}
+		if !msg.usage.Fetched {
+			// A cache read — take the rows and leave the spawn window alone.
+			// See the head's usageMsg case for why that split matters.
+			m.modelWindows = msg.usage.Models
+			return m, usageTick()
+		}
+		if !msg.usage.Available {
+			// This lobby's own credentials, not the machine's. Quiet the
+			// spawns, keep the rows, keep ticking.
+			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+			return m, usageTick()
+		}
 		m.modelWindows = msg.usage.Models
-		if !msg.usage.Available && !msg.usage.FetchedAt.IsZero() {
-			m.usageUnavailable = true
-			return m, nil
+		if len(msg.usage.Models) == 0 {
+			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+		} else {
+			m.usageQuietUntil = time.Time{}
 		}
 		return m, usageTick()
 	case swFleetRestartMsg:

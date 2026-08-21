@@ -673,3 +673,123 @@ func TestSetStatusLineIdempotent(t *testing.T) {
 		t.Errorf("stderr = %q, want silence", errBuf.String())
 	}
 }
+
+// The statusline artifact is this whole ~16MB binary, and Claude Code executes
+// it on every statusline render of every session on the machine. An in-place
+// rewrite therefore races those renders, and losing the race means ETXTBSY —
+// at which point runHookEnsure returns 4 BEFORE setStatusLine runs and before
+// settings.json is written, so a single unlucky launch silently drops its
+// whole hook registration. Replacing the file by rename cannot fail that way:
+// rename needs write permission on the DIRECTORY, not on the file, and it
+// leaves any process already executing the old inode running it untouched.
+//
+// ETXTBSY cannot be produced portably from a test. A read-only destination is
+// the same shape of failure — the existing file cannot be opened for writing —
+// and the same fix distinguishes them.
+func TestHookEnsureInstallsOverAnUnwritableStatusline(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the file mode this test depends on")
+	}
+	settingsPath := writeSettings(t, "")
+	script := stubScript(t)
+
+	var b1 bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &b1, &b1); code != 0 {
+		t.Fatalf("first runHookEnsure() = %d, want 0 (stderr %s)", code, b1.String())
+	}
+	home, _ := os.UserHomeDir()
+	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
+	wantBytes, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
+	}
+
+	// An artifact from an older build: different bytes, so the copy is due —
+	// and unwritable, standing in for one being executed right now.
+	if err := os.WriteFile(slPath, []byte("#!/bin/sh\n# an older build\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(slPath, 0o755) })
+
+	// Drop the statusLine claim so this run has to make it again — that is the
+	// registration a failed copy silently takes down with it.
+	settings := readSettings(t, settingsPath)
+	delete(settings, "statusLine")
+	out, marshalErr := json.MarshalIndent(settings, "", "  ")
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var b2 bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0: a statusline artifact that cannot be opened for writing must be REPLACED, not fail the whole run (stderr %s)", code, b2.String())
+	}
+	sl, _ := readSettings(t, settingsPath)["statusLine"].(map[string]any)
+	if cmd, _ := sl["command"].(string); cmd == "" {
+		t.Error("statusLine was not registered: the failed copy took the whole registration down with it")
+	}
+	got, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantBytes) {
+		t.Errorf("the stale artifact is still in place (%d bytes, want the %d-byte current binary)", len(got), len(wantBytes))
+	}
+	if info, err := os.Stat(slPath); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want 0755: a statusline Claude Code cannot execute is no better than a stale one", info.Mode().Perm())
+	}
+}
+
+// The other half of replace-by-rename: a render already executing the old
+// artifact keeps reading the old bytes, and no half-written file is ever
+// visible at the destination path.
+func TestCopyExecutableIfChangedLeavesTheOldInodeIntact(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	if err := os.WriteFile(src, []byte("the new build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("the old build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	inFlight, err := os.Open(dst) // the render that is already running
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Close()
+
+	if err := copyExecutableIfChanged(src, dst); err != nil {
+		t.Fatalf("copyExecutableIfChanged: %v", err)
+	}
+
+	buf := make([]byte, len("the old build"))
+	if _, err := inFlight.Read(buf); err != nil {
+		t.Fatalf("reading the in-flight handle: %v", err)
+	}
+	if string(buf) != "the old build" {
+		t.Errorf("the in-flight handle now reads %q: the running artifact was rewritten under it", buf)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "the new build" {
+		t.Errorf("dst = %q, want the new build", got)
+	}
+
+	// Nothing left behind: a temp file that survives becomes a second ~16MB
+	// copy in ~/.claude/hooks on every launch.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("%d files in the directory, want just src and dst: %v", len(entries), entries)
+	}
+}

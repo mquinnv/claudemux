@@ -36,7 +36,13 @@ type statuslineWindow struct {
 // command prints becomes the user's status line, and any non-zero exit is
 // surfaced to them as a broken statusline — neither is an acceptable outcome
 // for a cache write that only claudemux cares about.
-func runStatusline(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+//
+// Hence the signature: stdin and an exit code, and nothing else. The other
+// subcommands here take (args, stdout, stderr) because they parse flags and
+// report; this one takes no flags (Claude Code invokes it with none) and has
+// nowhere to report TO, so carrying those parameters for symmetry would only
+// have advertised an ability to speak that this command must never use.
+func runStatusline(stdin io.Reader) int {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return 0

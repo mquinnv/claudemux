@@ -195,8 +195,13 @@ type model struct {
 	// bg holds background tasks this session launched and has not seen finish.
 	// Accumulated from new events as they arrive — see bgTracker for why it
 	// cannot be recomputed from allEvents.
-	bg             bgTracker
-	rateLimitsPath string      // ~/.claude/abtop-rate-limits.json or override
+	bg bgTracker
+	// rateLimitsPath is the 5h/wk cache this head reads: ours
+	// (~/.claude/claudemux/rate-limits.json), abtop's file as the migration
+	// fallback while ours does not exist yet, or CLAUDEMUX_RATE_LIMITS_PATH.
+	// Re-resolved on every tick while it holds the fallback — see
+	// refreshedRateLimitsPath.
+	rateLimitsPath string
 	usageCachePath string      // ~/.claude/claudemux/usage.json or override
 	pctSamples     []pctSample // 5h-window snapshots over time, for burn-rate
 
@@ -217,10 +222,15 @@ type model struct {
 	// whenever the pull path is unavailable or broken, which must never affect
 	// the 5h/wk gauges above.
 	modelWindows []ModelWindow
-	// usageUnavailable records a rate_limits_available:false answer (API key,
-	// Bedrock, Vertex). Once seen the loop stops: there is nothing to fetch,
-	// and those users should pay zero spawns.
-	usageUnavailable bool
+	// usageQuietUntil suspends the SPAWN half of the usage loop until the
+	// given time, after an answer that could produce nothing to render: a
+	// rate_limits_available:false verdict this pane fetched itself (API key,
+	// Bedrock, Vertex, missing profile scope) or a plan with no model-scoped
+	// window at all. The cache half keeps running throughout, so rows another
+	// pane fetches still appear here, and the window expires so a `claude
+	// login` or a plan that gains a model window recovers without a restart.
+	// See usageMaySpawn.
+	usageQuietUntil time.Time
 	// conductRaw is the last-read @claudemux_conducting value, parsed at
 	// render time (not poll time) so its heartbeat keeps decaying against the
 	// clock even if polls stall — see conductChip.
@@ -734,7 +744,12 @@ func (m model) Init() tea.Cmd {
 	// (usageMsg → usageTick → usageTickMsg) rather than a rider on pollData:
 	// the dataMsg case has several early returns and no command accumulator,
 	// so a command appended there would be dropped on most paths.
-	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath)}
+	//
+	// This first call can only ever READ the cache: rateOK is false until the
+	// first poll lands, so usageMaySpawn says no. That is the right answer
+	// anyway — a fleet coming up together would otherwise race to spawn before
+	// any of them knows whether it can render a meter line at all.
+	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))}
 	// The project color is static for the life of a session, so it is published
 	// once here rather than from the per-tick publish path.
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
@@ -768,14 +783,55 @@ type usageMsg struct {
 	err   error
 }
 
-// usageCmd reads the shared cache and, only when it has aged past usageTTL,
-// spawns a Claude Code to refresh it. The lock inside refreshUsageCache keeps
-// concurrent panes to one spawn between them.
+// usageQuietPeriod is how long a pane stays off the SPAWN path after an answer
+// that can produce nothing to render.
+//
+// A spawn is not free: ~2.2s of Claude Code plus every SessionStart hook the
+// user has installed. Repeating that every usageTTL forever, to be told the
+// same nothing, is the cost this window exists to cap — six hours takes it
+// from 96 spawns a day to four. It is a delay and never a latch:
+// rate_limits_available:false can be fixed by a `claude login`, and a plan can
+// gain a model-scoped window, neither of which restarts this process. The
+// cache half of the loop keeps running throughout at zero spawn cost, so rows
+// another pane fetches show up here within the check interval regardless.
+const usageQuietPeriod = 6 * time.Hour
+
+// usageMaySpawn reports whether this tick may spawn a Claude Code, as opposed
+// to merely re-reading the shared cache.
+//
+// Two gates, both of them recoverable states rather than latches:
+//
+//   - rateOK. The gauge line renders only when the 5h/wk push path has data
+//     (rateGaugeParts returns an empty set otherwise), so a pane without it
+//     shows no meters at all — and a model row appended to a line that is
+//     never drawn is worth exactly nothing. This is the ordinary state of a
+//     user who kept their own statusline, which setStatusLine deliberately
+//     declines to take over: without this gate that user spawns a Claude Code
+//     every fifteen minutes, forever, for no visible output. It clears itself
+//     the moment the push path starts working, since rateOK is recomputed from
+//     every poll.
+//   - quietUntil. See usageQuietPeriod.
+func usageMaySpawn(rateOK bool, quietUntil, now time.Time) bool {
+	return rateOK && !now.Before(quietUntil)
+}
+
+func (m model) usageMaySpawn(now time.Time) bool {
+	return usageMaySpawn(m.rateOK, m.usageQuietUntil, now)
+}
+
+// usageCmd reads the shared cache and, when allowSpawn and the cache has aged
+// past usageTTL, spawns a Claude Code to refresh it. The lock inside
+// refreshUsageCache keeps concurrent panes to one spawn between them.
+//
+// allowSpawn false makes this a pure file read: the rows another pane cached
+// are still picked up, but nothing is spawned. That is what keeps a pane which
+// can show nothing (usageMaySpawn) from paying for answers it cannot render,
+// without ever cutting it off from an answer someone else paid for.
 //
 // The whole loop is additive: it feeds the per-model rows and nothing else, so
 // every failure mode here degrades to no model rows and never touches the
 // 5h/wk gauges.
-func usageCmd(cachePath string) tea.Cmd {
+func usageCmd(cachePath string, allowSpawn bool) tea.Cmd {
 	return func() tea.Msg {
 		if cachePath == "" {
 			// No home directory to cache under. Refusing here matters: with an
@@ -784,7 +840,8 @@ func usageCmd(cachePath string) tea.Cmd {
 			return usageMsg{err: errors.New("no usage cache path")}
 		}
 		now := time.Now()
-		if cached, fresh := readUsageCache(cachePath, now); fresh {
+		cached, fresh := readUsageCache(cachePath, now)
+		if fresh || !allowSpawn {
 			return usageMsg{usage: cached}
 		}
 		usage, err := refreshUsageCache(context.Background(), cachePath, usageClaudeBin(), now)
@@ -1122,6 +1179,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		cmds := []tea.Cmd{m.tick()}
+		// Re-resolved every tick while this head is still on abtop's file, so
+		// a pane that started in the upgrade gap — `hook ensure` has claimed
+		// the statusLine slot, stopping abtop's shim, but Claude Code has not
+		// rendered a statusline yet, so our cache does not exist — migrates to
+		// our cache the moment it appears instead of showing abtop's frozen
+		// last numbers for the rest of the pane's life. Confident stale
+		// numbers are worse than none. Costs one stat per tick, and only until
+		// the migration happens.
+		m.rateLimitsPath = refreshedRateLimitsPath(m.rateLimitsPath)
 		if m.shouldAcquireSummarizer(time.Time(msg)) {
 			m.acquiringKey = true
 			m.keyAttempts++
@@ -1426,14 +1492,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, killSessionCmd(m.selfPane)
 
 	case usageTickMsg:
-		if m.usageUnavailable {
-			// Belt and braces: the unavailable answer already stopped
-			// rescheduling, so a tick here would have to be a stray — but one
-			// getting through would restart the spawns this latch exists to
-			// prevent.
-			return m, nil
-		}
-		return m, usageCmd(m.usageCachePath)
+		// The tick itself never stops: it is a file read, and it is how a pane
+		// picks up rows another pane fetched. Whether it may also SPAWN is the
+		// single gate in usageMaySpawn.
+		return m, usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))
 
 	case usageMsg:
 		if msg.err != nil {
@@ -1447,13 +1509,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// rows we have rather than blanking them, and try again.
 			return m, usageTick()
 		}
+		if !msg.usage.Fetched {
+			// A cache read: this pane's credentials and this pane's plan had
+			// nothing to do with it. Take the rows — that is how a pane picks
+			// up what another pane fetched — and touch nothing else. The spawn
+			// window is a statement about OUR credentials and OUR plan, and
+			// re-deriving it from a file on every tick would break it both
+			// ways: one pane's Bedrock verdict would quiet all of them, and a
+			// cache that keeps reading back "no rows" would re-arm the window
+			// on every read, turning a six-hour delay into the permanent latch
+			// this replaced.
+			m.modelWindows = msg.usage.Models
+			return m, usageTick()
+		}
+		if !msg.usage.Available {
+			// Not a Claude.ai subscriber SESSION — this pane's own credentials
+			// (API key, Bedrock, Vertex, missing scope). Quiet the spawns and
+			// leave modelWindows alone: the verdict is about this process, not
+			// about the account, so rows another pane fetched for the same
+			// machine stay on screen.
+			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+			return m, usageTick()
+		}
 		m.modelWindows = msg.usage.Models
-		if !msg.usage.Available && !msg.usage.FetchedAt.IsZero() {
-			// Not a Claude.ai subscriber session. Stop the loop entirely
-			// rather than spawning a Claude Code every fifteen minutes to be
-			// told the same thing.
-			m.usageUnavailable = true
-			return m, nil
+		if len(msg.usage.Models) == 0 {
+			// A real answer of ours with no model-scoped window in it — the
+			// ordinary shape of a plan that has none. Nothing here renders, so
+			// back the spawns off rather than paying for the same nothing
+			// every usageTTL for the life of the pane.
+			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+		} else {
+			m.usageQuietUntil = time.Time{}
 		}
 		return m, usageTick()
 	}

@@ -244,12 +244,26 @@ func TestSwUsageMsgEmptyLostRaceKeepsRows(t *testing.T) {
 		t.Error("cmd = nil, want the loop rescheduled after an error")
 	}
 
-	got, cmd = m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now}})
-	if next := got.(swModel); !next.usageUnavailable {
-		t.Error("usageUnavailable = false, want it latched on a non-subscriber answer")
+	// A non-subscriber answer the LOBBY fetched itself quiets its spawns while
+	// keeping both the rows and the cache half of the loop — see the head's
+	// TestUsageMsgUnavailableQuietsOwnSpawnsAndKeepsRows.
+	got, cmd = m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now, Fetched: true}})
+	next = got.(swModel)
+	if next.usageMaySpawn(now.Add(usageCheckInterval)) {
+		t.Error("the lobby's next tick may still spawn after its own unavailable answer, want the spawns quieted")
 	}
-	if cmd != nil {
-		t.Error("cmd != nil, want the loop stopped for a non-subscriber session")
+	if len(next.modelWindows) != 1 {
+		t.Errorf("modelWindows = %+v, want the rows kept: the verdict is about this process's credentials, not the account", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the cache half of the lobby's loop still ticking")
+	}
+
+	// The same verdict arriving from the shared cache is another pane's
+	// business and must change nothing here.
+	got, _ = m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now}})
+	if next := got.(swModel); !next.usageMaySpawn(now.Add(usageCheckInterval)) {
+		t.Error("a cached unavailable verdict quieted the lobby, want it ignored")
 	}
 }
 

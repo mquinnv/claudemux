@@ -24,10 +24,24 @@ type ModelWindow struct {
 // PlanUsage is the subset of a get_usage response the meters render.
 type PlanUsage struct {
 	// Available mirrors rate_limits_available: false for API key, Bedrock,
-	// Vertex, or a missing profile scope. The poller stops when it sees this.
+	// Vertex, or a missing profile scope. It is a verdict on the CREDENTIALS
+	// OF THE PROCESS THAT ASKED, not on the machine — see Fetched.
 	Available bool
 	Models    []ModelWindow
 	FetchedAt time.Time
+	// Fetched marks a value this process obtained from its own spawn, as
+	// opposed to one it read out of the machine-global cache. It is in-memory
+	// provenance only and is deliberately absent from rawUsageCache: nothing
+	// read back off disk may ever claim to be ours.
+	//
+	// It exists because Available is credential-scoped. fetchPlanUsage
+	// inherits the spawning pane's environment, so a pane with
+	// CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY set gets
+	// rate_limits_available:false while the pane beside it, on the same
+	// machine and the same account, gets true. Only the pane that actually
+	// paid for the answer may act on an unavailable verdict; a pane reading
+	// someone else's cached one must not.
+	Fetched bool
 }
 
 // usageTimeout bounds one poll. The measured spawn is ~2.2s including the
@@ -311,8 +325,33 @@ func readUsageCache(path string, now time.Time) (PlanUsage, bool) {
 		}
 		u.Models = append(u.Models, w)
 	}
-	age := now.Sub(u.FetchedAt)
-	return u, age >= 0 && age < usageTTL
+	return u, usageStampFresh(u.FetchedAt, now)
+}
+
+// usageStampFresh reports whether stamp is inside the TTL window measured in
+// EITHER direction from now. It is the single rule behind both of this file's
+// time windows: the cache's freshness and the post-failure backoff.
+//
+// They used to disagree about the same clock. The backoff took the absolute
+// value; the cache read required age >= 0 and called anything stamped in the
+// future infinitely stale. A wall clock that steps BACKWARDS — suspend/resume,
+// an NTP correction — is exactly what leaves a cache written moments ago
+// sitting in the future, so the same skew that the backoff shrugged off made
+// every cache read report stale and re-spawn a Claude Code for an answer
+// already on disk.
+//
+// Symmetric, and BOUNDED in the future rather than unbounded, so neither
+// window can be wedged by a nonsense timestamp — a clock that jumped forward,
+// a hand-edited file. Past the window in either direction the cache is
+// refetched and rewritten with the current clock, and the marker is ignored;
+// both halves self-heal rather than latching. What the symmetry costs is at
+// most one TTL of extra staleness on a weekly window, which is nothing.
+func usageStampFresh(stamp, now time.Time) bool {
+	age := now.Sub(stamp)
+	if age < 0 {
+		age = -age
+	}
+	return age < usageTTL
 }
 
 // usageFailMarkerPath is the sentinel a failed poll leaves beside the cache.
@@ -331,18 +370,15 @@ func readUsageCache(path string, now time.Time) (PlanUsage, bool) {
 func usageFailMarkerPath(path string) string { return path + ".failed" }
 
 // usageBackoffActive reports whether a recent failed poll should suppress this
-// spawn. A marker stamped further than usageTTL into the FUTURE is ignored
-// rather than trusted: a clock jump must not disable polling indefinitely.
+// spawn. The window is usageStampFresh's symmetric one: a marker stamped
+// further than usageTTL into the FUTURE is ignored rather than trusted, so a
+// clock jump cannot disable polling indefinitely.
 func usageBackoffActive(path string, now time.Time) bool {
 	st, err := os.Stat(usageFailMarkerPath(path))
 	if err != nil {
 		return false
 	}
-	age := now.Sub(st.ModTime())
-	if age < 0 {
-		age = -age
-	}
-	return age < usageTTL
+	return usageStampFresh(st.ModTime(), now)
 }
 
 // markUsageFailure arms the backoff. Best effort: if the marker cannot be
@@ -400,6 +436,20 @@ func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Tim
 		markUsageFailure(path, now)
 		return PlanUsage{}, err
 	}
+	usage.Fetched = true
+	clearUsageFailure(path)
+	if !usage.Available {
+		// NOT written to the cache, deliberately. rate_limits_available:false
+		// is a statement about the credentials this particular spawn
+		// inherited, and the cache is machine-global: a single pane started
+		// with CLAUDE_CODE_USE_BEDROCK=1 or ANTHROPIC_API_KEY set would
+		// otherwise win the lock, stamp available:false over rows a
+		// subscriber pane fetched, and take the model meters away from every
+		// other pane on the machine. The caller gets the verdict via the
+		// return value (Fetched is set), which is exactly the scope it
+		// applies to: this process.
+		return usage, nil
+	}
 	if writeErr := writeUsageCache(path, usage); writeErr != nil {
 		// The fetch succeeded; a cache we could not persist still serves this
 		// process for this tick. It arms the backoff all the same: nothing
@@ -409,6 +459,5 @@ func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Tim
 		markUsageFailure(path, now)
 		return usage, nil
 	}
-	clearUsageFailure(path)
 	return usage, nil
 }

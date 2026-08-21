@@ -91,7 +91,7 @@ func main() {
 	// stdin. Dispatched here, before flag.Parse(), for the same reason every
 	// other subcommand is.
 	if len(os.Args) > 1 && os.Args[1] == "statusline" {
-		os.Exit(runStatusline(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+		os.Exit(runStatusline(os.Stdin))
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "switchboard" {

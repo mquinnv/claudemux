@@ -423,3 +423,168 @@ func TestRefreshUsageCacheSuccessClearsBackoff(t *testing.T) {
 		t.Errorf("failure marker still on disk after a successful poll (stat err = %v)", err)
 	}
 }
+
+// unavailableClaude impersonates a Claude Code answering from a pane whose
+// environment carries ANTHROPIC_API_KEY or CLAUDE_CODE_USE_BEDROCK=1: the
+// request succeeds and reports rate_limits_available:false.
+func unavailableClaude(t *testing.T, counter string) string {
+	t.Helper()
+	return countingClaude(t, counter,
+		`{"type":"control_response","response":{"subtype":"success","request_id":"usage-1",`+
+			`"response":{"subscription_type":null,"rate_limits_available":false,"rate_limits":null}}}`, 0)
+}
+
+// One pane's credentials must never take the model rows away from the others.
+//
+// fetchPlanUsage inherits the environment of the pane that spawned it, but the
+// cache is machine-global: a head started with CLAUDE_CODE_USE_BEDROCK=1 or
+// ANTHROPIC_API_KEY set wins the single-flight lock, is told
+// rate_limits_available:false, and — before this — wrote available:false with
+// no rows over a subscriber pane's good answer. Every other head and the
+// switchboard then read that, latched, and stopped polling for the life of the
+// process: the model meters vanished machine-wide until every pane restarted.
+//
+// So an unavailable verdict is never persisted. It is returned to the caller
+// (with Fetched set, which is the scope it applies to) and the shared cache is
+// left exactly as it was.
+func TestRefreshUsageCacheKeepsSharedRowsWhenUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+	now := time.Now()
+
+	// What a subscriber pane fetched earlier, now past the TTL.
+	if err := writeUsageCache(path, PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+		FetchedAt: now.Add(-usageTTL - time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := refreshUsageCache(context.Background(), path, unavailableClaude(t, counter), now)
+	if err != nil {
+		t.Fatalf("refreshUsageCache: %v", err)
+	}
+	if got.Available {
+		t.Error("Available = true, want the unavailable verdict reported to the caller")
+	}
+	if !got.Fetched {
+		t.Error("Fetched = false, want the verdict marked as this process's own")
+	}
+	if n := spawnCount(t, counter); n != 1 {
+		t.Fatalf("spawned %d times, want 1", n)
+	}
+
+	// The shared cache — what every OTHER pane on the machine reads.
+	onDisk, _ := readUsageCache(path, now)
+	if !onDisk.Available {
+		t.Error("available:false was written to the machine-global cache; every other pane would read it and stop polling")
+	}
+	if len(onDisk.Models) != 1 || onDisk.Models[0].Name != "Fable" {
+		t.Errorf("cached models = %+v, want the subscriber pane's Fable row untouched", onDisk.Models)
+	}
+}
+
+// The unavailable path is not a failure: a later poll from a pane with real
+// OAuth credentials must be able to run immediately rather than sitting out a
+// backoff armed by the Bedrock pane beside it.
+func TestRefreshUsageCacheUnavailableArmsNoBackoff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+	now := time.Now()
+
+	if _, err := refreshUsageCache(context.Background(), path, unavailableClaude(t, counter), now); err != nil {
+		t.Fatalf("refreshUsageCache: %v", err)
+	}
+	if usageBackoffActive(path, now.Add(time.Second)) {
+		t.Fatal("backoff armed by an unavailable verdict: it would hold back the subscriber panes too")
+	}
+
+	good := countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0)
+	got, err := refreshUsageCache(context.Background(), path, good, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("refreshUsageCache from a subscriber pane: %v", err)
+	}
+	if len(got.Models) != 1 || got.Models[0].Name != "Fable" {
+		t.Errorf("got = %+v, want the subscriber pane's fetch to have gone through", got.Models)
+	}
+	if n := spawnCount(t, counter); n != 2 {
+		t.Errorf("spawned %d times, want 2 (the subscriber pane was held back)", n)
+	}
+}
+
+// A wall clock that steps BACKWARDS — suspend/resume, an NTP correction —
+// leaves a cache written moments ago stamped in the future. The backoff marker
+// already shrugged that off (it took the absolute age); the cache read did not
+// (it required age >= 0 and called any future stamp infinitely stale), so the
+// two halves of this file disagreed about the same clock and the same skew,
+// and the machine went back to spawning a Claude Code for an answer already on
+// disk. One symmetric rule now covers both: inside the TTL window in either
+// direction is inside the window.
+func TestUsageWindowsAgreeAcrossABackwardClockJump(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+	now := time.Now()
+
+	// Written a few minutes ago; then the clock stepped back further, so the
+	// stamp reads a minute into the future. The answer is a minute old.
+	skewed := now.Add(time.Minute)
+	if err := writeUsageCache(path, PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+		FetchedAt: skewed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, fresh := readUsageCache(path, now)
+	if !fresh {
+		t.Error("fresh = false for a future-stamped cache: a clock step back re-spawns a Claude Code for an answer already on disk")
+	}
+	if len(got.Models) != 1 {
+		t.Errorf("Models = %+v, want the cached row still served", got.Models)
+	}
+	// The other half of the file, on the identical stamp. These two must not
+	// disagree: that disagreement is the whole finding.
+	if !usageStampFresh(skewed, now) {
+		t.Error("usageStampFresh disagrees with the cache read on the same future stamp")
+	}
+
+	// End to end through the loop's own command, which reads the cache against
+	// the real clock: nothing may spawn while a future-stamped cache is inside
+	// the window.
+	t.Setenv("CLAUDEMUX_CLAUDE_BIN", countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0))
+	_ = usageCmd(path, true)()
+	if n := spawnCount(t, counter); n != 0 {
+		t.Errorf("spawned %d times against a future-stamped cache, want 0", n)
+	}
+
+	// The window is bounded in the future too, so a nonsense stamp — a clock
+	// that jumped forward, a hand-edited file — cannot pin the meters to frozen
+	// numbers forever. It reads stale, is refetched, and is rewritten against
+	// the current clock, which settles the loop back to one spawn per TTL
+	// rather than one per check.
+	ahead := filepath.Join(t.TempDir(), "usage.json")
+	if err := writeUsageCache(ahead, PlanUsage{Available: true, FetchedAt: now.Add(24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, fresh := readUsageCache(ahead, now); fresh {
+		t.Error("fresh = true for a cache stamped a day ahead, want it refetched rather than trusted forever")
+	}
+	if usageStampFresh(now.Add(24*time.Hour), now) {
+		t.Error("usageStampFresh accepts a day-ahead stamp; a backoff marker carrying one could then wedge the poller off")
+	}
+	_ = usageCmd(ahead, true)()
+	if n := spawnCount(t, counter); n != 1 {
+		t.Fatalf("spawned %d times for the day-ahead cache, want exactly 1", n)
+	}
+	if _, fresh := readUsageCache(ahead, now); !fresh {
+		t.Error("the refetch did not re-stamp the cache against the current clock: the machine would spawn again on the very next check")
+	}
+	_ = usageCmd(ahead, true)()
+	if n := spawnCount(t, counter); n != 1 {
+		t.Errorf("spawned %d times by the second check, want still 1", n)
+	}
+}
