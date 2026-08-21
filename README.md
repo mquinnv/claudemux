@@ -304,6 +304,78 @@ live session keeps running whatever it started with.
 
 `claudemux-head hook ensure` installs and repairs all three scripts together.
 
+## The statusline command and the account meters
+
+The `5h` and `wk` gauges in the head and the switchboard come from Claude Code itself.
+Claude Code hands its **statusline command** a JSON payload on every render, and that
+payload carries the account's rate-limit windows — so claudemux ships one:
+`claudemux-head statusline`, installed alongside the hooks as
+`~/.claude/hooks/claudemux-statusline` and registered in the `statusLine` key of
+`~/.claude/settings.json`. It prints nothing (whatever a statusline command prints
+*becomes* your status line) and writes `~/.claude/claudemux/rate-limits.json`, which the
+head panes read.
+
+**`statusLine` is a single exclusive setting, so claiming it takes it from whoever had
+it.** `claudemux-head hook ensure` therefore claims it only when it is *empty*, when it
+is *already ours*, or when it is `abtop-statusline.sh` — the shim these meters used to
+depend on. **Any other statusline you configured is left byte-for-byte alone**, a line
+saying so is printed to stderr, and the account meters simply stay blank. Nothing here
+will silently replace a status line you built.
+
+Two consequences worth stating plainly:
+
+- If you were using **abtop**'s statusline shim, claudemux takes the slot from it and
+  `~/.claude/abtop-rate-limits.json` stops being refreshed. Running heads migrate to our
+  cache on their own within a second; abtop's own TUI, if you still run it, would go
+  stale. Removing that dependency is the point of the change, not a side effect — which
+  is why the claim is narrowed to abtop's exact filename and announced rather than done
+  quietly.
+- If you keep your own statusline, everything else in claudemux works; only the account
+  meters (`5h`, `wk`, and the per-model rows below) are unavailable.
+
+`CLAUDEMUX_RATE_LIMITS_PATH` overrides the cache path for both the writer and the readers.
+
+### Per-model weekly meters, and the `claude` process behind them
+
+Max plans carry per-model weekly windows (a `fab` gauge for Fable, for example) that the
+statusline payload does not include — Claude Code narrows it to the 5-hour and 7-day
+windows before handing it over. The only place those rows exist is Claude Code's own
+`get_usage` control request, so **claudemux runs a short-lived `claude` process to ask
+for them**:
+
+```
+claude -p --input-format stream-json --output-format stream-json \
+       --no-session-persistence --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+```
+
+What that costs you, stated exactly:
+
+- **~2.2 seconds, and it fires your `SessionStart` hooks** — the same ones any `claude`
+  start fires. Suppressing them means isolating `CLAUDE_CONFIG_DIR`, which also loses the
+  OAuth profile the answer depends on, so it is not an option.
+- **No tokens and no inference.** No user message is ever sent; the probe that
+  established this returned `total_cost_usd: 0` and an empty `model_usage`. It does not
+  consume any of the limit it reports.
+- **At most one spawn per 15 minutes for the whole machine**, not per pane: the answer
+  goes in `~/.claude/claudemux/usage.json` behind a lock, and every other head and the
+  switchboard read that file.
+
+It also stops asking when there is nothing to be gained, and starts again by itself if
+that changes:
+
+- No account meters rendering at all (you kept your own statusline) — **no spawns**.
+- `rate_limits_available: false`, i.e. that pane runs on an API key, Bedrock, or Vertex,
+  or its profile lacks the scope — that pane stops asking. The verdict is about that
+  pane's credentials, so it is never written to the shared cache and never affects the
+  others.
+- A plan with no per-model window at all — backs off to one attempt every few hours
+  rather than one every 15 minutes.
+
+`CLAUDEMUX_USAGE_CACHE_PATH` overrides the cache path, and `CLAUDEMUX_CLAUDE_BIN` points
+the poller at a specific `claude` binary. If the whole thing is unavailable or broken, the
+`5h` and `wk` gauges are unaffected: the per-model rows are strictly additive.
+
+
 ## Configuration
 
 `claudemux-head` reads `config.yml` from `$XDG_CONFIG_HOME/claudemux/` (default
@@ -664,6 +736,11 @@ default) of *active* session — none while the session is idle.
 - **If you already have `ANTHROPIC_API_KEY` exported in your shell for other tools,
   claudemux-head will pick it up and start billing you without any separate opt-in.** Set
   `summary.enabled: false` if you don't want that.
+
+Summaries are the only thing claudemux spends. The `claude` process behind the per-model
+weekly meters sends no message and runs no inference — no tokens, nothing billed, and
+none of the limit it reports consumed — though it does cost ~2.2s and one firing of your
+`SessionStart` hooks per poll. See **The statusline command and the account meters**.
 
 ## Secrets and secret managers
 

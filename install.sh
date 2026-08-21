@@ -85,7 +85,13 @@ done
 
 echo "claudemux: installed to $PREFIX"
 
-# Register the Claude Code hook so nobody hand-edits settings.json.
+# Register the Claude Code hooks so nobody hand-edits settings.json. This also
+# claims the `statusLine` slot of ~/.claude/settings.json for claudemux's own
+# statusline command, which is what feeds the 5h/wk account meters. The slot is
+# claimed only when it is empty, already ours, or abtop's shim; any other
+# statusline you set is left alone and reported, and the meters simply stay
+# blank. See "The statusline command and the account meters" in the README.
+echo "claudemux: registering hooks and claiming the statusLine slot in ~/.claude/settings.json"
 "$PREFIX/claudemux-head" hook ensure || echo "claudemux: could not register the hook automatically" >&2
 
 # Offer to put $PREFIX on PATH. Only when it isn't already, and only
