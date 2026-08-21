@@ -315,13 +315,73 @@ func readUsageCache(path string, now time.Time) (PlanUsage, bool) {
 	return u, age >= 0 && age < usageTTL
 }
 
+// usageFailMarkerPath is the sentinel a failed poll leaves beside the cache.
+//
+// It exists because usageTTL is measured off the CACHE's timestamp, and a
+// failure writes no cache: without this marker, a missing `claude` or an
+// erroring get_usage would put every pane back to spawning on every check
+// interval, forever, each attempt burning up to usageTimeout. The lock does
+// not help there — panes tick on their own staggered schedules and never
+// collide, so N panes means N spawns per interval rather than one.
+//
+// It is a SEPARATE file, and the cache is never touched on failure, so a
+// transient outage cannot clear or stale-date rows a good poll already stored.
+// The marker's mtime is the clock, set explicitly from the caller's `now` so
+// the window is testable without waiting on it.
+func usageFailMarkerPath(path string) string { return path + ".failed" }
+
+// usageBackoffActive reports whether a recent failed poll should suppress this
+// spawn. A marker stamped further than usageTTL into the FUTURE is ignored
+// rather than trusted: a clock jump must not disable polling indefinitely.
+func usageBackoffActive(path string, now time.Time) bool {
+	st, err := os.Stat(usageFailMarkerPath(path))
+	if err != nil {
+		return false
+	}
+	age := now.Sub(st.ModTime())
+	if age < 0 {
+		age = -age
+	}
+	return age < usageTTL
+}
+
+// markUsageFailure arms the backoff. Best effort: if the marker cannot be
+// written we are no worse off than before it existed.
+func markUsageFailure(path string, now time.Time) {
+	marker := usageFailMarkerPath(path)
+	f, err := os.OpenFile(marker, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return
+	}
+	f.Close()
+	// Explicit rather than relying on the create/truncate to move mtime:
+	// truncating an already-empty file need not touch it on every filesystem,
+	// which would pin the window to the FIRST failure instead of the last.
+	_ = os.Chtimes(marker, now, now)
+}
+
+// clearUsageFailure disarms the backoff after a poll that actually worked, so
+// recovery is immediate rather than waiting out the remainder of the window.
+func clearUsageFailure(path string) { _ = os.Remove(usageFailMarkerPath(path)) }
+
 // refreshUsageCache fetches and caches, taking a lock first so that N head
 // panes on one machine cause one spawn rather than N. A caller that loses the
-// race returns the current cache immediately instead of waiting.
+// race returns the current cache immediately instead of waiting. A caller
+// arriving inside the post-failure backoff window does the same, without
+// spawning anything.
 func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Time) (PlanUsage, error) {
 	lock := path + ".lock"
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return PlanUsage{}, err
+	}
+	// Checked BEFORE the lock, deliberately: the panes this has to hold back
+	// are the staggered ones that would never contend for the lock at all.
+	// Reported as a cache read rather than an error — there is nothing for the
+	// caller to do about it, and the rows on disk (if any) are still the best
+	// answer available.
+	if usageBackoffActive(path, now) {
+		cached, _ := readUsageCache(path, now)
+		return cached, nil
 	}
 	f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -337,12 +397,18 @@ func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Tim
 
 	usage, err := fetchPlanUsage(ctx, claudeBin, now)
 	if err != nil {
+		markUsageFailure(path, now)
 		return PlanUsage{}, err
 	}
 	if writeErr := writeUsageCache(path, usage); writeErr != nil {
 		// The fetch succeeded; a cache we could not persist still serves this
-		// process for this tick.
+		// process for this tick. It arms the backoff all the same: nothing
+		// landed on disk, so the next check would otherwise find no fresh
+		// cache and spawn again immediately — the same storm a failed fetch
+		// would cause.
+		markUsageFailure(path, now)
 		return usage, nil
 	}
+	clearUsageFailure(path)
 	return usage, nil
 }

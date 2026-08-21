@@ -252,3 +252,34 @@ func TestSwUsageMsgEmptyLostRaceKeepsRows(t *testing.T) {
 		t.Error("cmd != nil, want the loop stopped for a non-subscriber session")
 	}
 }
+
+// The lobby's half of the same rule: with a model row it has three bars
+// (5h, wk, fab), not the two it used to hardcode. Dividing the slack by two
+// overshoots on three bars, the overflow guard rejects the widened set, and
+// the line ends up short of the pane by the whole slack.
+func TestSwMetersLineWidensEveryBarIncludingModelRows(t *testing.T) {
+	now := time.Now()
+	m := swRateModel(now, 0)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	var prevBars int
+	for _, w := range []int{120, 140, 160, 200} {
+		m.width = w
+		line := swMetersLine(m, now)
+		for _, want := range []string{"5h", "wk", "fab", "empty in"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("at width %d the %q gauge is missing: %q", w, want, line)
+			}
+		}
+		// Three bars share the slack, so at most two columns may be stranded.
+		content := len(" ") + lipgloss.Width(strings.TrimRight(ansi.Strip(line), " "))
+		if unspent := w - content; unspent > 2 {
+			t.Errorf("at width %d, %d columns left unspent (want <= 2): the slack is being divided by the wrong bar count: %q", w, unspent, line)
+		}
+		if bars := barCellCount(line); bars <= prevBars {
+			t.Errorf("at width %d, total bar cells = %d, want more than %d at the previous width", w, bars, prevBars)
+		} else {
+			prevBars = bars
+		}
+	}
+}

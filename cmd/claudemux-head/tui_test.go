@@ -4233,3 +4233,169 @@ func TestUsageTickIgnoredWhenUnavailable(t *testing.T) {
 		t.Error("lobby cmd != nil, want a stray tick ignored once usage is unavailable")
 	}
 }
+
+// barCellCount counts the progress-bar cells in a rendered line.
+func barCellCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if r == '█' || r == '░' {
+			n++
+		}
+	}
+	return n
+}
+
+// The widen step must divide the leftover columns by the ACTUAL number of
+// bar-carrying gauges. With a model row the head has four (ctx, 5h, wk, fab),
+// not the three it used to hardcode: dividing by three overshoots, the
+// overflow guard then rejects the widened set wholesale, and the line is left
+// short of the pane by the entire slack. So this asserts the line still fills
+// the pane once a model row is present.
+func TestMetersLineWidensEveryBarIncludingModelRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 0)
+	m.contextPct = 42
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	var prevBars int
+	for _, w := range []int{140, 160, 180, 200} {
+		m.width = w
+		line := renderMetersLine(m, now)
+		// The premise: every gauge survives at these widths, so four bars are
+		// on screen and the eta is the only bar-less part.
+		for _, want := range []string{"ctx", "5h", "wk", "fab", "empty in"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("at width %d the %q gauge is missing: %q", w, want, line)
+			}
+		}
+		// Four bars share the slack, so integer division can strand at most
+		// three columns.
+		content := len(" ") + lipgloss.Width(strings.TrimRight(ansi.Strip(line), " "))
+		if unspent := w - content; unspent > 3 {
+			t.Errorf("at width %d, %d columns left unspent (want <= 3): the slack is being divided by the wrong bar count: %q", w, unspent, line)
+		}
+		if bars := barCellCount(line); bars <= prevBars {
+			t.Errorf("at width %d, total bar cells = %d, want more than %d at the previous width", w, bars, prevBars)
+		} else {
+			prevBars = bars
+		}
+	}
+}
+
+// waitForInitMsg runs every command a panel's Init returned — recursing into
+// tea.Batch, each command in its own goroutine — and reports the first message
+// matching want. Goroutines only send on a buffered channel and never touch t,
+// so any that outlive the test (the 1s tick, a poll) are harmless.
+func waitForInitMsg(cmd tea.Cmd, d time.Duration, want func(tea.Msg) bool) (tea.Msg, bool) {
+	if cmd == nil {
+		return nil, false
+	}
+	msgs := make(chan tea.Msg, 32)
+	var run func(tea.Cmd)
+	run = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		go func() {
+			defer func() { _ = recover() }()
+			msg := c()
+			if batch, ok := msg.(tea.BatchMsg); ok {
+				for _, sub := range batch {
+					run(sub)
+				}
+				return
+			}
+			select {
+			case msgs <- msg:
+			default:
+			}
+		}()
+	}
+	run(cmd)
+
+	deadline := time.After(d)
+	for {
+		select {
+		case msg := <-msgs:
+			if want(msg) {
+				return msg, true
+			}
+		case <-deadline:
+			return nil, false
+		}
+	}
+}
+
+func isUsageMsg(msg tea.Msg) bool {
+	_, ok := msg.(usageMsg)
+	return ok
+}
+
+// seedFreshUsageCache writes a cache young enough that usageCmd serves it
+// straight from disk — the loop is exercised end to end without spawning
+// anything.
+func seedFreshUsageCache(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "usage.json")
+	if err := writeUsageCache(path, PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The head must actually START the usage loop. Nothing else in the suite
+// notices if usageCmd is dropped from Init — the meters would simply never
+// grow a model row, on every pane, forever, with a green suite.
+func TestHeadInitStartsUsageLoop(t *testing.T) {
+	t.Setenv("TMUX_PANE", "") // keep pollData off tmux
+	t.Setenv("PATH", "")      // and every other command out of a subprocess
+	cachePath := seedFreshUsageCache(t)
+
+	jsonl := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(jsonl, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sessionID "" is waiting mode: Init then adds no summarize call.
+	m := newModel(Config{}, jsonl, "", false)
+	m.usageCachePath = cachePath
+
+	msg, ok := waitForInitMsg(m.Init(), 3*time.Second, isUsageMsg)
+	if !ok {
+		t.Fatal("Init produced no usageMsg: the head never starts the usage loop, so per-model rows would never appear")
+	}
+	got := msg.(usageMsg)
+	if got.err != nil {
+		t.Fatalf("usageMsg.err = %v, want the seeded cache served", got.err)
+	}
+	if len(got.usage.Models) != 1 || got.usage.Models[0].Name != "Fable" {
+		t.Errorf("usage.Models = %+v, want the seeded Fable row", got.usage.Models)
+	}
+}
+
+// Same for the lobby: it renders the same gauges and must not be the one panel
+// whose loop never starts.
+func TestLobbyInitStartsUsageLoop(t *testing.T) {
+	t.Setenv("PATH", "") // swPollCmd's tmux calls fail fast instead of running
+	cachePath := seedFreshUsageCache(t)
+
+	m := swModel{
+		rateLimitsPath: filepath.Join(t.TempDir(), "rate-limits.json"),
+		usageCachePath: cachePath,
+	}
+
+	msg, ok := waitForInitMsg(m.Init(), 3*time.Second, isUsageMsg)
+	if !ok {
+		t.Fatal("Init produced no usageMsg: the lobby never starts the usage loop, so per-model rows would never appear")
+	}
+	got := msg.(usageMsg)
+	if got.err != nil {
+		t.Fatalf("usageMsg.err = %v, want the seeded cache served", got.err)
+	}
+	if len(got.usage.Models) != 1 || got.usage.Models[0].Name != "Fable" {
+		t.Errorf("usage.Models = %+v, want the seeded Fable row", got.usage.Models)
+	}
+}

@@ -290,3 +290,136 @@ func splitLines(s string) []string {
 	}
 	return out
 }
+
+// countingClaude is fakeClaude plus a spawn counter: every invocation appends
+// a line to counter, so a test can assert how many spawns actually happened.
+func countingClaude(t *testing.T, counter, body string, exitCode int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "counting-claude")
+	script := "#!/bin/sh\necho x >> " + counter + "\n"
+	if body != "" {
+		script += "cat <<'FAKEEOF'\n" + body + "\nFAKEEOF\n"
+	}
+	script += "cat >/dev/null\nexit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// spawnCount reports how many times a countingClaude ran. A missing file is
+// zero spawns, not an error.
+func spawnCount(t *testing.T, counter string) int {
+	t.Helper()
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		return 0
+	}
+	return len(splitLines(string(data)))
+}
+
+// A failed fetch writes no cache, so usageTTL — measured off the cache's own
+// timestamp — cannot gate the retry. Without a failure marker every pane would
+// re-spawn a claude on every check interval for as long as `claude` is missing
+// or get_usage errors, and the lock would not help because staggered panes
+// never collide. After a failure, nothing may spawn again until usageTTL has
+// passed.
+func TestRefreshUsageCacheBacksOffAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+	bin := countingClaude(t, counter, "", 1)
+
+	now := time.Now()
+	if _, err := refreshUsageCache(context.Background(), path, bin, now); err == nil {
+		t.Fatal("refreshUsageCache returned nil error for a failing fetch, want an error")
+	}
+	if n := spawnCount(t, counter); n != 1 {
+		t.Fatalf("spawned %d times on the first attempt, want 1", n)
+	}
+
+	// Every later attempt inside the window — this process's next tick, and
+	// any other pane's — must not spawn.
+	for _, after := range []time.Duration{time.Minute, 5 * time.Minute, usageTTL - time.Second} {
+		if _, err := refreshUsageCache(context.Background(), path, bin, now.Add(after)); err != nil {
+			t.Errorf("refreshUsageCache at +%s returned %v, want the backoff reported as a plain cache read", after, err)
+		}
+		if n := spawnCount(t, counter); n != 1 {
+			t.Fatalf("spawned %d times by +%s, want still 1 (the backoff did not hold)", n, after)
+		}
+	}
+
+	// Past the window it tries again — the backoff is a delay, not a latch.
+	if _, err := refreshUsageCache(context.Background(), path, bin, now.Add(usageTTL+time.Minute)); err == nil {
+		t.Error("refreshUsageCache past the backoff window returned nil error, want the failing fetch's error")
+	}
+	if n := spawnCount(t, counter); n != 2 {
+		t.Errorf("spawned %d times past the window, want 2 (the backoff never expired)", n)
+	}
+}
+
+// A transient failure must never clear rows a good poll already stored: the
+// marker is a separate file and the cache is not touched on the failure path.
+func TestRefreshUsageCacheFailureKeepsGoodCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+	now := time.Now()
+
+	if err := writeUsageCache(path, PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+		FetchedAt: now.Add(-usageTTL - time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := countingClaude(t, counter, "", 1)
+	if _, err := refreshUsageCache(context.Background(), path, bin, now); err == nil {
+		t.Fatal("want an error from the failing fetch")
+	}
+	got, _ := readUsageCache(path, now)
+	if len(got.Models) != 1 || got.Models[0].Name != "Fable" {
+		t.Fatalf("cache after a failed poll = %+v, want the stored Fable row untouched", got.Models)
+	}
+
+	// And during the backoff the stored rows are what callers get back, so a
+	// pane that restarts mid-outage still shows them.
+	served, err := refreshUsageCache(context.Background(), path, bin, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("refreshUsageCache inside the backoff = %v, want nil", err)
+	}
+	if len(served.Models) != 1 || served.Models[0].Name != "Fable" {
+		t.Errorf("served = %+v, want the stored Fable row", served.Models)
+	}
+	if n := spawnCount(t, counter); n != 1 {
+		t.Errorf("spawned %d times, want 1", n)
+	}
+}
+
+// Recovery is immediate: a poll that works clears the marker rather than
+// leaving the rest of the window to run down.
+func TestRefreshUsageCacheSuccessClearsBackoff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.json")
+	counter := filepath.Join(dir, "spawns")
+	now := time.Now()
+
+	if _, err := refreshUsageCache(context.Background(), path, countingClaude(t, counter, "", 1), now); err == nil {
+		t.Fatal("want an error from the failing fetch")
+	}
+	if !usageBackoffActive(path, now.Add(time.Minute)) {
+		t.Fatal("backoff not armed after a failure")
+	}
+
+	good := countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0)
+	if _, err := refreshUsageCache(context.Background(), path, good, now.Add(usageTTL+time.Minute)); err != nil {
+		t.Fatalf("refreshUsageCache after the window: %v", err)
+	}
+	if usageBackoffActive(path, now.Add(usageTTL+time.Minute)) {
+		t.Error("backoff still armed after a successful poll, want it cleared")
+	}
+	if _, err := os.Stat(usageFailMarkerPath(path)); !os.IsNotExist(err) {
+		t.Errorf("failure marker still on disk after a successful poll (stat err = %v)", err)
+	}
+}
