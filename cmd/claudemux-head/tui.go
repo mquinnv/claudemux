@@ -61,6 +61,14 @@ const summaryCallTimeout = 30 * time.Second
 // every poll — a billable call per second against an API that just failed.
 const summaryRetryFloor = 30 * time.Second
 
+// summaryGrowthMin is how many new content events must land before a pane with
+// no summary fires a call off transcript growth alone (see
+// shouldSummarizeFromGrowth). Small on purpose: the point is to describe a long
+// turn while it runs, and the 30s floor — not this count — is what paces the
+// calls. It exists only so a transcript that gained a stray line is not called
+// grown, since a call over one more event can only fail the way the last one did.
+const summaryGrowthMin = 3
+
 // summarizerAcquireFloor / summarizerAcquireMax pace and cap re-attempts at
 // constructing the summarizer after a keyless startup. Each attempt against a
 // writerless FIFO parks up to 2 goroutines for the life of the process (see
@@ -377,7 +385,13 @@ type model struct {
 	// guaranteed to ever fire again (an idle session has none). The dataMsg
 	// handler turns it into a fresh call once summaryRetryFloor elapses.
 	summaryRetry bool
-	err          error
+	// lastSummaryEvents is how much transcript the last ISSUED call saw: the
+	// number of content events (see contentEvents) present at that moment.
+	// shouldSummarizeFromGrowth measures new content against it, so it is the
+	// companion of lastSummaryAt — one says when the last call went out, this
+	// says what it had to work with. Reset per session by switchSession.
+	lastSummaryEvents int
+	err               error
 }
 
 func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model {
@@ -423,6 +437,12 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		summarizing: summarizer != nil && sessionID != "",
 	}
 	m.launchBin, m.launchBinOK = launchBinStamp()
+	if m.summarizing {
+		// Init's seed is issued from a value receiver that cannot stamp itself,
+		// so the baseline is set here alongside the in-flight flag above — the
+		// two must always move together (see issueSummarize).
+		m.lastSummaryEvents = len(contentEvents(seeded))
+	}
 	if summarizer == nil {
 		// Startup itself was an acquisition attempt; stamp it so the lazy
 		// loop's first re-attempt waits a full floor rather than one tick.
@@ -642,6 +662,12 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	m.tabHaikuWins = false
 	m.lastTopic = ""
 	m.summaryRetry = false
+	// The growth baseline IS per-session, unlike lastSummaryAt above: it counts
+	// this session's transcript, and the session we just left may have carried
+	// hundreds of events where this one carries two. Left alone, the delta goes
+	// negative and the new pane could never fire its own first call. The seed
+	// below re-stamps it when it is allowed to go out.
+	m.lastSummaryEvents = 0
 	m.summaryGen++
 
 	m.recomputeFromEvents(now)
@@ -653,8 +679,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	if !m.canSummarize(now) {
 		return nil
 	}
-	m.summarizing = true
-	return m.summarize()
+	return m.issueSummarize()
 }
 
 func lastUsage(events []Event) *Usage {
@@ -969,6 +994,48 @@ func (m model) shouldRetrySummarize(now time.Time) bool {
 	return now.Sub(m.lastSummaryAt) >= summaryRetryFloor
 }
 
+// shouldSummarizeFromGrowth reports whether a pane that still has NO summary
+// should fire a call because the transcript has grown, with no busy→ended edge
+// involved. It exists because that edge is the only automatic trigger after the
+// seed call, and a long first turn has none: the head's seed goes out at startup
+// against an empty transcript, comes back a placeholder, and the pane then sits
+// on the raw-prompt fallback for the whole run — minutes during which pressing
+// `s` would produce a good summary immediately.
+//
+// Three things keep it from adding billed calls to a working session:
+//   - it stops for good once any summary lands, so it is a FIRST-summary
+//     mechanism, never a refresh;
+//   - it needs new CONTENT since the last issued call, so a session sitting
+//     idle on a transcript too thin to describe never re-fires — which is what
+//     makes it safe where simply not clearing summaryRetry on a placeholder
+//     would not be;
+//   - it shares the retry floor, so the ceiling is one call per 30s until the
+//     first summary lands.
+//
+// The content count is computed last because it walks the whole ring, and the
+// cheap guards above already bound that walk to once per floor interval.
+func (m model) shouldSummarizeFromGrowth(now time.Time) bool {
+	if m.summary != (Summary{}) {
+		return false
+	}
+	if !m.canSummarize(now) {
+		return false
+	}
+	if now.Sub(m.lastSummaryAt) < summaryRetryFloor {
+		return false
+	}
+	return len(contentEvents(m.allEvents))-m.lastSummaryEvents >= summaryGrowthMin
+}
+
+// issueSummarize marks a call as going out and returns it: the in-flight flag
+// and the growth baseline must move together, or a stamp missed at one call
+// site lets that site's call be re-fired on the very next poll.
+func (m *model) issueSummarize() tea.Cmd {
+	m.summarizing = true
+	m.lastSummaryEvents = len(contentEvents(m.allEvents))
+	return m.summarize()
+}
+
 // canSummarize reports whether a summarize call may be issued at all: the
 // feature is enabled, no call is in flight, and the rate floor has elapsed.
 // These guards hold for every caller — the busy→idle edge and a session
@@ -1119,8 +1186,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.summarizer == nil || m.summarizing {
 				return m, nil
 			}
-			m.summarizing = true
-			return m, m.summarize()
+			return m, m.issueSummarize()
 		case " ":
 			// Toggle fleet conduct mode from here — the same thing space does
 			// in the lobby, so the key means one thing wherever you press it.
@@ -1339,12 +1405,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.shouldSummarize(prevKind, msg.time) {
-			m.summarizing = true
-			return m, tea.Batch(m.summarize(), allPub)
+			return m, tea.Batch(m.issueSummarize(), allPub)
 		}
 		if m.shouldRetrySummarize(msg.time) {
-			m.summarizing = true
-			return m, tea.Batch(m.summarize(), allPub)
+			return m, tea.Batch(m.issueSummarize(), allPub)
+		}
+		// Last, so it only ever speaks for a poll the two above declined: a
+		// pane with no summary and a transcript that has grown since its last
+		// call, mid-turn, with no edge coming for however long the turn runs.
+		if m.shouldSummarizeFromGrowth(msg.time) {
+			return m, tea.Batch(m.issueSummarize(), allPub)
 		}
 		return m, allPub
 
@@ -1360,8 +1430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.canSummarize(msg.at) {
 			return m, nil
 		}
-		m.summarizing = true
-		return m, m.summarize()
+		return m, m.issueSummarize()
 
 	case summaryMsg:
 		// Clear the in-flight flag FIRST and unconditionally: this message is
@@ -1390,14 +1459,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.summary = msg.summary
 			return m, m.tabCmdFor(msg.summary)
 		}
-		// A placeholder reply can only recur until new events arrive, and those
-		// bring their own edge; every other failure is worth retrying — but only
-		// when the pane is showing the raw-prompt fallback, where staying broken
-		// is otherwise permanent for an idle session. A placeholder CLEARS the
-		// flag rather than merely not setting it: a transport failure may have
-		// armed it, and the retry that then lands a placeholder proves the
-		// transcript is too thin — looping further bills a call every floor
+		// A placeholder reply can only recur until new events arrive, so it does
+		// not arm the retry flag; every other failure is worth retrying — but
+		// only when the pane is showing the raw-prompt fallback, where staying
+		// broken is otherwise permanent for an idle session. A placeholder
+		// CLEARS the flag rather than merely not setting it: a transport failure
+		// may have armed it, and the retry that then lands a placeholder proves
+		// the transcript is too thin — looping further bills a call every floor
 		// interval that can only fail the same way.
+		//
+		// What picks the pane back up when those new events DO arrive is
+		// shouldSummarizeFromGrowth, not an edge. This comment used to say the
+		// events would bring their own edge, and that is false for the case a
+		// placeholder is most likely to come from: the seed call fired at
+		// startup against an empty transcript, followed by a first turn that
+		// runs for minutes without ever crossing busy→ended.
 		if errors.Is(msg.err, errPlaceholderSummary) {
 			m.summaryRetry = false
 		} else if m.summary == (Summary{}) {

@@ -4671,3 +4671,191 @@ func TestUsageQuietWindowIsNotExtendedByCacheReads(t *testing.T) {
 		t.Error("still quiet past the window the fetch armed: the pane can never retry")
 	}
 }
+
+// The busy→idle edge is not enough on its own: a long first turn produces no
+// edge for as long as it runs, so a pane whose seed call failed — typically a
+// placeholder over the near-empty transcript a head sees at startup — sits on
+// the raw-prompt fallback for the whole run, even once the transcript is rich
+// enough that pressing `s` produces a summary immediately. Growth in the
+// transcript is the additional basis, gated to panes that have NO summary so
+// it can never add billed calls to an already-labelled session.
+func TestShouldSummarizeFromGrowth(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	ts := base.Format(time.RFC3339)
+	content := func(n int) []Event {
+		var out []Event
+		for i := 0; i < n; i++ {
+			out = append(out, Event{Type: "assistant", Timestamp: ts, UserText: "step"})
+		}
+		return out
+	}
+
+	tests := []struct {
+		name        string
+		summarizer  *Summarizer
+		summary     Summary
+		events      []Event
+		lastEvents  int
+		summarizing bool
+		lastAt      time.Time
+		now         time.Time
+		want        bool
+	}{
+		{
+			name:       "new content past the floor with no summary fires",
+			summarizer: &Summarizer{},
+			events:     content(summaryGrowthMin), lastEvents: 0,
+			lastAt: base, now: base.Add(time.Minute),
+			want: true,
+		},
+		{
+			name:       "an existing summary never fires",
+			summarizer: &Summarizer{},
+			summary:    Summary{Topic: "t", Now: "n", Tab: "tab"},
+			events:     content(50), lastEvents: 0,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
+		{
+			name:       "growth below the threshold does not fire",
+			summarizer: &Summarizer{},
+			events:     content(summaryGrowthMin - 1), lastEvents: 0,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
+		{
+			name:       "no growth since the last call does not fire",
+			summarizer: &Summarizer{},
+			events:     content(20), lastEvents: 20,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
+		{
+			name:       "inside the retry floor does not fire",
+			summarizer: &Summarizer{},
+			events:     content(50), lastEvents: 0,
+			lastAt: base, now: base.Add(5 * time.Second),
+			want: false,
+		},
+		{
+			name:       "a call already in flight does not fire",
+			summarizer: &Summarizer{},
+			events:     content(50), lastEvents: 0,
+			summarizing: true,
+			lastAt:      base, now: base.Add(time.Minute),
+			want: false,
+		},
+		{
+			name:       "no summarizer never fires",
+			summarizer: nil,
+			events:     content(50), lastEvents: 0,
+			lastAt: base, now: base.Add(time.Minute),
+			want: false,
+		},
+		// Bookkeeping records (attachment, mode, permission-mode, ...)
+		// outnumber content several to one and say nothing about the session.
+		// Counting them would fire on a transcript still too thin to
+		// describe — the very failure that left the pane with no summary.
+		{
+			name:       "bookkeeping records alone do not count as growth",
+			summarizer: &Summarizer{},
+			events: []Event{
+				{Type: "attachment", Timestamp: ts},
+				{Type: "mode", Timestamp: ts},
+				{Type: "permission-mode", Timestamp: ts},
+				{Type: "system", Timestamp: ts},
+			},
+			lastEvents: 0,
+			lastAt:     base, now: base.Add(time.Minute),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{
+				summarizer:         tt.summarizer,
+				summary:            tt.summary,
+				allEvents:          tt.events,
+				lastSummaryEvents:  tt.lastEvents,
+				summarizing:        tt.summarizing,
+				lastSummaryAt:      tt.lastAt,
+				minSummaryInterval: 20 * time.Second,
+			}
+			if got := m.shouldSummarizeFromGrowth(tt.now); got != tt.want {
+				t.Errorf("shouldSummarizeFromGrowth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// End to end through Update: a poll that stays busy — no busy→idle edge, no
+// armed retry flag — must still fire the first call once the transcript has
+// grown. This is the long-first-turn case the growth basis exists for.
+func TestUpdateDataMsgFiresFirstSummarizeMidTurn(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	ts := now.Format(time.RFC3339)
+	m := model{
+		ready:      true,
+		summarizer: &Summarizer{},
+		allEvents: []Event{
+			{Type: "user", Timestamp: ts, UserText: "add a growth trigger"},
+			{Type: "assistant", Timestamp: ts, UserText: "reading tui.go"},
+		},
+		state: State{Kind: StateThinking, Since: now.Add(-5 * time.Minute)},
+		// Well outside every floor, so no guard but the growth one is in play.
+		lastSummaryAt: now.Add(-time.Hour),
+	}
+
+	// A tool_use with no result keeps the session busy: this poll crosses no
+	// busy→ended edge, so shouldSummarize cannot be what fires the call.
+	got, cmd := m.Update(dataMsg{
+		time: now,
+		newEvents: []Event{{
+			Type: "assistant", Timestamp: ts,
+			ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}},
+		}},
+		rateLimitErr: errors.New("no rate limits in this test"),
+	})
+	next := got.(model)
+
+	if turnEndedByIdle(next.state.Kind) {
+		t.Fatalf("precondition: state = %v, want a still-busy state (no edge)", next.state.Kind)
+	}
+	if !next.summarizing {
+		t.Error("summarizing = false, want true: transcript growth must fire the first call mid-turn")
+	}
+	if next.lastSummaryEvents == 0 {
+		t.Error("lastSummaryEvents = 0, want the content count stamped when the call was issued")
+	}
+	// Deliberately NOT executed — running it would make a network call.
+	if cmd == nil {
+		t.Error("cmd = nil, want the summarize command")
+	}
+}
+
+// The stamp is a per-session baseline. A rotation to a fresh session must
+// reset it: carrying a long session's count into a new one that holds two
+// events makes the growth delta negative, and the new pane would then never
+// fire its own first call.
+func TestSwitchSessionResetsSummaryEventStamp(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess-new.jsonl")
+	line := `{"type":"user","timestamp":"2026-08-21T12:00:00Z","message":{"role":"user","content":"a brand new ask"}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{
+		lastSummaryEvents: 400,
+		// No summarizer: switchSession's own seed call is then impossible, so
+		// what the assertion sees is the reset, not a fresh stamp.
+		lastSummaryAt: now.Add(-time.Hour),
+	}
+	m.switchSession(path, now)
+
+	if m.lastSummaryEvents != 0 {
+		t.Errorf("lastSummaryEvents = %d, want 0: the stamp is per-session", m.lastSummaryEvents)
+	}
+}

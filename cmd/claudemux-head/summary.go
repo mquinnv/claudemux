@@ -36,6 +36,36 @@ func condenseTranscript(firstPrompt string, events []Event, maxEvents int) strin
 		maxEvents = 0
 	}
 
+	kept := contentEvents(events)
+	if len(kept) > maxEvents {
+		kept = kept[len(kept)-maxEvents:]
+	}
+
+	for _, e := range kept {
+		if e.Type == "assistant" {
+			if e.UserText != "" {
+				b.WriteString("assistant: " + truncateRunes(collapseWhitespace(e.UserText), transcriptTextLimit) + "\n")
+			}
+			for _, tu := range e.ToolUses {
+				b.WriteString("tool: " + tu.Name + "\n")
+			}
+			continue
+		}
+		b.WriteString("user: " + truncateRunes(collapseWhitespace(e.UserText), transcriptTextLimit) + "\n")
+	}
+	return b.String()
+}
+
+// contentEvents keeps the records that say something about the session — the
+// human's prompts and the assistant's text and tool calls — and drops the
+// bookkeeping the ring is mostly made of.
+//
+// It is shared with shouldSummarizeFromGrowth, which measures how much the
+// transcript has grown since the last call. That measurement has to count the
+// same records the summarizer will actually read: a growth rule that counted
+// raw events would fire on a burst of attachment and mode records and send a
+// transcript no richer than the one that just failed.
+func contentEvents(events []Event) []Event {
 	var kept []Event
 	for _, e := range events {
 		switch {
@@ -56,23 +86,7 @@ func condenseTranscript(firstPrompt string, events []Event, maxEvents int) strin
 			kept = append(kept, e)
 		}
 	}
-	if len(kept) > maxEvents {
-		kept = kept[len(kept)-maxEvents:]
-	}
-
-	for _, e := range kept {
-		if e.Type == "assistant" {
-			if e.UserText != "" {
-				b.WriteString("assistant: " + truncateRunes(collapseWhitespace(e.UserText), transcriptTextLimit) + "\n")
-			}
-			for _, tu := range e.ToolUses {
-				b.WriteString("tool: " + tu.Name + "\n")
-			}
-			continue
-		}
-		b.WriteString("user: " + truncateRunes(collapseWhitespace(e.UserText), transcriptTextLimit) + "\n")
-	}
-	return b.String()
+	return kept
 }
 
 func collapseWhitespace(s string) string {
