@@ -23,17 +23,67 @@ import (
 const swPollInterval = time.Second
 
 // Lobby row column widths. Every row lays line 1 out on this fixed grid so the
-// context meters — and the topics after them — stack in a column instead of
-// drifting with each session's name, state string, and age. Fields wider than
-// their column are truncated rather than allowed to push the grid.
+// columns stack instead of drifting with each session's name, state string,
+// and age. Fields wider than their column are truncated rather than allowed to
+// push the grid.
+//
+// The topic sits second, immediately after the name, because it is the field
+// the lobby is read FOR: name says which session, topic says what it is doing,
+// and the two belong side by side. It used to trail the row, which put four
+// columns of secondary data between the eye and the answer and made the topic
+// the first thing a narrow pane clipped away. Everything after it — state,
+// age, context, model — is what you check AFTER you have found the session you
+// meant.
 const (
-	swNameColW  = 24
+	swNameColW = 24
+	// swTopicColW is the topic's own domain bound, not a guess: sess.Topic is
+	// the tmux window name, which tabtitle.go already clamps to
+	// tabTitleMaxRunes before it is ever set. A well-formed topic therefore
+	// arrives inside this column and never truncates here. (Runes are not
+	// cells, so swCell still truncates by display width for CJK — a guard
+	// that ASCII topics never reach.)
+	swTopicColW = tabTitleMaxRunes
 	swStateColW = 14 // "Tool:AskUserQuestion" and friends get clipped here
 	swAgeColW   = 6  // widest formatDuration output in practice ("23h59m")
 	swCtxBarW   = 5
 	swCtxColW   = swCtxBarW + 5 // bar + " 100%"
 	swModelColW = 13            // widest shortModel output ("sonnet 4.5 1M")
+
+	// swTopicColMinW is the narrowest the topic column will squeeze to before
+	// it stops yielding and lets clipLine take the right-hand columns
+	// instead. Below this a topic is more ellipsis than word.
+	swTopicColMinW = 14
+
+	// swRowChromeW is line 1's width with the topic column removed: the
+	// leading space, the marker, and every fixed column after the topic,
+	// separators included. swTopicW subtracts it from the pane width to see
+	// what the topic can afford.
+	swRowChromeW = 1 + 2 + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
 )
+
+// swTopicW is the topic column's width for one render — swTopicColW when the
+// pane can afford it, less when it cannot. Every row in a render gets the same
+// answer (it depends only on the pane width), so the grid holds either way.
+//
+// Shrink-only, deliberately: sess.Topic is already clamped to
+// tabTitleMaxRunes upstream, so a wider column would buy trailing blanks
+// rather than more topic. Yielding matters in the other direction — moving the
+// topic to the second column put the context meters and the model at the right
+// edge, and without this a lobby under swRowChromeW+swTopicColW cells would
+// lose the meters entirely to make room for a topic that is mostly padding.
+func swTopicW(width int) int {
+	if width <= 0 {
+		return swTopicColW
+	}
+	switch avail := width - swRowChromeW; {
+	case avail >= swTopicColW:
+		return swTopicColW
+	case avail < swTopicColMinW:
+		return swTopicColMinW
+	default:
+		return avail
+	}
+}
 
 // swPad right-pads s to w display cells, measuring with lipgloss so ANSI
 // styling and wide runes are counted correctly. Content wider than w is
@@ -862,6 +912,9 @@ func (m swModel) View() string {
 		}
 	}
 
+	// One width for the whole render, so the topic column is a column.
+	topicW := swTopicW(m.width)
+
 	used, shown := 0, 0
 	for i, sess := range m.snap.Sessions {
 		// budget == 0 means uncapped (no preview drawn, or the fleet already
@@ -897,12 +950,8 @@ func (m swModel) View() string {
 			pct := float64(sess.Context)
 			ctx = renderBar(swCtxBarW, pct, thresholdColor(pct)) + fmt.Sprintf(" %3d%%", sess.Context)
 		}
-		topic := ""
-		if sess.Topic != "" {
-			topic = "  " + swTopicStyle.Render(sess.Topic)
-		}
 		// Unset model (pre-publish head) renders a blank cell of the same
-		// width, like context: the topics after it must not shift.
+		// width, like context, so the grid holds on every row.
 		modelTxt := ""
 		if sess.Model != "" {
 			modelTxt = shortModel(sess.Model)
@@ -914,11 +963,12 @@ func (m swModel) View() string {
 		// cells.
 		name := swNameStyle(sess.Color, i == m.sel).
 			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
-		line := fmt.Sprintf(" %s%s %s%s  %s %s%s", marker, name,
+		line := fmt.Sprintf(" %s%s %s %s%s  %s %s", marker, name,
+			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),
 			swPad(ctx, swCtxColW),
-			swCell(modelTxt, swModelColW, swUnknownStyle, false), topic)
+			swCell(modelTxt, swModelColW, swUnknownStyle, false))
 		if m.width > 0 {
 			line = clipLine(line, m.width)
 		}

@@ -291,7 +291,9 @@ func TestSwModelViewOmitsUnsetContext(t *testing.T) {
 func TestSwModelViewAlignsColumns(t *testing.T) {
 	now := time.Now()
 	m := newSwModel("%9")
-	m.width, m.height = 100, 24
+	// Wide enough that clipLine never fires: this test is about where the
+	// columns start, and a clipped row would fail it for the wrong reason.
+	m.width, m.height = 140, 24
 	m.snap = swSnapshot{Sessions: []swSession{
 		{Name: "api", State: "Idle", Since: now.Add(-2 * time.Minute), Context: 7, Topic: "one-digit ctx",
 			Model: "claude-opus-4-7"},
@@ -303,8 +305,8 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 	}}
 
 	const (
-		ctxCol   = 1 + 2 + swNameColW + 1 + swStateColW + swAgeColW + 2
-		topicCol = ctxCol + swCtxColW + 1 + swModelColW + 2
+		topicCol = 1 + 2 + swNameColW + 1
+		ctxCol   = topicCol + swTopicColW + 1 + swStateColW + swAgeColW + 2
 	)
 	view := m.View()
 	for _, sess := range m.snap.Sessions {
@@ -318,9 +320,12 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 			t.Fatalf("no row rendered for %q:\n%s", sess.Name, view)
 		}
 		r := []rune(line)
-		if got := string(r[topicCol:]); got != sess.Topic {
-			t.Errorf("%s: topic starts at the wrong column; from %d got %q, want %q\n%s",
-				sess.Name, topicCol, got, sess.Topic, view)
+		// The topic is a fixed-width cell now, not the line's free tail: it
+		// must fill exactly swTopicColW cells so state/age/context/model
+		// start at the same column on every row.
+		if got, want := string(r[topicCol:topicCol+swTopicColW]), swPad(sess.Topic, swTopicColW); got != want {
+			t.Errorf("%s: topic cell at %d = %q, want %q\n%s",
+				sess.Name, topicCol, got, want, view)
 		}
 		wantCtx := strings.Repeat(" ", swCtxColW)
 		if sess.Context >= 0 {
@@ -385,10 +390,7 @@ func TestSwModelViewClipsWideRuneNameToColumn(t *testing.T) {
 		{Name: strings.Repeat("囲", swNameColW+5), State: "Idle", Since: now,
 			Context: 42, Topic: "wide-rune-name-alignment"},
 	}}
-	const (
-		ctxCol   = 1 + 2 + swNameColW + 1 + swStateColW + swAgeColW + 2
-		topicCol = ctxCol + swCtxColW + 1 + swModelColW + 2
-	)
+	const topicCol = 1 + 2 + swNameColW + 1
 	view := ansi.Strip(m.View())
 	line := ""
 	for _, l := range strings.Split(view, "\n") {
@@ -1147,6 +1149,78 @@ func TestSwModelViewEmphasizesTheTopic(t *testing.T) {
 	}
 	if strings.Contains(view, swUnknownStyle.Render("build fixes")) {
 		t.Errorf("topic is still rendered in the dim unknown style:\n%s", view)
+	}
+}
+
+// The topic column yields cells to the columns behind it on a pane too narrow
+// for both, rather than shoving the context meters and the model off the right
+// edge. It never grows past swTopicColW, because the topic itself is clamped
+// to that upstream and the extra cells would be padding.
+func TestSwTopicWShrinksOnlyWhenItMust(t *testing.T) {
+	for _, tt := range []struct {
+		width, want int
+		why         string
+	}{
+		{0, swTopicColW, "unmeasured pane keeps the full column"},
+		{200, swTopicColW, "wide pane is capped, not grown"},
+		{swRowChromeW + swTopicColW, swTopicColW, "exactly enough is enough"},
+		{swRowChromeW + swTopicColW - 5, swTopicColW - 5, "five cells short yields five cells"},
+		{swRowChromeW + swTopicColMinW, swTopicColMinW, "the floor is reachable"},
+		{40, swTopicColMinW, "far too narrow stops at the floor"},
+	} {
+		if got := swTopicW(tt.width); got != tt.want {
+			t.Errorf("swTopicW(%d) = %d, want %d (%s)", tt.width, got, tt.want, tt.why)
+		}
+	}
+}
+
+// The whole point of yielding: at a width that cannot fit both, the meters and
+// the model survive. This is the case that regressed when the topic first
+// moved to the second column with a hard 40-cell width.
+func TestSwModelViewKeepsMetersOnANarrowPane(t *testing.T) {
+	m := swTestModel() // 100 cells: too narrow for name + full topic + the rest
+	if w := swTopicW(m.width); w >= swTopicColW {
+		t.Fatalf("swTopicW(%d) = %d; this test needs a width that forces a shrink", m.width, w)
+	}
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"37%", "opus 4.7", "build fixes"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("narrow lobby dropped %q:\n%s", want, view)
+		}
+	}
+}
+
+// A session that has published no topic yet still has to hold the column
+// open. As the LAST field a missing topic simply ended the line; as the second
+// field it would pull state, age, context, and model four columns left on that
+// row alone and shear the grid — the exact failure the fixed widths exist to
+// prevent.
+func TestSwModelViewHoldsTheTopicColumnWhenEmpty(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 140, 24
+	m.snap = swSnapshot{Sessions: []swSession{
+		{Name: "has-topic", State: "Idle", Since: now, Context: 40, Topic: "build fixes", Model: "claude-opus-4-7"},
+		{Name: "no-topic", State: "Idle", Since: now, Context: 40, Model: "claude-opus-4-7"},
+	}}
+
+	// "Idle" only appears on the fleet rows; the preview box below is titled
+	// with the session name, so matching on the name alone would catch it too.
+	var rows []string
+	for _, l := range strings.Split(ansi.Strip(m.View()), "\n") {
+		if strings.Contains(l, "Idle") {
+			rows = append(rows, l)
+		}
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected both rows, got %d:\n%s", len(rows), ansi.Strip(m.View()))
+	}
+	// Both rows put "Idle" at the same cell; a collapsed empty topic cell
+	// would move it left on the second.
+	first, second := strings.Index(rows[0], "Idle"), strings.Index(rows[1], "Idle")
+	if first != second {
+		t.Errorf("state column moved when the topic was empty: %d vs %d\n%s\n%s",
+			first, second, rows[0], rows[1])
 	}
 }
 
