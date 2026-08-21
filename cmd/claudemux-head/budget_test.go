@@ -124,3 +124,66 @@ func TestETAToEmptyPctAlreadyFull(t *testing.T) {
 		t.Errorf("at-or-past 100%% should be 0 sentinel")
 	}
 }
+
+// The head reads OUR cache when it exists. The abtop file is only a migration
+// fallback, so a present claudemux cache must win even when both exist.
+func TestDefaultRateLimitsPathPrefersOurCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+
+	ours := filepath.Join(home, ".claude", "claudemux", "rate-limits.json")
+	abtop := filepath.Join(home, ".claude", "abtop-rate-limits.json")
+	for _, p := range []string{ours, abtop} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(`{"source":"x"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := defaultRateLimitsPath(); got != ours {
+		t.Errorf("defaultRateLimitsPath() = %q, want %q", got, ours)
+	}
+}
+
+// Upgrades land between `hook ensure` registering our statusline and Claude
+// Code next rendering one, so for one release a machine can have only abtop's
+// file. Falling back keeps the meters alive across that gap.
+func TestDefaultRateLimitsPathFallsBackToAbtop(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+
+	abtop := filepath.Join(home, ".claude", "abtop-rate-limits.json")
+	if err := os.MkdirAll(filepath.Dir(abtop), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abtop, []byte(`{"source":"claude"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultRateLimitsPath(); got != abtop {
+		t.Errorf("defaultRateLimitsPath() = %q, want %q", got, abtop)
+	}
+}
+
+// With neither file present, return our path: readRateLimits then fails with a
+// plain not-exist error against the location we actually want populated.
+func TestDefaultRateLimitsPathNeitherPresent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+
+	want := filepath.Join(home, ".claude", "claudemux", "rate-limits.json")
+	if got := defaultRateLimitsPath(); got != want {
+		t.Errorf("defaultRateLimitsPath() = %q, want %q", got, want)
+	}
+}
+
+// The explicit override still beats both.
+func TestDefaultRateLimitsPathHonorsOverride(t *testing.T) {
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "/tmp/explicit.json")
+	if got := defaultRateLimitsPath(); got != "/tmp/explicit.json" {
+		t.Errorf("defaultRateLimitsPath() = %q, want the override", got)
+	}
+}

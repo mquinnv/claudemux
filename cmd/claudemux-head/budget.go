@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -168,14 +169,29 @@ func formatBudget(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// defaultRateLimitsPath returns the abtop statusline cache path. Override
-// with CLAUDEMUX_RATE_LIMITS_PATH env var.
+// defaultRateLimitsPath returns the rate-limit cache the head reads. Ours wins
+// when present; abtop's is a migration fallback kept for one release, because
+// an upgrade lands between `hook ensure` registering our statusline command and
+// Claude Code next invoking one — and the meters must not blank in that gap.
+// CLAUDEMUX_RATE_LIMITS_PATH overrides everything.
 func defaultRateLimitsPath() string {
 	if p := os.Getenv("CLAUDEMUX_RATE_LIMITS_PATH"); p != "" {
 		return p
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return home + "/.claude/abtop-rate-limits.json"
+	ours := defaultStatuslineCachePath()
+	if ours == "" {
+		return ""
 	}
-	return ""
+	if _, err := os.Stat(ours); err == nil {
+		return ours
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ours
+	}
+	abtop := filepath.Join(home, ".claude", "abtop-rate-limits.json")
+	if _, err := os.Stat(abtop); err == nil {
+		return abtop
+	}
+	return ours
 }
