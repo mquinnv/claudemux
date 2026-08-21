@@ -39,6 +39,25 @@ func fixture(t *testing.T, name string) string {
 	return string(b)
 }
 
+// fakeClaudeLingering impersonates a claude that answers get_usage promptly,
+// drains stdin, and then keeps the process alive for lingerSecs before
+// exiting — modeling a real claude that does post-response cleanup before
+// its own process exits.
+func fakeClaudeLingering(t *testing.T, body string, lingerSecs int) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-claude-lingering")
+	script := "#!/bin/sh\n" +
+		"cat <<'FAKEEOF'\n" + body + "\nFAKEEOF\n" +
+		"cat >/dev/null\n" +
+		"sleep " + strconv.Itoa(lingerSecs) + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // The happy path: noise before the answer, an init response we must not
 // mistake for ours, and the Fable row pulled out of limits[].
 func TestFetchPlanUsageParsesModelWindows(t *testing.T) {
@@ -68,6 +87,27 @@ func TestFetchPlanUsageParsesModelWindows(t *testing.T) {
 	}
 	if !got.FetchedAt.Equal(now) {
 		t.Errorf("FetchedAt = %v, want %v", got.FetchedAt, now)
+	}
+}
+
+// A claude that answers promptly but then lingers before exiting (e.g. doing
+// its own post-response cleanup) must not delay a successful poll: once we
+// have parsed the answer, fetchPlanUsage must stop waiting on the child
+// instead of blocking until it exits on its own.
+func TestFetchPlanUsageReturnsPromptlyDespiteLingeringChild(t *testing.T) {
+	const lingerSecs = 5
+	path := fakeClaudeLingering(t, fixture(t, "get_usage_response.json"), lingerSecs)
+
+	start := time.Now()
+	got, err := fetchPlanUsage(context.Background(), path, time.Now())
+	if err != nil {
+		t.Fatalf("fetchPlanUsage: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("fetchPlanUsage took %v, want it to return well under the %ds the child lingers after answering", elapsed, lingerSecs)
+	}
+	if len(got.Models) != 1 || got.Models[0].Name != "Fable" {
+		t.Errorf("got = %+v, want the parsed Fable row", got)
 	}
 }
 

@@ -88,7 +88,17 @@ func fetchPlanUsage(ctx context.Context, claudeBin string, now time.Time) (PlanU
 	if err := cmd.Start(); err != nil {
 		return PlanUsage{}, err
 	}
-	defer func() { _ = cmd.Wait() }()
+	// cancel() must run before Wait() on every return path, including a
+	// successful parse: nothing else stops the child from lingering after it
+	// has answered, and Wait() alone would just block until it exits on its
+	// own. Calling cancel() first fires the exec package's ctx-cancellation
+	// watchdog, which invokes cmd.Cancel above (the process-group SIGKILL),
+	// so by the time Wait() runs here the child is already being torn down
+	// instead of left to exit in its own time.
+	defer func() {
+		cancel()
+		_ = cmd.Wait()
+	}()
 
 	// initialize must precede any other control request; get_usage follows
 	// immediately, and the response is matched by request_id rather than by
