@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -31,7 +32,11 @@ func contextPercent(model string, u Usage) float64 {
 	return 100.0 * float64(total) / float64(budget)
 }
 
-// RateLimits is the in-memory shape of ~/.claude/abtop-rate-limits.json.
+// RateLimits is the in-memory shape of the rate-limit cache file — ours
+// (~/.claude/claudemux/rate-limits.json, written by `claudemux-head
+// statusline`) and abtop's older file, which share this schema.
+//
+// Source distinguishes the writer: "claudemux" for ours, "claude" for abtop's.
 type RateLimits struct {
 	Source    string
 	UpdatedAt time.Time
@@ -57,7 +62,9 @@ type rawRateLimitsFile struct {
 	} `json:"seven_day"`
 }
 
-// readRateLimits parses the abtop-rate-limits.json cache file.
+// readRateLimits parses a rate-limit cache file — whichever of the two
+// defaultRateLimitsPath resolved (see there); the schema is the same either
+// way.
 func readRateLimits(path string) (RateLimits, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -168,14 +175,51 @@ func formatBudget(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// defaultRateLimitsPath returns the abtop statusline cache path. Override
-// with CLAUDEMUX_RATE_LIMITS_PATH env var.
+// defaultRateLimitsPath returns the rate-limit cache the head reads. Ours wins
+// when present; abtop's is a migration fallback kept for one release, because
+// an upgrade lands between `hook ensure` registering our statusline command and
+// Claude Code next invoking one — and the meters must not blank in that gap.
+// CLAUDEMUX_RATE_LIMITS_PATH overrides everything.
 func defaultRateLimitsPath() string {
 	if p := os.Getenv("CLAUDEMUX_RATE_LIMITS_PATH"); p != "" {
 		return p
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return home + "/.claude/abtop-rate-limits.json"
+	ours := defaultStatuslineCachePath()
+	if ours == "" {
+		return ""
 	}
-	return ""
+	if _, err := os.Stat(ours); err == nil {
+		return ours
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ours
+	}
+	abtop := filepath.Join(home, ".claude", "abtop-rate-limits.json")
+	if _, err := os.Stat(abtop); err == nil {
+		return abtop
+	}
+	return ours
+}
+
+// refreshedRateLimitsPath re-resolves a path a panel picked at startup, so a
+// long-lived head migrates off the fallback without being restarted.
+//
+// The window this closes: `hook ensure` claims the statusLine slot, abtop's
+// shim stops writing, and a head starts before Claude Code's next statusline
+// render — so at construction time neither our cache exists nor abtop's file
+// is being refreshed. defaultRateLimitsPath pins that head to abtop's file,
+// and it then shows the last numbers abtop ever wrote, frozen but perfectly
+// confident, for the whole life of the pane. Stale meters are worse than
+// absent ones.
+//
+// Once we are on our own cache (or an explicit CLAUDEMUX_RATE_LIMITS_PATH,
+// which resolves to the same string) this is a no-op: there is nowhere better
+// to migrate to, and a stat per tick for the rest of the process would buy
+// nothing. Only a panel still holding the fallback pays for the re-resolve.
+func refreshedRateLimitsPath(cur string) string {
+	if cur == "" || cur == defaultStatuslineCachePath() {
+		return cur
+	}
+	return defaultRateLimitsPath()
 }

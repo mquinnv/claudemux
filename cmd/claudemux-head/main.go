@@ -17,7 +17,7 @@ var version = "dev"
 // must be kept in step with the dispatch chain at the top of main — a
 // subcommand added there but not here becomes a usage error, which
 // TestKnownSubcommandsAreAccepted is what catches.
-var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner", "project"}
+var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner", "project", "statusline"}
 
 // unknownSubcommand reports a first argument that reads as a subcommand — a
 // bare word, not a flag — that this binary does not implement. Anything
@@ -84,6 +84,14 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "usage: claudemux-head hook ensure [--script <path>]")
 		os.Exit(2)
+	}
+
+	// `statusline` is registered in the statusLine slot of ~/.claude/settings.json
+	// and invoked by Claude Code on every render with the session payload on
+	// stdin. Dispatched here, before flag.Parse(), for the same reason every
+	// other subcommand is.
+	if len(os.Args) > 1 && os.Args[1] == "statusline" {
+		os.Exit(runStatusline(os.Stdin))
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "switchboard" {

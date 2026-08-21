@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -187,6 +188,58 @@ func TestHookEnsureIsIdempotent(t *testing.T) {
 	s := readSettings(t, p)
 	if got := len(hookCommands(t, s, "SessionStart")); got != 1 {
 		t.Errorf("SessionStart has %d commands after two runs, want 1 — the entry was duplicated", got)
+	}
+}
+
+// The statusline artifact is this whole binary (potentially tens of MB), and
+// hook ensure runs on every launch of bin/claudemux — so a second run must
+// not rewrite it when it is already current. copyExecutableIfChanged must
+// skip the write.
+//
+// An mtime comparison is not strong enough evidence: on a filesystem with
+// coarse mtime resolution, two writes inside the same tick produce identical
+// mtimes, so a regression to an unconditional copy could still pass this
+// test. Instead the destination is made read-only after the first run: if
+// the write is correctly skipped, the second run still succeeds (exit 0)
+// even though it could not have written; if the copy regressed to
+// unconditional, os.WriteFile against a read-only file fails and
+// runHookEnsure returns 4. The exit code alone proves the write was
+// skipped, not merely that it wrote identical bytes again — and the byte
+// comparison confirms the destination still holds the current binary.
+func TestHookEnsureDoesNotRewriteUnchangedStatusline(t *testing.T) {
+	writeSettings(t, "")
+	script := stubScript(t)
+
+	var b1, b2 bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &b1, &b1); code != 0 {
+		t.Fatalf("first runHookEnsure() = %d, want 0 (stderr %s)", code, b1.String())
+	}
+
+	home, _ := os.UserHomeDir()
+	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
+	wantBytes, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
+	}
+
+	if err := os.Chmod(slPath, 0o444); err != nil {
+		t.Fatalf("chmod %s read-only: %v", slPath, err)
+	}
+	// Restore write permission before t.TempDir()'s own cleanup tries to
+	// remove the directory tree; t.Cleanup runs LIFO, so this (registered
+	// after writeSettings/stubScript's t.TempDir calls) runs first.
+	t.Cleanup(func() { _ = os.Chmod(slPath, 0o755) })
+
+	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+		t.Fatalf("second runHookEnsure() = %d, want 0 — the write must be skipped when the artifact is already current, even with the destination read-only (stderr %s)", code, b2.String())
+	}
+
+	got, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantBytes) {
+		t.Error("statusline artifact content changed after the second run, want it untouched")
 	}
 }
 
@@ -483,6 +536,15 @@ func TestHookEnsureMissingScriptCopiesNothing(t *testing.T) {
 			t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", hs.name, hooksDir)
 		}
 	}
+
+	// The statusline artifact must be absent too. The current code is safe by
+	// ordering — validation returns 4 strictly before any copy, including the
+	// statusline's — but that guarantee is only real if a test pins it; without
+	// this a future reordering that copied the statusline before validation
+	// finished would go undetected.
+	if _, err := os.Stat(filepath.Join(hooksDir, statuslineScriptName)); !os.IsNotExist(err) {
+		t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", statuslineScriptName, hooksDir)
+	}
 }
 
 // The development layout keeps the shipped scripts in the repo and puts only a
@@ -534,5 +596,200 @@ func TestHookEnsureResolvesScriptsViaClaudemuxOnPath(t *testing.T) {
 	ups := hookCommands(t, settings, "UserPromptSubmit")
 	if len(ups) != 3 {
 		t.Errorf("UserPromptSubmit = %v, want all three scripts registered from the PATH-resolved layout", ups)
+	}
+}
+
+// statusLineCommand digs the registered command back out of a settings map.
+func statusLineCommand(t *testing.T, settings map[string]any) (string, bool) {
+	t.Helper()
+	sl, ok := settings["statusLine"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	cmd, ok := sl["command"].(string)
+	return cmd, ok
+}
+
+func TestSetStatusLineClaimsWhenAbsent(t *testing.T) {
+	settings := map[string]any{}
+	var errBuf bytes.Buffer
+	if !setStatusLine(settings, "/h/.claude/hooks/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported no change, want it to claim an empty slot")
+	}
+	cmd, ok := statusLineCommand(t, settings)
+	if !ok || cmd != "/h/.claude/hooks/claudemux-statusline" {
+		t.Errorf("statusLine command = %q (ok=%v), want ours", cmd, ok)
+	}
+	sl := settings["statusLine"].(map[string]any)
+	if sl["type"] != "command" {
+		t.Errorf("statusLine type = %v, want \"command\"", sl["type"])
+	}
+}
+
+// abtop's shim is exactly what we are replacing, matched by basename so the
+// user's install prefix does not matter.
+func TestSetStatusLineReplacesAbtop(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/Users/x/.claude/abtop-statusline.sh",
+	}}
+	var errBuf bytes.Buffer
+	if !setStatusLine(settings, "/h/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported no change, want it to replace abtop's shim")
+	}
+	if cmd, _ := statusLineCommand(t, settings); cmd != "/h/claudemux-statusline" {
+		t.Errorf("statusLine command = %q, want ours", cmd)
+	}
+}
+
+// A statusline someone actually built is never clobbered. The user is told why
+// their meters are dark instead.
+func TestSetStatusLineLeavesThirdPartyAlone(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/Users/x/bin/my-fancy-statusline",
+	}}
+	var errBuf bytes.Buffer
+	if setStatusLine(settings, "/h/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported a change, want a third-party slot untouched")
+	}
+	if cmd, _ := statusLineCommand(t, settings); cmd != "/Users/x/bin/my-fancy-statusline" {
+		t.Errorf("statusLine command = %q, want it unchanged", cmd)
+	}
+	if !strings.Contains(errBuf.String(), "my-fancy-statusline") {
+		t.Errorf("stderr = %q, want it to name the command it declined to replace", errBuf.String())
+	}
+}
+
+// Already ours: no change, no write, no noise. hook ensure runs on every
+// launch, so this is the overwhelmingly common case.
+func TestSetStatusLineIdempotent(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/h/claudemux-statusline",
+	}}
+	var errBuf bytes.Buffer
+	if setStatusLine(settings, "/h/claudemux-statusline", &errBuf) {
+		t.Fatal("setStatusLine reported a change on a slot it already owns")
+	}
+	if errBuf.String() != "" {
+		t.Errorf("stderr = %q, want silence", errBuf.String())
+	}
+}
+
+// The statusline artifact is this whole ~16MB binary, and Claude Code executes
+// it on every statusline render of every session on the machine. An in-place
+// rewrite therefore races those renders, and losing the race means ETXTBSY —
+// at which point runHookEnsure returns 4 BEFORE setStatusLine runs and before
+// settings.json is written, so a single unlucky launch silently drops its
+// whole hook registration. Replacing the file by rename cannot fail that way:
+// rename needs write permission on the DIRECTORY, not on the file, and it
+// leaves any process already executing the old inode running it untouched.
+//
+// ETXTBSY cannot be produced portably from a test. A read-only destination is
+// the same shape of failure — the existing file cannot be opened for writing —
+// and the same fix distinguishes them.
+func TestHookEnsureInstallsOverAnUnwritableStatusline(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the file mode this test depends on")
+	}
+	settingsPath := writeSettings(t, "")
+	script := stubScript(t)
+
+	var b1 bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &b1, &b1); code != 0 {
+		t.Fatalf("first runHookEnsure() = %d, want 0 (stderr %s)", code, b1.String())
+	}
+	home, _ := os.UserHomeDir()
+	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
+	wantBytes, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
+	}
+
+	// An artifact from an older build: different bytes, so the copy is due —
+	// and unwritable, standing in for one being executed right now.
+	if err := os.WriteFile(slPath, []byte("#!/bin/sh\n# an older build\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(slPath, 0o755) })
+
+	// Drop the statusLine claim so this run has to make it again — that is the
+	// registration a failed copy silently takes down with it.
+	settings := readSettings(t, settingsPath)
+	delete(settings, "statusLine")
+	out, marshalErr := json.MarshalIndent(settings, "", "  ")
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var b2 bytes.Buffer
+	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0: a statusline artifact that cannot be opened for writing must be REPLACED, not fail the whole run (stderr %s)", code, b2.String())
+	}
+	sl, _ := readSettings(t, settingsPath)["statusLine"].(map[string]any)
+	if cmd, _ := sl["command"].(string); cmd == "" {
+		t.Error("statusLine was not registered: the failed copy took the whole registration down with it")
+	}
+	got, err := os.ReadFile(slPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantBytes) {
+		t.Errorf("the stale artifact is still in place (%d bytes, want the %d-byte current binary)", len(got), len(wantBytes))
+	}
+	if info, err := os.Stat(slPath); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want 0755: a statusline Claude Code cannot execute is no better than a stale one", info.Mode().Perm())
+	}
+}
+
+// The other half of replace-by-rename: a render already executing the old
+// artifact keeps reading the old bytes, and no half-written file is ever
+// visible at the destination path.
+func TestCopyExecutableIfChangedLeavesTheOldInodeIntact(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	if err := os.WriteFile(src, []byte("the new build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("the old build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	inFlight, err := os.Open(dst) // the render that is already running
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Close()
+
+	if err := copyExecutableIfChanged(src, dst); err != nil {
+		t.Fatalf("copyExecutableIfChanged: %v", err)
+	}
+
+	buf := make([]byte, len("the old build"))
+	if _, err := inFlight.Read(buf); err != nil {
+		t.Fatalf("reading the in-flight handle: %v", err)
+	}
+	if string(buf) != "the old build" {
+		t.Errorf("the in-flight handle now reads %q: the running artifact was rewritten under it", buf)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "the new build" {
+		t.Errorf("dst = %q, want the new build", got)
+	}
+
+	// Nothing left behind: a temp file that survives becomes a second ~16MB
+	// copy in ~/.claude/hooks on every launch.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("%d files in the directory, want just src and dst: %v", len(entries), entries)
 	}
 }

@@ -3999,3 +3999,661 @@ func TestStatusLinesNeverExceedWidth(t *testing.T) {
 		}
 	}
 }
+
+// rateModelForTest builds a model with live rate-limit data and enough
+// burn-rate samples to produce the "empty in X" ETA, mirroring swRateModel in
+// swmeters_test.go.
+func rateModelForTest(now time.Time, width int) model {
+	return model{
+		width: width, height: 40, rateOK: true,
+		rateLimits: RateLimits{
+			FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+			SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+		},
+		pctSamples: []pctSample{
+			{at: now.Add(-10 * time.Minute), pct: 10},
+			{at: now, pct: 20},
+		},
+	}
+}
+
+// Model rows sit after wk and before the eta, because callers drop from the
+// END of the slice and the required drop order is eta → models → wk → 5h.
+func TestRateGaugesOrdersModelRowsAfterWeek(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{
+		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+	}
+	models := []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+	samples := []pctSample{{at: now.Add(-10 * time.Minute), pct: 10}, {at: now, pct: 20}}
+
+	gs := rateGauges(rl, models, samples, now, defaultBarW)
+	if len(gs.parts) != 4 {
+		t.Fatalf("parts = %q, want 5h, wk, fab, eta", gs.parts)
+	}
+	if !strings.Contains(gs.parts[0], "5h") {
+		t.Errorf("parts[0] = %q, want the 5h gauge", gs.parts[0])
+	}
+	if !strings.Contains(gs.parts[1], "wk") {
+		t.Errorf("parts[1] = %q, want the wk gauge", gs.parts[1])
+	}
+	if !strings.Contains(gs.parts[2], "fab") || !strings.Contains(gs.parts[2], "26%") {
+		t.Errorf("parts[2] = %q, want the Fable gauge at 26%%", gs.parts[2])
+	}
+	if !strings.Contains(gs.parts[3], "empty in") {
+		t.Errorf("parts[3] = %q, want the eta", gs.parts[3])
+	}
+	// 5h, wk and fab carry bars; the eta is plain text.
+	if gs.barred != 3 {
+		t.Errorf("barred = %d, want 3", gs.barred)
+	}
+}
+
+// No model data — the overwhelmingly common case on Pro, and every case when
+// the pull path is broken — must render exactly today's gauges.
+func TestRateGaugesWithoutModelsUnchanged(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{
+		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+	}
+	gs := rateGauges(rl, nil, nil, now, defaultBarW)
+	if len(gs.parts) != 2 {
+		t.Fatalf("parts = %q, want just 5h and wk", gs.parts)
+	}
+	if gs.barred != 2 {
+		t.Errorf("barred = %d, want 2", gs.barred)
+	}
+}
+
+// A row whose percent we have but whose reset time we do not still renders —
+// dropping the meter because one field is missing would be a worse outcome.
+func TestRateGaugesModelWithoutResetTime(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{FiveHour: Window{UsedPercent: 1, ResetsAt: now.Add(time.Hour)}}
+	gs := rateGauges(rl, []ModelWindow{{Name: "Fable", UsedPercent: 26}}, nil, now, defaultBarW)
+	found := false
+	for _, p := range gs.parts {
+		if strings.Contains(p, "fab") && strings.Contains(p, "26%") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("parts = %q, want a fab gauge despite the zero reset time", gs.parts)
+	}
+}
+
+func TestShortModelMeter(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Fable", "fab"},
+		{"Opus", "opu"},
+		{"Sonnet", "son"},
+		{"X", "x"},
+	} {
+		if got := shortModelMeter(tc.in); got != tc.want {
+			t.Errorf("shortModelMeter(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The full drop order, exercised by shrinking the pane one column at a time.
+func TestMetersLineDropOrderWithModels(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	full := renderMetersLine(m, now)
+	for _, want := range []string{"5h", "wk", "fab", "empty in"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("full meters line = %q, want %q", full, want)
+		}
+	}
+
+	sawEta, sawFab := false, false
+	for w := lipgloss.Width(full); w >= 20; w-- {
+		m.width = w
+		line := renderMetersLine(m, now)
+		if !sawEta && !strings.Contains(line, "empty in") {
+			sawEta = true
+			if !strings.Contains(line, "fab") {
+				t.Fatalf("at width %d the eta dropped but fab went with it: %q", w, line)
+			}
+		}
+		if sawEta && !sawFab && !strings.Contains(line, "fab") {
+			sawFab = true
+			if !strings.Contains(line, "wk") {
+				t.Fatalf("at width %d fab dropped but wk went with it: %q", w, line)
+			}
+		}
+		if sawFab && strings.Contains(line, "fab") {
+			t.Fatalf("at width %d fab came back after dropping: %q", w, line)
+		}
+	}
+	if !sawEta || !sawFab {
+		t.Fatalf("never observed the eta and fab drops (eta=%v fab=%v)", sawEta, sawFab)
+	}
+}
+
+// A usageMsg carrying the empty result of a LOST single-flight race must not
+// blank the rows this pane already has. refreshUsageCache's loser returns
+// whatever is on disk — PlanUsage{} when no cache exists yet — so an
+// unconditional assignment would wipe good rows every time two panes raced.
+func TestUsageMsgEmptyLostRaceKeepsRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{}})
+	next := got.(model)
+	if len(next.modelWindows) != 1 || next.modelWindows[0].Name != "Fable" {
+		t.Errorf("modelWindows = %+v, want the existing Fable row kept", next.modelWindows)
+	}
+	if !next.usageQuietUntil.IsZero() {
+		t.Error("the spawn loop went quiet on an empty lost-race result")
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop rescheduled after a lost race")
+	}
+}
+
+// An error keeps the rows too, and keeps ticking.
+func TestUsageMsgErrorKeepsRowsAndRetries(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26}}
+
+	got, cmd := m.Update(usageMsg{err: errors.New("spawn failed")})
+	if next := got.(model); len(next.modelWindows) != 1 {
+		t.Errorf("modelWindows = %+v, want the existing row kept through an error", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop rescheduled after an error")
+	}
+}
+
+// A real answer replaces the rows, including a subscriber whose plan has no
+// per-model windows at all — that is a genuine "no rows", not a lost race.
+//
+// And that answer must quiet the SPAWNS: a plan with no model-scoped window
+// renders nothing no matter how often we ask, so asking every usageTTL for the
+// life of the pane buys a Claude Code spawn and six SessionStart hooks per
+// quarter hour in exchange for nothing at all. Quieted, never latched — the
+// window expires (see TestUsageQuietWindowExpires) in case the plan gains one.
+func TestUsageMsgRealAnswerReplacesRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26}}
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{Available: true, FetchedAt: now, Fetched: true}})
+	next := got.(model)
+	if len(next.modelWindows) != 0 {
+		t.Errorf("modelWindows = %+v, want them cleared by a real empty answer", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop still running")
+	}
+	if next.usageMaySpawn(now.Add(usageCheckInterval)) {
+		t.Error("the next tick may still spawn after an answer with no model rows in it, want the spawns quieted")
+	}
+}
+
+// An answer with rows keeps the loop fully live: nothing may quiet a pane that
+// is actually rendering a model meter.
+func TestUsageMsgRowsKeepSpawningLive(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.usageQuietUntil = now.Add(usageQuietPeriod) // as if a previous answer was empty
+
+	got, _ := m.Update(usageMsg{usage: PlanUsage{
+		Available: true, FetchedAt: now, Fetched: true,
+		Models: []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+	}})
+	next := got.(model)
+	if !next.usageMaySpawn(now.Add(usageCheckInterval)) {
+		t.Error("still quiet after an answer that DID carry a model row, want the window cleared")
+	}
+}
+
+// rate_limits_available:false is a verdict on the credentials of the process
+// that asked — this pane's ANTHROPIC_API_KEY or CLAUDE_CODE_USE_BEDROCK — not
+// on the machine. The pane that fetched it stops spawning; its rows stay,
+// because they describe the account and another pane fetched them.
+func TestUsageMsgUnavailableQuietsOwnSpawnsAndKeepsRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26}}
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now, Fetched: true}})
+	next := got.(model)
+	if next.usageMaySpawn(now.Add(usageCheckInterval)) {
+		t.Error("the next tick may still spawn after our own unavailable answer, want the spawns quieted")
+	}
+	if len(next.modelWindows) != 1 {
+		t.Errorf("modelWindows = %+v, want the rows another pane fetched kept — Available is about our credentials, not the account", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the cache half of the loop still ticking so rows another pane fetches still arrive")
+	}
+}
+
+// The same false arriving from the SHARED CACHE must change nothing: one
+// pane's Bedrock credentials cannot be allowed to quiet every other pane on
+// the machine. (Nothing writes such a cache any more — see
+// TestRefreshUsageCacheKeepsSharedRowsWhenUnavailable — but one written by an
+// older build survives an upgrade, and this is the pane that reads it.)
+func TestUsageMsgUnavailableFromCacheDoesNotQuiet(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now}})
+	next := got.(model)
+	if !next.usageMaySpawn(now.Add(usageCheckInterval)) {
+		t.Error("a cached unavailable verdict quieted this pane, want it ignored: it describes another pane's credentials")
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop still running")
+	}
+}
+
+// The quiet window is a delay, never a latch: a `claude login` fixes a missing
+// profile scope, and a plan can gain a model-scoped window, neither of which
+// restarts this process.
+func TestUsageQuietWindowExpires(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+
+	got, _ := m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now, Fetched: true}})
+	next := got.(model)
+	if next.usageMaySpawn(now.Add(usageQuietPeriod - time.Minute)) {
+		t.Error("spawning resumed inside the quiet window")
+	}
+	if !next.usageMaySpawn(now.Add(usageQuietPeriod + time.Minute)) {
+		t.Error("still quiet past the window: the pane can never recover without a restart")
+	}
+}
+
+// The meters line must render identically with the model-window path absent,
+// which is the state every Pro session and every broken pull path is in.
+func TestMetersLineUnaffectedByBrokenUsagePath(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 120)
+	want := renderMetersLine(m, now)
+
+	m.modelWindows = nil
+	m.usageQuietUntil = now.Add(usageQuietPeriod)
+	m.usageCachePath = "/nonexistent/claudemux-usage.json"
+	if got := renderMetersLine(m, now); got != want {
+		t.Errorf("meters line changed when the usage path is broken:\n got %q\nwant %q", got, want)
+	}
+}
+
+// A tick arriving at a quieted pane still reads the cache — that is how it
+// picks up rows another pane fetched — but must not spawn.
+func TestUsageTickWhileQuietReadsButDoesNotSpawn(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.usageQuietUntil = now.Add(usageQuietPeriod)
+	m.usageCachePath = seedFreshUsageCache(t)
+	_, cmd := m.Update(usageTickMsg{})
+	if cmd == nil {
+		t.Fatal("cmd = nil, want a quieted pane to keep reading the shared cache")
+	}
+	if got, ok := cmd().(usageMsg); !ok || len(got.usage.Models) != 1 {
+		t.Errorf("quieted tick produced %#v, want the cached Fable row read back", got)
+	}
+
+	sw := swRateModel(now, 200)
+	sw.usageQuietUntil = now.Add(usageQuietPeriod)
+	sw.usageCachePath = m.usageCachePath
+	if _, cmd := sw.Update(usageTickMsg{}); cmd == nil {
+		t.Error("lobby cmd = nil, want its quieted tick to keep reading the shared cache too")
+	}
+}
+
+// barCellCount counts the progress-bar cells in a rendered line.
+func barCellCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if r == '█' || r == '░' {
+			n++
+		}
+	}
+	return n
+}
+
+// The widen step must divide the leftover columns by the ACTUAL number of
+// bar-carrying gauges. With a model row the head has four (ctx, 5h, wk, fab),
+// not the three it used to hardcode: dividing by three overshoots, the
+// overflow guard then rejects the widened set wholesale, and the line is left
+// short of the pane by the entire slack. So this asserts the line still fills
+// the pane once a model row is present.
+func TestMetersLineWidensEveryBarIncludingModelRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 0)
+	m.contextPct = 42
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	var prevBars int
+	for _, w := range []int{140, 160, 180, 200} {
+		m.width = w
+		line := renderMetersLine(m, now)
+		// The premise: every gauge survives at these widths, so four bars are
+		// on screen and the eta is the only bar-less part.
+		for _, want := range []string{"ctx", "5h", "wk", "fab", "empty in"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("at width %d the %q gauge is missing: %q", w, want, line)
+			}
+		}
+		// Four bars share the slack, so integer division can strand at most
+		// three columns.
+		content := len(" ") + lipgloss.Width(strings.TrimRight(ansi.Strip(line), " "))
+		if unspent := w - content; unspent > 3 {
+			t.Errorf("at width %d, %d columns left unspent (want <= 3): the slack is being divided by the wrong bar count: %q", w, unspent, line)
+		}
+		if bars := barCellCount(line); bars <= prevBars {
+			t.Errorf("at width %d, total bar cells = %d, want more than %d at the previous width", w, bars, prevBars)
+		} else {
+			prevBars = bars
+		}
+	}
+}
+
+// waitForInitMsg runs every command a panel's Init returned — recursing into
+// tea.Batch, each command in its own goroutine — and reports the first message
+// matching want. Goroutines only send on a buffered channel and never touch t,
+// so any that outlive the test (the 1s tick, a poll) are harmless.
+func waitForInitMsg(cmd tea.Cmd, d time.Duration, want func(tea.Msg) bool) (tea.Msg, bool) {
+	if cmd == nil {
+		return nil, false
+	}
+	msgs := make(chan tea.Msg, 32)
+	var run func(tea.Cmd)
+	run = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		go func() {
+			defer func() { _ = recover() }()
+			msg := c()
+			if batch, ok := msg.(tea.BatchMsg); ok {
+				for _, sub := range batch {
+					run(sub)
+				}
+				return
+			}
+			select {
+			case msgs <- msg:
+			default:
+			}
+		}()
+	}
+	run(cmd)
+
+	deadline := time.After(d)
+	for {
+		select {
+		case msg := <-msgs:
+			if want(msg) {
+				return msg, true
+			}
+		case <-deadline:
+			return nil, false
+		}
+	}
+}
+
+func isUsageMsg(msg tea.Msg) bool {
+	_, ok := msg.(usageMsg)
+	return ok
+}
+
+// seedFreshUsageCache writes a cache young enough that usageCmd serves it
+// straight from disk — the loop is exercised end to end without spawning
+// anything.
+func seedFreshUsageCache(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "usage.json")
+	if err := writeUsageCache(path, PlanUsage{
+		Available: true,
+		Models:    []ModelWindow{{Name: "Fable", UsedPercent: 26}},
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The head must actually START the usage loop. Nothing else in the suite
+// notices if usageCmd is dropped from Init — the meters would simply never
+// grow a model row, on every pane, forever, with a green suite.
+func TestHeadInitStartsUsageLoop(t *testing.T) {
+	t.Setenv("TMUX_PANE", "") // keep pollData off tmux
+	t.Setenv("PATH", "")      // and every other command out of a subprocess
+	cachePath := seedFreshUsageCache(t)
+
+	jsonl := filepath.Join(t.TempDir(), "s.jsonl")
+	if err := os.WriteFile(jsonl, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sessionID "" is waiting mode: Init then adds no summarize call.
+	m := newModel(Config{}, jsonl, "", false)
+	m.usageCachePath = cachePath
+
+	msg, ok := waitForInitMsg(m.Init(), 3*time.Second, isUsageMsg)
+	if !ok {
+		t.Fatal("Init produced no usageMsg: the head never starts the usage loop, so per-model rows would never appear")
+	}
+	got := msg.(usageMsg)
+	if got.err != nil {
+		t.Fatalf("usageMsg.err = %v, want the seeded cache served", got.err)
+	}
+	if len(got.usage.Models) != 1 || got.usage.Models[0].Name != "Fable" {
+		t.Errorf("usage.Models = %+v, want the seeded Fable row", got.usage.Models)
+	}
+}
+
+// Same for the lobby: it renders the same gauges and must not be the one panel
+// whose loop never starts.
+func TestLobbyInitStartsUsageLoop(t *testing.T) {
+	t.Setenv("PATH", "") // swPollCmd's tmux calls fail fast instead of running
+	cachePath := seedFreshUsageCache(t)
+
+	m := swModel{
+		rateLimitsPath: filepath.Join(t.TempDir(), "rate-limits.json"),
+		usageCachePath: cachePath,
+	}
+
+	msg, ok := waitForInitMsg(m.Init(), 3*time.Second, isUsageMsg)
+	if !ok {
+		t.Fatal("Init produced no usageMsg: the lobby never starts the usage loop, so per-model rows would never appear")
+	}
+	got := msg.(usageMsg)
+	if got.err != nil {
+		t.Fatalf("usageMsg.err = %v, want the seeded cache served", got.err)
+	}
+	if len(got.usage.Models) != 1 || got.usage.Models[0].Name != "Fable" {
+		t.Errorf("usage.Models = %+v, want the seeded Fable row", got.usage.Models)
+	}
+}
+
+// Gauge rendering is gated on the PUSH path (rateOK): with no 5h/wk data there
+// is no meter line at all, so a model row appended to it is worth nothing. A
+// user who kept their own statusline — exactly the case setStatusLine
+// deliberately declines to take over — sits in that state permanently, and
+// before this the pull loop kept spawning a Claude Code every fifteen minutes
+// for them anyway, firing every SessionStart hook on the machine each time,
+// for zero visible output.
+//
+// The tick itself keeps running (it is a file read, and it is how rows another
+// pane fetched arrive here); only the spawn is withheld, and it comes back by
+// itself the moment the push path starts working.
+func TestUsageTickDoesNotSpawnWhenTheGaugesCannotRender(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "spawns")
+	t.Setenv("CLAUDEMUX_CLAUDE_BIN", countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0))
+
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.usageCachePath = filepath.Join(dir, "usage.json") // no cache: a spawn is due
+	m.rateOK = false                                    // the user's own statusline: no meter line ever
+
+	_, cmd := m.Update(usageTickMsg{})
+	if cmd == nil {
+		t.Fatal("cmd = nil, want the loop to keep reading the shared cache")
+	}
+	_ = cmd()
+	if n := spawnCount(t, counter); n != 0 {
+		t.Fatalf("spawned %d Claude Codes for a pane that renders no gauges at all, want 0", n)
+	}
+
+	// The push path starts working — `hook ensure` claimed the slot, or the
+	// user pointed their statusLine at us. No restart, no latch to clear.
+	m.rateOK = true
+	_, cmd = m.Update(usageTickMsg{})
+	_ = cmd()
+	if n := spawnCount(t, counter); n != 1 {
+		t.Errorf("spawned %d times once the gauges could render, want 1: the pane never recovers", n)
+	}
+}
+
+// The lobby's half of the same rule.
+func TestSwUsageTickDoesNotSpawnWhenTheGaugesCannotRender(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "spawns")
+	t.Setenv("CLAUDEMUX_CLAUDE_BIN", countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0))
+
+	m := swRateModel(time.Now(), 200)
+	m.usageCachePath = filepath.Join(dir, "usage.json")
+	m.rateOK = false
+
+	_, cmd := m.Update(usageTickMsg{})
+	if cmd == nil {
+		t.Fatal("lobby cmd = nil, want the loop to keep reading the shared cache")
+	}
+	_ = cmd()
+	if n := spawnCount(t, counter); n != 0 {
+		t.Errorf("the lobby spawned %d Claude Codes while rendering no gauges at all, want 0", n)
+	}
+}
+
+// seedRateLimitsHome points $HOME at a temp dir holding abtop's cache and
+// nothing of ours, and returns (abtop's path, ours).
+func seedRateLimitsHome(t *testing.T) (string, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abtop := filepath.Join(claudeDir, "abtop-rate-limits.json")
+	if err := os.WriteFile(abtop, []byte(`{"source":"claude","updated_at":1,"five_hour":{"used_percentage":9,"resets_at":2}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return abtop, filepath.Join(claudeDir, "claudemux", "rate-limits.json")
+}
+
+// writeOurRateLimitsCache creates the cache our statusline subcommand writes.
+func writeOurRateLimitsCache(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"source":"claudemux","updated_at":3,"five_hour":{"used_percentage":11,"resets_at":4}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The upgrade gap: `hook ensure` claims the statusLine slot, abtop's shim
+// stops writing, and a head starts before Claude Code's next statusline
+// render — so ours does not exist yet and the head resolves to abtop's file.
+// That file is now dead, so without re-resolution the pane shows abtop's last
+// numbers, frozen and perfectly confident, for its entire lifetime. Stale
+// meters are worse than absent ones.
+func TestHeadMigratesToOurRateLimitsCacheWithoutRestarting(t *testing.T) {
+	abtop, ours := seedRateLimitsHome(t)
+	now := time.Now()
+
+	m := rateModelForTest(now, 200)
+	m.rateLimitsPath = defaultRateLimitsPath()
+	if m.rateLimitsPath != abtop {
+		t.Fatalf("rateLimitsPath = %q at construction, want abtop's file %q", m.rateLimitsPath, abtop)
+	}
+
+	// A tick before ours exists changes nothing.
+	got, _ := m.Update(tickMsg(now))
+	if p := got.(model).rateLimitsPath; p != abtop {
+		t.Fatalf("rateLimitsPath = %q while only abtop's file exists, want %q", p, abtop)
+	}
+
+	// Claude Code finally renders a statusline and our cache appears.
+	writeOurRateLimitsCache(t, ours)
+	got, _ = got.(model).Update(tickMsg(now.Add(time.Second)))
+	if p := got.(model).rateLimitsPath; p != ours {
+		t.Errorf("rateLimitsPath = %q after our cache appeared, want %q: this pane shows abtop's frozen numbers until it is restarted", p, ours)
+	}
+}
+
+// The lobby resolves the same path at construction and lives just as long.
+func TestLobbyMigratesToOurRateLimitsCacheWithoutRestarting(t *testing.T) {
+	abtop, ours := seedRateLimitsHome(t)
+	now := time.Now()
+
+	m := newSwModel("%1")
+	if m.rateLimitsPath != abtop {
+		t.Fatalf("rateLimitsPath = %q at construction, want abtop's file %q", m.rateLimitsPath, abtop)
+	}
+	writeOurRateLimitsCache(t, ours)
+	got, _ := m.Update(swTickMsg(now))
+	if p := got.(swModel).rateLimitsPath; p != ours {
+		t.Errorf("rateLimitsPath = %q after our cache appeared, want %q", p, ours)
+	}
+}
+
+// An explicit override is not a fallback and must never be re-resolved away
+// from — it is the only handle the tests and a dev have on this pair of files.
+func TestRefreshedRateLimitsPathHonorsTheOverride(t *testing.T) {
+	_, ours := seedRateLimitsHome(t)
+	writeOurRateLimitsCache(t, ours)
+
+	override := filepath.Join(t.TempDir(), "override.json")
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", override)
+	if got := refreshedRateLimitsPath(override); got != override {
+		t.Errorf("refreshedRateLimitsPath(%q) = %q, want the override kept", override, got)
+	}
+	if got := refreshedRateLimitsPath(""); got != "" {
+		t.Errorf("refreshedRateLimitsPath(\"\") = %q, want \"\" (no home dir to resolve against)", got)
+	}
+}
+
+// The quiet window must survive the loop's own cache reads. A quieted pane
+// goes on reading the shared cache every minute, and that cache is the very
+// thing that keeps saying "no rows" — so re-arming the window from those reads
+// would push its expiry out on every tick and quietly restore the permanent,
+// process-lifetime latch this replaced.
+func TestUsageQuietWindowIsNotExtendedByCacheReads(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+
+	got, _ := m.Update(usageMsg{usage: PlanUsage{Available: true, FetchedAt: now, Fetched: true}})
+	next := got.(model)
+	armed := next.usageQuietUntil
+	if armed.IsZero() {
+		t.Fatal("no quiet window armed by our own rowless answer")
+	}
+
+	// An hour of ticks, each reading back the same rowless cache.
+	for i := 1; i <= 60; i++ {
+		at := now.Add(time.Duration(i) * usageCheckInterval)
+		g, _ := next.Update(usageMsg{usage: PlanUsage{Available: true, FetchedAt: at}})
+		next = g.(model)
+	}
+	if !next.usageQuietUntil.Equal(armed) {
+		t.Errorf("the quiet window moved from %v to %v across cache reads: it would never expire", armed, next.usageQuietUntil)
+	}
+	if !next.usageMaySpawn(armed.Add(time.Minute)) {
+		t.Error("still quiet past the window the fetch armed: the pane can never retry")
+	}
+}

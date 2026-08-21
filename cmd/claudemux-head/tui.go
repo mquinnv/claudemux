@@ -195,8 +195,14 @@ type model struct {
 	// bg holds background tasks this session launched and has not seen finish.
 	// Accumulated from new events as they arrive — see bgTracker for why it
 	// cannot be recomputed from allEvents.
-	bg             bgTracker
-	rateLimitsPath string      // ~/.claude/abtop-rate-limits.json or override
+	bg bgTracker
+	// rateLimitsPath is the 5h/wk cache this head reads: ours
+	// (~/.claude/claudemux/rate-limits.json), abtop's file as the migration
+	// fallback while ours does not exist yet, or CLAUDEMUX_RATE_LIMITS_PATH.
+	// Re-resolved on every tick while it holds the fallback — see
+	// refreshedRateLimitsPath.
+	rateLimitsPath string
+	usageCachePath string      // ~/.claude/claudemux/usage.json or override
 	pctSamples     []pctSample // 5h-window snapshots over time, for burn-rate
 
 	// Latest snapshot
@@ -212,6 +218,19 @@ type model struct {
 	summary    Summary
 	rateLimits RateLimits
 	rateOK     bool
+	// modelWindows are the per-model weekly limits from the usage cache. Empty
+	// whenever the pull path is unavailable or broken, which must never affect
+	// the 5h/wk gauges above.
+	modelWindows []ModelWindow
+	// usageQuietUntil suspends the SPAWN half of the usage loop until the
+	// given time, after an answer that could produce nothing to render: a
+	// rate_limits_available:false verdict this pane fetched itself (API key,
+	// Bedrock, Vertex, missing profile scope) or a plan with no model-scoped
+	// window at all. The cache half keeps running throughout, so rows another
+	// pane fetches still appear here, and the window expires so a `claude
+	// login` or a plan that gains a model window recovers without a restart.
+	// See usageMaySpawn.
+	usageQuietUntil time.Time
 	// conductRaw is the last-read @claudemux_conducting value, parsed at
 	// render time (not poll time) so its heartbeat keeps decaying against the
 	// clock even if polls stall — see conductChip.
@@ -381,6 +400,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		allEvents:        seeded,
 		bg:               newBgTracker(),
 		rateLimitsPath:   defaultRateLimitsPath(),
+		usageCachePath:   defaultUsageCachePath(),
 		firstPrompt:      r.FirstPrompt(),
 		// Init always issues the first poll itself (see Init below), so the
 		// flag starts held to prevent the first 1s tick from firing a second,
@@ -720,7 +740,16 @@ func firstUserPrompt(events []Event) string {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.pollData(), m.tick()}
+	// The usage loop is deliberately its own self-rescheduling cycle
+	// (usageMsg → usageTick → usageTickMsg) rather than a rider on pollData:
+	// the dataMsg case has several early returns and no command accumulator,
+	// so a command appended there would be dropped on most paths.
+	//
+	// This first call can only ever READ the cache: rateOK is false until the
+	// first poll lands, so usageMaySpawn says no. That is the right answer
+	// anyway — a fleet coming up together would otherwise race to spawn before
+	// any of them knows whether it can render a meter line at all.
+	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))}
 	// The project color is static for the life of a session, so it is published
 	// once here rather than from the per-tick publish path.
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
@@ -739,6 +768,100 @@ func (m model) tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// usageCheckInterval is how often the loop re-examines the usage cache. The
+// check is a file read; only a cache older than usageTTL becomes a spawn, so
+// checking every minute costs nothing while keeping a cache another pane just
+// refreshed from sitting unnoticed for a quarter of an hour.
+const usageCheckInterval = time.Minute
+
+type usageTickMsg struct{}
+
+type usageMsg struct {
+	usage PlanUsage
+	err   error
+}
+
+// usageQuietPeriod is how long a pane stays off the SPAWN path after an answer
+// that can produce nothing to render.
+//
+// A spawn is not free: ~2.2s of Claude Code plus every SessionStart hook the
+// user has installed. Repeating that every usageTTL forever, to be told the
+// same nothing, is the cost this window exists to cap — six hours takes it
+// from 96 spawns a day to four. It is a delay and never a latch:
+// rate_limits_available:false can be fixed by a `claude login`, and a plan can
+// gain a model-scoped window, neither of which restarts this process. The
+// cache half of the loop keeps running throughout at zero spawn cost, so rows
+// another pane fetches show up here within the check interval regardless.
+const usageQuietPeriod = 6 * time.Hour
+
+// usageMaySpawn reports whether this tick may spawn a Claude Code, as opposed
+// to merely re-reading the shared cache.
+//
+// Two gates, both of them recoverable states rather than latches:
+//
+//   - rateOK. The gauge line renders only when the 5h/wk push path has data
+//     (rateGaugeParts returns an empty set otherwise), so a pane without it
+//     shows no meters at all — and a model row appended to a line that is
+//     never drawn is worth exactly nothing. This is the ordinary state of a
+//     user who kept their own statusline, which setStatusLine deliberately
+//     declines to take over: without this gate that user spawns a Claude Code
+//     every fifteen minutes, forever, for no visible output. It clears itself
+//     the moment the push path starts working, since rateOK is recomputed from
+//     every poll.
+//   - quietUntil. See usageQuietPeriod.
+func usageMaySpawn(rateOK bool, quietUntil, now time.Time) bool {
+	return rateOK && !now.Before(quietUntil)
+}
+
+func (m model) usageMaySpawn(now time.Time) bool {
+	return usageMaySpawn(m.rateOK, m.usageQuietUntil, now)
+}
+
+// usageCmd reads the shared cache and, when allowSpawn and the cache has aged
+// past usageTTL, spawns a Claude Code to refresh it. The lock inside
+// refreshUsageCache keeps concurrent panes to one spawn between them.
+//
+// allowSpawn false makes this a pure file read: the rows another pane cached
+// are still picked up, but nothing is spawned. That is what keeps a pane which
+// can show nothing (usageMaySpawn) from paying for answers it cannot render,
+// without ever cutting it off from an answer someone else paid for.
+//
+// The whole loop is additive: it feeds the per-model rows and nothing else, so
+// every failure mode here degrades to no model rows and never touches the
+// 5h/wk gauges.
+func usageCmd(cachePath string, allowSpawn bool) tea.Cmd {
+	return func() tea.Msg {
+		if cachePath == "" {
+			// No home directory to cache under. Refusing here matters: with an
+			// empty path refreshUsageCache would take its lock in the process's
+			// cwd and spawn a Claude Code it can never cache the answer from.
+			return usageMsg{err: errors.New("no usage cache path")}
+		}
+		now := time.Now()
+		cached, fresh := readUsageCache(cachePath, now)
+		if fresh || !allowSpawn {
+			return usageMsg{usage: cached}
+		}
+		usage, err := refreshUsageCache(context.Background(), cachePath, usageClaudeBin(), now)
+		return usageMsg{usage: usage, err: err}
+	}
+}
+
+// usageTick schedules the next cache check.
+func usageTick() tea.Cmd {
+	return tea.Tick(usageCheckInterval, func(time.Time) tea.Msg { return usageTickMsg{} })
+}
+
+// usageAnswered reports whether a usage result is a real answer rather than
+// the empty value a lost single-flight race hands back. refreshUsageCache's
+// loser returns whatever is on disk — which is PlanUsage{} when no cache
+// exists yet — so assigning its Models unconditionally would wipe rows this
+// pane already has. Every genuine answer, including a subscriber with no
+// per-model windows at all, carries a FetchedAt.
+func usageAnswered(u PlanUsage) bool {
+	return !u.FetchedAt.IsZero() || len(u.Models) > 0
 }
 
 func (m model) pollData() tea.Cmd {
@@ -1056,6 +1179,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		cmds := []tea.Cmd{m.tick()}
+		// Re-resolved every tick while this head is still on abtop's file, so
+		// a pane that started in the upgrade gap — `hook ensure` has claimed
+		// the statusLine slot, stopping abtop's shim, but Claude Code has not
+		// rendered a statusline yet, so our cache does not exist — migrates to
+		// our cache the moment it appears instead of showing abtop's frozen
+		// last numbers for the rest of the pane's life. Confident stale
+		// numbers are worse than none. Costs one stat per tick, and only until
+		// the migration happens.
+		m.rateLimitsPath = refreshedRateLimitsPath(m.rateLimitsPath)
 		if m.shouldAcquireSummarizer(time.Time(msg)) {
 			m.acquiringKey = true
 			m.keyAttempts++
@@ -1358,6 +1490,58 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, killSessionCmd(m.selfPane)
+
+	case usageTickMsg:
+		// The tick itself never stops: it is a file read, and it is how a pane
+		// picks up rows another pane fetched. Whether it may also SPAWN is the
+		// single gate in usageMaySpawn.
+		return m, usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))
+
+	case usageMsg:
+		if msg.err != nil {
+			// get_usage is Experimental and the spawn can fail for a dozen
+			// reasons. Keep whatever rows we already have, tell the user
+			// nothing, and try again on the next tick.
+			return m, usageTick()
+		}
+		if !usageAnswered(msg.usage) {
+			// A lost single-flight race with an empty cache on disk. Keep the
+			// rows we have rather than blanking them, and try again.
+			return m, usageTick()
+		}
+		if !msg.usage.Fetched {
+			// A cache read: this pane's credentials and this pane's plan had
+			// nothing to do with it. Take the rows — that is how a pane picks
+			// up what another pane fetched — and touch nothing else. The spawn
+			// window is a statement about OUR credentials and OUR plan, and
+			// re-deriving it from a file on every tick would break it both
+			// ways: one pane's Bedrock verdict would quiet all of them, and a
+			// cache that keeps reading back "no rows" would re-arm the window
+			// on every read, turning a six-hour delay into the permanent latch
+			// this replaced.
+			m.modelWindows = msg.usage.Models
+			return m, usageTick()
+		}
+		if !msg.usage.Available {
+			// Not a Claude.ai subscriber SESSION — this pane's own credentials
+			// (API key, Bedrock, Vertex, missing scope). Quiet the spawns and
+			// leave modelWindows alone: the verdict is about this process, not
+			// about the account, so rows another pane fetched for the same
+			// machine stay on screen.
+			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+			return m, usageTick()
+		}
+		m.modelWindows = msg.usage.Models
+		if len(msg.usage.Models) == 0 {
+			// A real answer of ours with no model-scoped window in it — the
+			// ordinary shape of a plan that has none. Nothing here renders, so
+			// back the spawns off rather than paying for the same nothing
+			// every usageTTL for the life of the pane.
+			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+		} else {
+			m.usageQuietUntil = time.Time{}
+		}
+		return m, usageTick()
 	}
 
 	return m, nil
@@ -1587,7 +1771,7 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
 
-	rightParts := rateGaugeParts(m, now, defaultBarW)
+	rightParts := rateGaugeParts(m, now, defaultBarW).parts
 
 	left := strings.Join(leftParts, " · ")
 	right := strings.Join(rightParts, " · ")
@@ -1610,7 +1794,8 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 		line = " " + left + " · " + right + " "
 	default:
 		// Too narrow even inline. Drop right-group items from the end
-		// (eta → wk → 5h) until packing left + " · " + right fits.
+		// (eta → model rows → wk → 5h) until packing left + " · " + right
+		// fits.
 		for len(rightParts) > 0 {
 			right = strings.Join(rightParts, " · ")
 			if leftW+lipgloss.Width(right)+5 <= m.width {
@@ -1657,23 +1842,37 @@ func stateDot(kind StateKind) string {
 	}
 }
 
-// rateGaugeParts builds the right-group budget gauges — 5h, wk, and (when
-// there's enough burn-rate signal) a "empty in X" ETA — in the fixed order
-// callers drop from when space is tight: eta, then wk, then 5h. Returns nil
-// when rate-limit data isn't available (m.rateOK == false). Shared by
-// renderStatusbar and renderMetersLine so both panels build the identical
-// gauge text from the same rules. barW is each gauge's bar cell width.
-func rateGaugeParts(m model, now time.Time, barW int) []string {
+// gaugeSet is the right-group gauges plus how many of them carry a progress
+// bar. Callers drop parts from the END and then widen the surviving bars, so
+// they need the bar count: it used to be a hardcoded constant, which was only
+// correct while 5h and wk were the only bars in the group.
+type gaugeSet struct {
+	// parts are in the fixed order callers drop from the end of:
+	// 5h, wk, model rows…, eta.
+	parts []string
+	// barred is how many LEADING parts carry a bar. The eta is the only
+	// bar-less part and is always last, so this is len(parts) or len(parts)-1.
+	barred int
+}
+
+// rateGaugeParts builds the right-group budget gauges — 5h, wk, any per-model
+// weekly rows, and (when there's enough burn-rate signal) a "empty in X" ETA —
+// in the fixed order callers drop from when space is tight: eta, then model
+// rows, then wk, then 5h. Returns an empty set when rate-limit data isn't
+// available (m.rateOK == false). Shared by renderStatusbar and
+// renderMetersLine so both panels build the identical gauge text from the same
+// rules. barW is each gauge's bar cell width.
+func rateGaugeParts(m model, now time.Time, barW int) gaugeSet {
 	if !m.rateOK {
-		return nil
+		return gaugeSet{}
 	}
-	return rateGauges(m.rateLimits, m.pctSamples, now, barW)
+	return rateGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW)
 }
 
 // rateGauges is the model-independent core of rateGaugeParts, shared with the
 // switchboard (swMetersLine) so both panels build the identical gauge text
-// from the same raw rate-limit data.
-func rateGauges(rl RateLimits, samples []pctSample, now time.Time, barW int) []string {
+// from the same raw data.
+func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now time.Time, barW int) gaugeSet {
 	fhPct := float64(rl.FiveHour.UsedPercent)
 	wkPct := float64(rl.SevenDay.UsedPercent)
 	parts := []string{
@@ -1686,6 +1885,21 @@ func rateGauges(rl RateLimits, samples []pctSample, now time.Time, barW int) []s
 			rl.SevenDay.UsedPercent,
 			rl.SevenDay.ResetsAt.Local().Format("Mon")),
 	}
+	// Per-model weekly rows sit here — after wk, before the eta — so that the
+	// drop-from-the-end order comes out as eta, models, wk, 5h.
+	for _, mw := range models {
+		pct := float64(mw.UsedPercent)
+		seg := fmt.Sprintf("%s %s %d%%",
+			shortModelMeter(mw.Name), renderBar(barW, pct, thresholdColor(pct)), mw.UsedPercent)
+		// A row with a percent but no parseable reset time still earns its
+		// meter; only the arrow is dropped.
+		if !mw.ResetsAt.IsZero() {
+			seg += "→" + mw.ResetsAt.Local().Format("Mon")
+		}
+		parts = append(parts, seg)
+	}
+	barred := len(parts)
+
 	rate := burnRatePctPerMin(samples, now)
 	if rate > 0 {
 		eta := etaToEmptyPct(rl.FiveHour.UsedPercent, rate)
@@ -1693,7 +1907,20 @@ func rateGauges(rl RateLimits, samples []pctSample, now time.Time, barW int) []s
 			parts = append(parts, "empty in "+formatDuration(eta))
 		}
 	}
-	return parts
+	return gaugeSet{parts: parts, barred: barred}
+}
+
+// shortModelMeter renders a server-supplied model label as a three-cell gauge
+// prefix matching "5h" and "wk" in weight: "Fable" → "fab", "Opus" → "opu".
+// The label is whatever the server sent, so this must not assume a known set;
+// the truncation counts runes rather than bytes so a non-ASCII label cannot be
+// cut mid-rune into mojibake.
+func shortModelMeter(name string) string {
+	lower := []rune(strings.ToLower(name))
+	if len(lower) > 3 {
+		lower = lower[:3]
+	}
+	return string(lower)
 }
 
 // Chip glyphs. "⎇" is a branch symbol and now means the branch; the worktree
@@ -1864,42 +2091,53 @@ func renderStateLine(m model, now time.Time) string {
 
 // renderMetersLine renders the second line of the new split layout: the ctx
 // bar followed by the same right-group budget gauges renderStatusbar packs
-// on the right (5h, wk, eta), here joined left-to-right with " · " (no
-// right-alignment needed since it has the full line to itself). When the
-// line overflows the pane width, gauges drop from the end in today's order
-// (eta → wk → 5h); the ctx gauge always stays. Unlike the packed statusbar,
-// the surviving bars then widen past defaultBarW to consume the leftover
-// columns, so the meters fill the pane rather than stranding it as padding.
+// on the right (5h, wk, per-model rows, eta), here joined left-to-right with
+// " · " (no right-alignment needed since it has the full line to itself).
+// When the line overflows the pane width, gauges drop from the end in today's
+// order (eta → model rows → wk → 5h); the ctx gauge always stays. Unlike the
+// packed statusbar, the surviving bars then widen past defaultBarW to consume
+// the leftover columns, so the meters fill the pane rather than stranding it
+// as padding.
 func renderMetersLine(m model, now time.Time) string {
 	avail := m.width - 2 // columns inside the " "..." " padding below
 	if avail < 1 {
 		avail = 1
 	}
-	build := func(barW int) []string {
-		return append([]string{ctxSegment(m, barW)}, rateGaugeParts(m, now, barW)...)
+	build := func(barW int) gaugeSet {
+		gs := rateGaugeParts(m, now, barW)
+		// The ctx gauge is the head's own and always leads; it carries a bar,
+		// so it counts toward barred.
+		return gaugeSet{
+			parts:  append([]string{ctxSegment(m, barW)}, gs.parts...),
+			barred: gs.barred + 1,
+		}
 	}
 
 	// First decide how many gauges fit at the baseline bar width, dropping
 	// from the end as before. Only the bars flex below, so gauge count is
 	// settled here and never changes as they widen.
-	parts := build(defaultBarW)
+	gs := build(defaultBarW)
+	parts := gs.parts
 	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
 		parts = parts[:len(parts)-1]
 	}
 
 	// Spend the leftover columns widening every surviving bar equally: this
 	// line has the pane to itself, so a 10-cell bar wastes most of it on a
-	// wide pane. Only ctx/5h/wk carry bars — the trailing eta segment is
-	// plain text — so the slack splits across those, not across every part,
-	// or the eta's share would just become trailing blank space. Integer
-	// division leaves a few columns unspent rather than risking an overflow
-	// that clipLine would then chop.
+	// wide pane. Only the parts that carry bars share the slack — the trailing
+	// eta segment is plain text, so its share would just become trailing blank
+	// space. barred comes from the gauge set rather than a constant now that
+	// per-model rows can add bars. Integer division leaves a few columns
+	// unspent rather than risking an overflow that clipLine would then chop.
 	barCount := len(parts)
-	if barCount > 3 {
-		barCount = 3
+	if barCount > gs.barred {
+		barCount = gs.barred
+	}
+	if barCount < 1 {
+		barCount = 1
 	}
 	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
-		wide := build(defaultBarW + grow)[:len(parts)]
+		wide := build(defaultBarW + grow).parts[:len(parts)]
 		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
 			parts = wide
 		}

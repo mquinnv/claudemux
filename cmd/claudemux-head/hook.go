@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -61,6 +62,15 @@ var hookScripts = []hookScript{
 
 // hookScriptName is the pane-map script's filename, which `--script` overrides.
 const hookScriptName = "claudemux-map.sh"
+
+// statuslineScriptName is the shipped statusline artifact's filename in
+// ~/.claude/hooks/. It is a copy of this binary rather than a shell script:
+// abtop's shim spawned bash AND python3 on every statusline render.
+const statuslineScriptName = "claudemux-statusline"
+
+// abtopStatuslineName is the shim we are replacing, matched by basename so the
+// user's install prefix does not matter.
+const abtopStatuslineName = "abtop-statusline.sh"
 
 // siblingOfExecutable joins name onto the directory holding this binary, with
 // symlinks resolved first because Homebrew puts the real files in libexec and
@@ -185,6 +195,27 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 			changed = true
 		}
 	}
+
+	// The statusline artifact is this binary itself, copied into hooksDir for
+	// the same reason the scripts are: settings.json must not carry a Homebrew
+	// libexec path that the next upgrade invalidates.
+	selfExe, err := os.Executable()
+	if err == nil {
+		selfExe, err = filepath.EvalSymlinks(selfExe)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "claudemux: locating this binary for the statusline: %v\n", err)
+		return 4
+	}
+	slDst := filepath.Join(hooksDir, statuslineScriptName)
+	if err := copyExecutableIfChanged(selfExe, slDst); err != nil {
+		fmt.Fprintf(stderr, "claudemux: installing %s: %v\n", statuslineScriptName, err)
+		return 4
+	}
+	if setStatusLine(settings, slDst+" statusline", stderr) {
+		changed = true
+	}
+
 	if !changed {
 		return 0 // every script registered on every event: no write, stay silent
 	}
@@ -273,5 +304,101 @@ func copyExecutable(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, 0o755)
+	return writeExecutableAtomic(dst, b)
+}
+
+// writeExecutableAtomic installs blob at path as an executable via a temp file
+// in the same directory and a rename, the way writeJSONAtomic installs the
+// rate-limit cache.
+//
+// Rename rather than overwrite because these files are being EXECUTED while we
+// replace them. Opening a running executable for writing fails with ETXTBSY,
+// and the statusline artifact is this whole ~16MB binary, which Claude Code
+// runs on every statusline render of every session on the machine — so an
+// in-place rewrite is a coin flip that hook ensure loses at exactly the moment
+// the user is using Claude Code most. Losing it used to cost more than the
+// copy: runHookEnsure returns 4 on that error, BEFORE setStatusLine runs and
+// before settings.json is written, so a single ETXTBSY silently dropped that
+// launch's entire hook registration. A rename needs write permission on the
+// directory, not on the file, cannot be observed half-done by a reader, and
+// leaves any process already executing the old inode running it untouched.
+func writeExecutableAtomic(path string, blob []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	// CreateTemp makes the file 0600; the mode has to be set before the
+	// rename, since the destination inherits the temp file's.
+	if err := os.Chmod(name, 0o755); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
+
+// copyExecutableIfChanged behaves like copyExecutable but skips the write
+// when dst already holds byte-identical content. Unlike the three hook
+// scripts (a few hundred bytes, copied via copyExecutable directly), the
+// statusline artifact is this whole binary — and hook ensure runs on every
+// launch of bin/claudemux, so an unconditional copy would rewrite a
+// multi-megabyte file on every single launch. Size is compared first via
+// os.Stat since it is cheap and rules out almost every real change (a new
+// build); content is compared only when sizes match. Any error reading dst
+// (most commonly: it does not exist yet) is treated as "not identical" so
+// the copy proceeds — this must never change observable behavior, only skip
+// redundant writes. The write itself goes through writeExecutableAtomic: the
+// skip above removes MOST of the exposure to a concurrent statusline render,
+// and the rename removes the rest.
+func copyExecutableIfChanged(src, dst string) error {
+	srcBytes, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if dstInfo, err := os.Stat(dst); err == nil && dstInfo.Size() == int64(len(srcBytes)) {
+		if dstBytes, err := os.ReadFile(dst); err == nil && bytes.Equal(srcBytes, dstBytes) {
+			return nil
+		}
+	}
+	return writeExecutableAtomic(dst, srcBytes)
+}
+
+// setStatusLine points settings["statusLine"] at our command, mutating settings
+// in place. Reports whether anything changed.
+//
+// Unlike hooks.<event>, which is an append-only list every tool can add to,
+// statusLine is a single exclusive string: claiming it takes it away from
+// whoever had it. So the claim is narrow — an empty slot, abtop's shim (what
+// this feature exists to remove), or a slot we already own. Anything else is a
+// statusline the user chose, and we decline and say so rather than clobbering
+// it; the meters simply stay dark, which is recoverable, whereas a silently
+// destroyed statusline is not.
+func setStatusLine(settings map[string]any, command string, stderr io.Writer) bool {
+	existing, _ := settings["statusLine"].(map[string]any)
+	if existing != nil {
+		cur, _ := existing["command"].(string)
+		switch {
+		case cur == command:
+			return false // already ours
+		case cur != "" && filepath.Base(cur) != abtopStatuslineName:
+			fmt.Fprintf(stderr, "claudemux: leaving your statusLine (%s) alone; "+
+				"account meters need claudemux's own statusline command, so they will stay unavailable\n", cur)
+			return false
+		}
+	}
+	settings["statusLine"] = map[string]any{"type": "command", "command": command}
+	return true
 }
