@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 // When the active Claude session in a directory rotates (a newer .jsonl
@@ -192,19 +193,19 @@ func TestFirstUserPrompt(t *testing.T) {
 
 func TestRenderPromptLine(t *testing.T) {
 	// Newlines and runs of whitespace collapse to single spaces.
-	got := renderPromptLine("", "hello\n\n  world", 40)
+	got := renderPromptLine("", "hello\n\n  world", 40, false)
 	if !strings.Contains(got, "❯ hello world") {
 		t.Errorf("renderPromptLine = %q, want it to contain %q", got, "❯ hello world")
 	}
 
 	// A label is shown before the prompt marker.
-	labeled := renderPromptLine("first", "the goal", 40)
+	labeled := renderPromptLine("first", "the goal", 40, false)
 	if !strings.Contains(labeled, "first") || !strings.Contains(labeled, "❯ the goal") {
 		t.Errorf("labeled renderPromptLine = %q, want it to contain label and prompt", labeled)
 	}
 
 	// Long prompts truncate with an ellipsis and never exceed the width.
-	wide := renderPromptLine("", "this is a very long prompt that will not fit", 20)
+	wide := renderPromptLine("", "this is a very long prompt that will not fit", 20, false)
 	if w := lipgloss.Width(wide); w != 20 {
 		t.Errorf("rendered width = %d, want 20", w)
 	}
@@ -213,7 +214,7 @@ func TestRenderPromptLine(t *testing.T) {
 	}
 
 	// Empty prompt renders the em-dash placeholder.
-	if got := renderPromptLine("", "", 20); !strings.Contains(got, "—") {
+	if got := renderPromptLine("", "", 20, false); !strings.Contains(got, "—") {
 		t.Errorf("empty prompt = %q, want placeholder %q", got, "—")
 	}
 }
@@ -620,8 +621,29 @@ func TestViewHeightTwoStateAndMeters(t *testing.T) {
 	}
 }
 
-// At height 3 the last prompt line joins state and meters.
-func TestViewHeightThreeAddsLastPrompt(t *testing.T) {
+// At height 3 one context row joins state and meters: the subject row.
+func TestViewHeightThreeAddsSubjectPrompt(t *testing.T) {
+	m := model{
+		ready:       true,
+		width:       60,
+		height:      3,
+		state:       State{Kind: StateIdle, Since: time.Now()},
+		firstPrompt: "do the thing",
+	}
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("View() produced %d lines, want 3:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[2], "do the thing") {
+		t.Errorf("last line (index 2) = %q, want the subject prompt", lines[2])
+	}
+}
+
+// A blank subject with a populated row under it is worth less than the row
+// under it: the single row falls through rather than rendering the em-dash
+// placeholder over real context.
+func TestViewHeightThreeFallsThroughAnEmptySubject(t *testing.T) {
 	m := model{
 		ready:      true,
 		width:      60,
@@ -635,7 +657,7 @@ func TestViewHeightThreeAddsLastPrompt(t *testing.T) {
 		t.Fatalf("View() produced %d lines, want 3:\n%s", len(lines), out)
 	}
 	if !strings.Contains(lines[2], "do the thing") {
-		t.Errorf("last line (index 2) = %q, want the last prompt", lines[2])
+		t.Errorf("last line (index 2) = %q, want the populated row", lines[2])
 	}
 }
 
@@ -1431,18 +1453,96 @@ func TestPromptRowLabelsAreFiveColumns(t *testing.T) {
 	}
 }
 
-func TestViewShowsTheLiveLineWhenOnlyOneFits(t *testing.T) {
+// With room for exactly one context row, the row that survives is the SUBJECT
+// — the topic — not the running commentary. The topic is the point of what the
+// session is doing; `now` only qualifies it.
+func TestViewShowsTheTopicWhenOnlyOneRowFits(t *testing.T) {
 	m := model{
 		ready: true, width: 80, height: 3,
 		summary: Summary{Topic: "fixing the chip", Now: "running tests"},
 	}
 	out := m.View()
 
-	if !strings.Contains(out, "running tests") {
-		t.Errorf("at height 3 the single row must be `now`\ngot:\n%s", out)
+	if !strings.Contains(out, "fixing the chip") {
+		t.Errorf("at height 3 the single row must be `topic`\ngot:\n%s", out)
 	}
-	if strings.Contains(out, "fixing the chip") {
-		t.Errorf("at height 3 there is no room for `topic`\ngot:\n%s", out)
+	if strings.Contains(out, "running tests") {
+		t.Errorf("at height 3 there is no room for `now`\ngot:\n%s", out)
+	}
+}
+
+// The same rule holds for the keyless fallback: the first prompt is that
+// session's subject, so it is what the single row shows.
+func TestViewShowsTheFirstPromptWhenOnlyOneRowFits(t *testing.T) {
+	m := model{
+		ready: true, width: 80, height: 3,
+		firstPrompt: "fix the worktree chip", lastPrompt: "go test ./...",
+	}
+	out := m.View()
+
+	if !strings.Contains(out, "fix the worktree chip") {
+		t.Errorf("at height 3 the single fallback row must be `first`\ngot:\n%s", out)
+	}
+	if strings.Contains(out, "go test ./...") {
+		t.Errorf("at height 3 there is no room for `last`\ngot:\n%s", out)
+	}
+}
+
+// The subject row carries its emphasis through WEIGHT, with no foreground of
+// its own, so it inherits the terminal's default — the most prominent color
+// available under either theme. A literal white would read as bold on a dark
+// terminal and vanish on a light one, which is the trap the pane's other
+// styles are written to avoid.
+func TestPromptEmphasisStyleHasNoHardcodedColor(t *testing.T) {
+	if !promptEmphasisStyle.GetBold() {
+		t.Error("promptEmphasisStyle is not bold, so the subject row has no emphasis at all")
+	}
+	if fg := promptEmphasisStyle.GetForeground(); fg != lipgloss.TerminalColor(lipgloss.NoColor{}) {
+		t.Errorf("promptEmphasisStyle sets Foreground(%v); it must stay unset so the terminal default applies", fg)
+	}
+}
+
+// Emphasis changes only the weight of the text: same label, same text, same
+// rendered width as the unemphasized row.
+func TestRenderPromptLineEmphasized(t *testing.T) {
+	plain := renderPromptLine("topic", "fixing the chip", 40, false)
+	bold := renderPromptLine("topic", "fixing the chip", 40, true)
+
+	if got, want := ansi.Strip(bold), " topic ❯ fixing the chip"; !strings.HasPrefix(got, want) {
+		t.Errorf("emphasized line = %q, want it to start with %q", got, want)
+	}
+	if bw, pw := lipgloss.Width(bold), lipgloss.Width(plain); bw != pw {
+		t.Errorf("emphasized width = %d, plain width = %d; emphasis must not change layout", bw, pw)
+	}
+	// Only meaningful where the renderer emits escapes at all.
+	if probe := lipgloss.NewStyle().Bold(true).Render("x"); probe != "x" && bold == plain {
+		t.Error("emphasized row renders identically to the plain row, so the topic is not emphasized")
+	}
+}
+
+// lipgloss ends every inner Render with a full reset, which clears the OUTER
+// style's foreground for the remainder of the line. The label is an inner
+// Render, so a row that leaned on the promptStyle wrapper to color its text
+// silently lost the gray from the label onward and drew the text at the
+// terminal's default foreground — the same foreground the emphasized row
+// inherits, collapsing the two rows' colors into one.
+func TestRenderPromptLineKeepsItsGrayPastTheLabel(t *testing.T) {
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(orig)
+
+	plain := renderPromptLine("now  ", "editing tui.go", 60, false)
+	if !strings.Contains(plain, promptStyle.Render("editing tui.go")) {
+		t.Errorf("unemphasized text is not carrying promptStyle's gray:\n%q", plain)
+	}
+
+	// And the emphasized row must NOT be gray, or there is no contrast step.
+	bold := renderPromptLine("topic", "editing tui.go", 60, true)
+	if strings.Contains(bold, promptStyle.Render("editing tui.go")) {
+		t.Errorf("emphasized text is gray like the row below it:\n%q", bold)
+	}
+	if !strings.Contains(bold, promptEmphasisStyle.Render("editing tui.go")) {
+		t.Errorf("emphasized text is not carrying promptEmphasisStyle:\n%q", bold)
 	}
 }
 

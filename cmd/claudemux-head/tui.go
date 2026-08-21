@@ -45,6 +45,17 @@ var (
 	promptLabelStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#808080")).
 				Bold(true)
+
+	// promptEmphasisStyle lifts the subject row — the topic, or the first
+	// prompt when there is no summary — out of the gray so it reads as the
+	// point of what the session is doing, with `now` staying gray as the
+	// commentary under it. It sets NO Foreground for the same reason the rest
+	// of this block doesn't: the terminal's default foreground is the most
+	// prominent color available whichever theme is in use, arriving as near
+	// white on a dark background and near black on a light one. A literal
+	// white here would emphasize the row on one theme and erase it on the
+	// other.
+	promptEmphasisStyle = lipgloss.NewStyle().Bold(true)
 )
 
 type tickMsg time.Time
@@ -1641,19 +1652,27 @@ func (m model) View() string {
 	case m.height == 2:
 		lines = []string{renderStateLine(m, now), renderMetersLine(m, now)}
 	case m.height == 3:
-		_, _, bottomLabel, bottom := m.promptRows()
+		// One context row: keep the SUBJECT. `now` describes the step; the
+		// topic describes the work, and a pane this short has room for the
+		// point but not the running commentary. An empty subject is the one
+		// exception — rendering its "—" placeholder over a populated row
+		// below would trade real context for none.
+		topLabel, top, bottomLabel, bottom := m.promptRows()
+		if strings.TrimSpace(top) == "" {
+			topLabel, top = bottomLabel, bottom
+		}
 		lines = []string{
 			renderStateLine(m, now),
 			renderMetersLine(m, now),
-			renderPromptLine(bottomLabel, bottom, m.width),
+			renderPromptLine(topLabel, top, m.width, true),
 		}
 	default: // height >= 4
 		topLabel, top, bottomLabel, bottom := m.promptRows()
 		lines = []string{
 			renderStateLine(m, now),
 			renderMetersLine(m, now),
-			renderPromptLine(topLabel, top, m.width),
-			renderPromptLine(bottomLabel, bottom, m.width),
+			renderPromptLine(topLabel, top, m.width, true),
+			renderPromptLine(bottomLabel, bottom, m.width, false),
 		}
 	}
 	fill := m.height - len(lines)
@@ -1666,6 +1685,11 @@ func (m model) View() string {
 // promptRows resolves the two context rows. The Haiku summary is preferred; with
 // no summary yet — no API key, a failed call, or nothing back — the pane falls back
 // to the raw first/last prompts, so nothing regresses without a key.
+//
+// The top row is the SUBJECT in both cases (the topic, or the prompt that
+// opened the session) and the bottom row qualifies it. View leans on that:
+// the top row is the emphasized one, and the one that survives when only a
+// single context row fits.
 func (m model) promptRows() (topLabel, top, bottomLabel, bottom string) {
 	if m.summary.Topic != "" && m.summary.Now != "" {
 		return "topic", m.summary.Topic, "now  ", m.summary.Now
@@ -1676,8 +1700,9 @@ func (m model) promptRows() (topLabel, top, bottomLabel, bottom string) {
 // renderPromptLine renders a single prompt as a background-filled line,
 // collapsing whitespace and truncating to width. The label (e.g. "first" or
 // "last") is shown dimmed before the prompt text to disambiguate stacked
-// lines.
-func renderPromptLine(label, prompt string, width int) string {
+// lines. emphasized lifts the prompt text — not the label or the marker — to
+// promptEmphasisStyle, which is how the subject row outranks the row below it.
+func renderPromptLine(label, prompt string, width int, emphasized bool) string {
 	if width < 1 {
 		width = 1
 	}
@@ -1696,12 +1721,36 @@ func renderPromptLine(label, prompt string, width int) string {
 	}
 
 	// Truncate the plain string (no ANSI escapes) so rune counting stays
-	// accurate, then dim-style the surviving label prefix.
+	// accurate, then style the surviving fragments. Split at the prefix so the
+	// label and the text can be styled independently; a truncation short enough
+	// to bite into the prefix itself leaves nothing to emphasize and takes the
+	// whole line as head.
 	content := truncateRunes(prefix+text, avail)
-	if label != "" && strings.HasPrefix(content, label) {
-		content = promptLabelStyle.Render(label) + strings.TrimPrefix(content, label)
+	head, tail := content, ""
+	if pr := []rune(prefix); len([]rune(content)) > len(pr) {
+		head, tail = prefix, string([]rune(content)[len(pr):])
 	}
-	return promptStyle.Width(width).Render(" " + content + " ")
+
+	// Every fragment is styled explicitly, including the gray ones. lipgloss
+	// terminates an inner Render with a full reset, which clears the OUTER
+	// promptStyle's foreground for everything after it — so a line that let
+	// the wrapper below color its text lost that color from the label onward
+	// and rendered the rest at the terminal's default foreground. That is the
+	// same foreground the emphasized row inherits, which would collapse the
+	// two rows' colors into one and leave weight as the only difference.
+	textStyle := promptStyle
+	if emphasized {
+		textStyle = promptEmphasisStyle
+	}
+	if label != "" && strings.HasPrefix(head, label) {
+		head = promptLabelStyle.Render(label) + promptStyle.Render(strings.TrimPrefix(head, label))
+	} else {
+		head = promptStyle.Render(head)
+	}
+	if tail != "" {
+		tail = textStyle.Render(tail)
+	}
+	return promptStyle.Width(width).Render(" " + head + tail + " ")
 }
 
 // clipLine is the final guard applied to a fully-assembled line just before
