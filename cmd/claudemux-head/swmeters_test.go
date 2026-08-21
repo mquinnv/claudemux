@@ -41,7 +41,7 @@ func TestSwMetersLineDropsGauges(t *testing.T) {
 	}
 
 	fullW := lipgloss.Width(full)
-	fhFloor := lipgloss.Width(rateGauges(m.rateLimits, nil, now, defaultBarW)[0]) + 2
+	fhFloor := lipgloss.Width(rateGauges(m.rateLimits, nil, nil, now, defaultBarW).parts[0]) + 2
 	sawEtaDrop, sawWkDrop := false, false
 	for w := fullW; w >= fhFloor; w-- {
 		m.width = w
@@ -162,5 +162,93 @@ func TestSwViewMetersLine(t *testing.T) {
 	view = m.View()
 	if strings.Contains(view, "5h") {
 		t.Fatalf("view without rate data must not show meters:\n%s", view)
+	}
+}
+
+// The lobby renders the same per-model rows the head does — it must not be
+// the one panel missing them — in the same position: after wk, before the eta.
+func TestSwMetersLineRendersModelRows(t *testing.T) {
+	now := time.Now()
+	m := swRateModel(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	line := ansi.Strip(swMetersLine(m, now))
+	for _, want := range []string{"5h", "wk", "fab", "26%", "empty in"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("lobby meters line = %q, want %q", line, want)
+		}
+	}
+	if strings.Index(line, "fab") < strings.Index(line, "wk") {
+		t.Errorf("fab renders before wk in %q", line)
+	}
+	if strings.Index(line, "fab") > strings.Index(line, "empty in") {
+		t.Errorf("fab renders after the eta in %q", line)
+	}
+}
+
+// The lobby's drop order with a model row: eta, then fab, then wk — 5h stays.
+func TestSwMetersLineDropOrderWithModels(t *testing.T) {
+	now := time.Now()
+	m := swRateModel(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	sawEta, sawFab := false, false
+	for w := lipgloss.Width(swMetersLine(m, now)); w >= 20; w-- {
+		m.width = w
+		line := swMetersLine(m, now)
+		if !strings.Contains(line, "5h") {
+			t.Fatalf("at width %d the 5h gauge dropped: %q", w, line)
+		}
+		if !sawEta && !strings.Contains(line, "empty in") {
+			sawEta = true
+			if !strings.Contains(line, "fab") {
+				t.Fatalf("at width %d the eta dropped but fab went with it: %q", w, line)
+			}
+		}
+		if sawEta && !sawFab && !strings.Contains(line, "fab") {
+			sawFab = true
+			if !strings.Contains(line, "wk") {
+				t.Fatalf("at width %d fab dropped but wk went with it: %q", w, line)
+			}
+		}
+		if sawFab && strings.Contains(line, "fab") {
+			t.Fatalf("at width %d fab came back after dropping: %q", w, line)
+		}
+	}
+	if !sawEta || !sawFab {
+		t.Fatalf("never observed the eta and fab drops (eta=%v fab=%v)", sawEta, sawFab)
+	}
+}
+
+// Same lost-race guard as the head's: the lobby must not blank its rows when
+// it loses the single-flight race and gets an empty cache back.
+func TestSwUsageMsgEmptyLostRaceKeepsRows(t *testing.T) {
+	now := time.Now()
+	m := swRateModel(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26}}
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{}})
+	next := got.(swModel)
+	if len(next.modelWindows) != 1 {
+		t.Errorf("modelWindows = %+v, want the existing row kept", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop rescheduled after a lost race")
+	}
+
+	got, cmd = m.Update(usageMsg{err: errors.New("spawn failed")})
+	if next := got.(swModel); len(next.modelWindows) != 1 {
+		t.Errorf("modelWindows = %+v, want the existing row kept through an error", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop rescheduled after an error")
+	}
+
+	got, cmd = m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now}})
+	if next := got.(swModel); !next.usageUnavailable {
+		t.Error("usageUnavailable = false, want it latched on a non-subscriber answer")
+	}
+	if cmd != nil {
+		t.Error("cmd != nil, want the loop stopped for a non-subscriber session")
 	}
 }

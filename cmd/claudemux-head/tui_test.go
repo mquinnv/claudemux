@@ -3999,3 +3999,237 @@ func TestStatusLinesNeverExceedWidth(t *testing.T) {
 		}
 	}
 }
+
+// rateModelForTest builds a model with live rate-limit data and enough
+// burn-rate samples to produce the "empty in X" ETA, mirroring swRateModel in
+// swmeters_test.go.
+func rateModelForTest(now time.Time, width int) model {
+	return model{
+		width: width, height: 40, rateOK: true,
+		rateLimits: RateLimits{
+			FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+			SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+		},
+		pctSamples: []pctSample{
+			{at: now.Add(-10 * time.Minute), pct: 10},
+			{at: now, pct: 20},
+		},
+	}
+}
+
+// Model rows sit after wk and before the eta, because callers drop from the
+// END of the slice and the required drop order is eta → models → wk → 5h.
+func TestRateGaugesOrdersModelRowsAfterWeek(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{
+		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+	}
+	models := []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+	samples := []pctSample{{at: now.Add(-10 * time.Minute), pct: 10}, {at: now, pct: 20}}
+
+	gs := rateGauges(rl, models, samples, now, defaultBarW)
+	if len(gs.parts) != 4 {
+		t.Fatalf("parts = %q, want 5h, wk, fab, eta", gs.parts)
+	}
+	if !strings.Contains(gs.parts[0], "5h") {
+		t.Errorf("parts[0] = %q, want the 5h gauge", gs.parts[0])
+	}
+	if !strings.Contains(gs.parts[1], "wk") {
+		t.Errorf("parts[1] = %q, want the wk gauge", gs.parts[1])
+	}
+	if !strings.Contains(gs.parts[2], "fab") || !strings.Contains(gs.parts[2], "26%") {
+		t.Errorf("parts[2] = %q, want the Fable gauge at 26%%", gs.parts[2])
+	}
+	if !strings.Contains(gs.parts[3], "empty in") {
+		t.Errorf("parts[3] = %q, want the eta", gs.parts[3])
+	}
+	// 5h, wk and fab carry bars; the eta is plain text.
+	if gs.barred != 3 {
+		t.Errorf("barred = %d, want 3", gs.barred)
+	}
+}
+
+// No model data — the overwhelmingly common case on Pro, and every case when
+// the pull path is broken — must render exactly today's gauges.
+func TestRateGaugesWithoutModelsUnchanged(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{
+		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+	}
+	gs := rateGauges(rl, nil, nil, now, defaultBarW)
+	if len(gs.parts) != 2 {
+		t.Fatalf("parts = %q, want just 5h and wk", gs.parts)
+	}
+	if gs.barred != 2 {
+		t.Errorf("barred = %d, want 2", gs.barred)
+	}
+}
+
+// A row whose percent we have but whose reset time we do not still renders —
+// dropping the meter because one field is missing would be a worse outcome.
+func TestRateGaugesModelWithoutResetTime(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{FiveHour: Window{UsedPercent: 1, ResetsAt: now.Add(time.Hour)}}
+	gs := rateGauges(rl, []ModelWindow{{Name: "Fable", UsedPercent: 26}}, nil, now, defaultBarW)
+	found := false
+	for _, p := range gs.parts {
+		if strings.Contains(p, "fab") && strings.Contains(p, "26%") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("parts = %q, want a fab gauge despite the zero reset time", gs.parts)
+	}
+}
+
+func TestShortModelMeter(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Fable", "fab"},
+		{"Opus", "opu"},
+		{"Sonnet", "son"},
+		{"X", "x"},
+	} {
+		if got := shortModelMeter(tc.in); got != tc.want {
+			t.Errorf("shortModelMeter(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The full drop order, exercised by shrinking the pane one column at a time.
+func TestMetersLineDropOrderWithModels(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	full := renderMetersLine(m, now)
+	for _, want := range []string{"5h", "wk", "fab", "empty in"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("full meters line = %q, want %q", full, want)
+		}
+	}
+
+	sawEta, sawFab := false, false
+	for w := lipgloss.Width(full); w >= 20; w-- {
+		m.width = w
+		line := renderMetersLine(m, now)
+		if !sawEta && !strings.Contains(line, "empty in") {
+			sawEta = true
+			if !strings.Contains(line, "fab") {
+				t.Fatalf("at width %d the eta dropped but fab went with it: %q", w, line)
+			}
+		}
+		if sawEta && !sawFab && !strings.Contains(line, "fab") {
+			sawFab = true
+			if !strings.Contains(line, "wk") {
+				t.Fatalf("at width %d fab dropped but wk went with it: %q", w, line)
+			}
+		}
+		if sawFab && strings.Contains(line, "fab") {
+			t.Fatalf("at width %d fab came back after dropping: %q", w, line)
+		}
+	}
+	if !sawEta || !sawFab {
+		t.Fatalf("never observed the eta and fab drops (eta=%v fab=%v)", sawEta, sawFab)
+	}
+}
+
+// A usageMsg carrying the empty result of a LOST single-flight race must not
+// blank the rows this pane already has. refreshUsageCache's loser returns
+// whatever is on disk — PlanUsage{} when no cache exists yet — so an
+// unconditional assignment would wipe good rows every time two panes raced.
+func TestUsageMsgEmptyLostRaceKeepsRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{}})
+	next := got.(model)
+	if len(next.modelWindows) != 1 || next.modelWindows[0].Name != "Fable" {
+		t.Errorf("modelWindows = %+v, want the existing Fable row kept", next.modelWindows)
+	}
+	if next.usageUnavailable {
+		t.Error("usageUnavailable latched on an empty lost-race result")
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop rescheduled after a lost race")
+	}
+}
+
+// An error keeps the rows too, and keeps ticking.
+func TestUsageMsgErrorKeepsRowsAndRetries(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26}}
+
+	got, cmd := m.Update(usageMsg{err: errors.New("spawn failed")})
+	if next := got.(model); len(next.modelWindows) != 1 {
+		t.Errorf("modelWindows = %+v, want the existing row kept through an error", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop rescheduled after an error")
+	}
+}
+
+// A real answer replaces the rows, including a subscriber whose plan has no
+// per-model windows at all — that is a genuine "no rows", not a lost race.
+func TestUsageMsgRealAnswerReplacesRows(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26}}
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{Available: true, FetchedAt: now}})
+	if next := got.(model); len(next.modelWindows) != 0 {
+		t.Errorf("modelWindows = %+v, want them cleared by a real empty answer", next.modelWindows)
+	}
+	if cmd == nil {
+		t.Error("cmd = nil, want the loop still running")
+	}
+}
+
+// rate_limits_available:false (API key, Bedrock, Vertex) stops the loop: those
+// users must pay zero spawns.
+func TestUsageMsgUnavailableStopsLoop(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 200)
+
+	got, cmd := m.Update(usageMsg{usage: PlanUsage{Available: false, FetchedAt: now}})
+	next := got.(model)
+	if !next.usageUnavailable {
+		t.Error("usageUnavailable = false, want it latched")
+	}
+	if cmd != nil {
+		t.Error("cmd != nil, want the loop stopped for a non-subscriber session")
+	}
+}
+
+// The meters line must render identically with the model-window path absent,
+// which is the state every Pro session and every broken pull path is in.
+func TestMetersLineUnaffectedByBrokenUsagePath(t *testing.T) {
+	now := time.Now()
+	m := rateModelForTest(now, 120)
+	want := renderMetersLine(m, now)
+
+	m.modelWindows = nil
+	m.usageUnavailable = true
+	m.usageCachePath = "/nonexistent/claudemux-usage.json"
+	if got := renderMetersLine(m, now); got != want {
+		t.Errorf("meters line changed when the usage path is broken:\n got %q\nwant %q", got, want)
+	}
+}
+
+// A stray tick reaching a pane that already learned usage is unavailable must
+// not restart the spawns the latch exists to prevent.
+func TestUsageTickIgnoredWhenUnavailable(t *testing.T) {
+	m := rateModelForTest(time.Now(), 200)
+	m.usageUnavailable = true
+	if _, cmd := m.Update(usageTickMsg{}); cmd != nil {
+		t.Error("cmd != nil, want a stray tick ignored once usage is unavailable")
+	}
+
+	sw := swModel{usageUnavailable: true}
+	if _, cmd := sw.Update(usageTickMsg{}); cmd != nil {
+		t.Error("lobby cmd != nil, want a stray tick ignored once usage is unavailable")
+	}
+}

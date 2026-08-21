@@ -155,6 +155,13 @@ type swModel struct {
 	rateLimits     RateLimits
 	rateOK         bool
 	pctSamples     []pctSample
+	// usageCachePath, modelWindows and usageUnavailable mirror the head's:
+	// the per-model weekly rows come from the shared usage cache, refreshed by
+	// whichever pane's loop finds it stale first. Empty rows whenever that
+	// path is unavailable or broken, which must never affect the gauges above.
+	usageCachePath   string
+	modelWindows     []ModelWindow
+	usageUnavailable bool
 	// conductReq is the last head-requested toggle this lobby applied, kept as
 	// the already-applied marker: the head leaves its request published, so
 	// every poll re-reads the same press and only an unseen value may toggle.
@@ -201,7 +208,12 @@ type swModel struct {
 }
 
 func newSwModel(selfPane string) swModel {
-	m := swModel{selfPane: selfPane, cond: newConductor(), rateLimitsPath: defaultRateLimitsPath()}
+	m := swModel{
+		selfPane:       selfPane,
+		cond:           newConductor(),
+		rateLimitsPath: defaultRateLimitsPath(),
+		usageCachePath: defaultUsageCachePath(),
+	}
 	m.launchBin, m.launchBinOK = launchBinStamp()
 	return m
 }
@@ -251,7 +263,13 @@ func (m *swModel) toggleStandby() {
 	}
 }
 
-func (m swModel) Init() tea.Cmd { return swPollCmd(m.selfPane, m.rateLimitsPath) }
+// Init starts the fleet poll and, alongside it, the same usage loop the head
+// runs: a self-rescheduling usageMsg → usageTick → usageTickMsg cycle, kept
+// out of swPollCmd so a tmux listing failure can never stall the per-model
+// rows and a usage spawn can never delay a fleet poll.
+func (m swModel) Init() tea.Cmd {
+	return tea.Batch(swPollCmd(m.selfPane, m.rateLimitsPath), usageCmd(m.usageCachePath))
+}
 
 // selectedPane returns the claude pane of the selected session — "" when there
 // is no selection, or when that session has no claude pane to capture.
@@ -552,6 +570,30 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(swNextTick(), pv, pub)
+	case usageTickMsg:
+		if m.usageUnavailable {
+			// See the head's usageTickMsg case: a stray tick must not restart
+			// the spawns the unavailable latch exists to stop.
+			return m, nil
+		}
+		return m, usageCmd(m.usageCachePath)
+	case usageMsg:
+		if msg.err != nil {
+			// Keep whatever rows we already have and try again next tick; the
+			// lobby says nothing about a failed usage pull.
+			return m, usageTick()
+		}
+		if !usageAnswered(msg.usage) {
+			// A lost single-flight race with an empty cache on disk — see
+			// usageAnswered. Keep the rows we have rather than blanking them.
+			return m, usageTick()
+		}
+		m.modelWindows = msg.usage.Models
+		if !msg.usage.Available && !msg.usage.FetchedAt.IsZero() {
+			m.usageUnavailable = true
+			return m, nil
+		}
+		return m, usageTick()
 	case swFleetRestartMsg:
 		// Self last: every head has been told to restart; now pick up the
 		// new binary here too, via the same after-Run re-exec as R.
@@ -705,36 +747,41 @@ func swSessionRows(sess swSession) int {
 // head's renderMetersLine minus the per-session ctx gauge, since the lobby
 // has no session of its own. Same degradation and growth rules: when the
 // line overflows the pane width, gauges drop from the end in the head's
-// order (eta, then wk; 5h always stays), and the surviving bars then widen
-// past defaultBarW to consume the leftover columns.
+// order (eta, then the per-model rows, then wk; 5h always stays), and the
+// surviving bars then widen past defaultBarW to consume the leftover columns.
 func swMetersLine(m swModel, now time.Time) string {
-	build := func(barW int) []string {
-		return rateGauges(m.rateLimits, m.pctSamples, now, barW)
+	build := func(barW int) gaugeSet {
+		return rateGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW)
 	}
 	if m.width <= 0 {
 		// No size yet: emit the baseline gauges unstyle rather than fitting
 		// to a width we don't know.
-		return " " + strings.Join(build(defaultBarW), " · ")
+		return " " + strings.Join(build(defaultBarW).parts, " · ")
 	}
 	avail := m.width - 2 // columns inside the " "..." " padding below
 	if avail < 1 {
 		avail = 1
 	}
-	parts := build(defaultBarW)
+	gs := build(defaultBarW)
+	parts := gs.parts
 	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
 		parts = parts[:len(parts)-1]
 	}
 
-	// Only 5h and wk carry bars — the trailing eta segment is plain text — so
-	// the slack splits across those two, or the eta's share would just become
-	// trailing blank space. Integer division leaves a few columns unspent
-	// rather than risking an overflow that clipLine would then chop.
+	// Only the bar-carrying parts share the slack — the trailing eta segment is
+	// plain text, so its share would just become trailing blank space. barred
+	// comes from the gauge set rather than a constant now that per-model rows
+	// can add bars. Integer division leaves a few columns unspent rather than
+	// risking an overflow that clipLine would then chop.
 	barCount := len(parts)
-	if barCount > 2 {
-		barCount = 2
+	if barCount > gs.barred {
+		barCount = gs.barred
+	}
+	if barCount < 1 {
+		barCount = 1
 	}
 	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
-		wide := build(defaultBarW + grow)[:len(parts)]
+		wide := build(defaultBarW + grow).parts[:len(parts)]
 		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
 			parts = wide
 		}
