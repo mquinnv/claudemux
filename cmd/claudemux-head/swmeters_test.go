@@ -173,16 +173,16 @@ func TestSwMetersLineRendersModelRows(t *testing.T) {
 	m.modelWindows = []ModelWindow{{Name: "Fable", UsedPercent: 26, ResetsAt: now.Add(72 * time.Hour)}}
 
 	line := ansi.Strip(swMetersLine(m, now))
-	for _, want := range []string{"5h", "wk", "fab", "26%", "empty in"} {
+	for _, want := range []string{"5h", "wk", "fable", "26%", "empty in"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("lobby meters line = %q, want %q", line, want)
 		}
 	}
-	if strings.Index(line, "fab") < strings.Index(line, "wk") {
-		t.Errorf("fab renders before wk in %q", line)
+	if strings.Index(line, "fable") < strings.Index(line, "wk") {
+		t.Errorf("fable renders before wk in %q", line)
 	}
-	if strings.Index(line, "fab") > strings.Index(line, "empty in") {
-		t.Errorf("fab renders after the eta in %q", line)
+	if strings.Index(line, "fable") > strings.Index(line, "empty in") {
+		t.Errorf("fable renders after the eta in %q", line)
 	}
 }
 
@@ -201,22 +201,22 @@ func TestSwMetersLineDropOrderWithModels(t *testing.T) {
 		}
 		if !sawEta && !strings.Contains(line, "empty in") {
 			sawEta = true
-			if !strings.Contains(line, "fab") {
-				t.Fatalf("at width %d the eta dropped but fab went with it: %q", w, line)
+			if !strings.Contains(line, "fable") {
+				t.Fatalf("at width %d the eta dropped but fablele went with it: %q", w, line)
 			}
 		}
-		if sawEta && !sawFab && !strings.Contains(line, "fab") {
+		if sawEta && !sawFab && !strings.Contains(line, "fable") {
 			sawFab = true
 			if !strings.Contains(line, "wk") {
-				t.Fatalf("at width %d fab dropped but wk went with it: %q", w, line)
+				t.Fatalf("at width %d fable dropped but wk went with it: %q", w, line)
 			}
 		}
-		if sawFab && strings.Contains(line, "fab") {
-			t.Fatalf("at width %d fab came back after dropping: %q", w, line)
+		if sawFab && strings.Contains(line, "fable") {
+			t.Fatalf("at width %d fable came back after dropping: %q", w, line)
 		}
 	}
 	if !sawEta || !sawFab {
-		t.Fatalf("never observed the eta and fab drops (eta=%v fab=%v)", sawEta, sawFab)
+		t.Fatalf("never observed the eta and fable drops (eta=%v fab=%v)", sawEta, sawFab)
 	}
 }
 
@@ -280,7 +280,7 @@ func TestSwMetersLineWidensEveryBarIncludingModelRows(t *testing.T) {
 	for _, w := range []int{120, 140, 160, 200} {
 		m.width = w
 		line := swMetersLine(m, now)
-		for _, want := range []string{"5h", "wk", "fab", "empty in"} {
+		for _, want := range []string{"5h", "wk", "fable", "empty in"} {
 			if !strings.Contains(line, want) {
 				t.Fatalf("at width %d the %q gauge is missing: %q", w, want, line)
 			}
