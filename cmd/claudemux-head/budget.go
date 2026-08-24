@@ -45,8 +45,22 @@ type RateLimits struct {
 }
 
 type Window struct {
+	// UsedPercent is what the gauges print. Used is the cache's unrounded
+	// used_percentage, kept because the spike gauge measures movement over a
+	// few minutes, where a whole point is most of the signal.
 	UsedPercent int
+	Used        float64
 	ResetsAt    time.Time
+}
+
+// usedExact is the percentage to sample for burn rates: the unrounded value
+// when the Window came from the cache, else the rounded one — a Window built
+// from an integer-only source must not sample as zero.
+func (w Window) usedExact() float64 {
+	if w.Used != 0 {
+		return w.Used
+	}
+	return float64(w.UsedPercent)
 }
 
 type rawRateLimitsFile struct {
@@ -79,26 +93,53 @@ func readRateLimits(path string) (RateLimits, error) {
 		UpdatedAt: time.Unix(raw.UpdatedAt, 0),
 		FiveHour: Window{
 			UsedPercent: int(math.Round(raw.FiveHour.UsedPercentage)),
+			Used:        raw.FiveHour.UsedPercentage,
 			ResetsAt:    time.Unix(raw.FiveHour.ResetsAt, 0),
 		},
 		SevenDay: Window{
 			UsedPercent: int(math.Round(raw.SevenDay.UsedPercentage)),
+			Used:        raw.SevenDay.UsedPercentage,
 			ResetsAt:    time.Unix(raw.SevenDay.ResetsAt, 0),
 		},
 	}, nil
 }
 
-// pctSample is a snapshot of five_hour.used_percentage at a point in time.
+// pctSample is a snapshot of five_hour.used_percentage (unrounded) at a point
+// in time.
 type pctSample struct {
 	at  time.Time
-	pct int
+	pct float64
 }
 
 // burnRatePctPerMin returns percentage-points per minute over the last
-// ~15 minutes. Returns 0 sentinel for "not enough data" (<2min span) or
-// "rate is zero or negative" (idle / window resetting).
+// ~15 minutes — the smooth signal the "empty in X" projection wants. Returns
+// 0 sentinel for "not enough data" (<2min span) or "rate is zero or negative"
+// (idle / window resetting).
 func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
-	cutoff := now.Add(-15 * time.Minute)
+	return burnRate(samples, now, 15*time.Minute, 2*time.Minute)
+}
+
+// burnPctPerHour is the spike-o-meter's reading: the last five minutes' burn
+// as percent of the 5h window per hour. The unit is chosen to read literally
+// — "40%/h" means this pace eats 40% of the window every hour — where a
+// multiple of some reference pace needed the reference explained. For
+// calibration, 100% over 5h is 20%/h: the pace a fresh window absorbs
+// exactly, and where burnColor turns yellow.
+//
+// The lookback is short because a spike meter is for seeing a burst while it
+// happens; the ETA's fifteen minutes would report it ten minutes late and
+// average it away. A one-minute span is enough only because samples carry
+// the unrounded percentage. 0 for idle, a window that just reset, or not
+// enough data.
+func burnPctPerHour(samples []pctSample, now time.Time) float64 {
+	return burnRate(samples, now, 5*time.Minute, time.Minute) * 60
+}
+
+// burnRate is percentage-points per minute between the earliest and latest
+// samples inside lookback, or 0 when they span less than minSpan or the
+// percentage did not rise.
+func burnRate(samples []pctSample, now time.Time, lookback, minSpan time.Duration) float64 {
+	cutoff := now.Add(-lookback)
 	var earliest pctSample
 	var latest pctSample
 	earliestSet := false
@@ -118,14 +159,50 @@ func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
 		return 0
 	}
 	span := latest.at.Sub(earliest.at)
-	if span < 2*time.Minute {
+	if span < minSpan {
 		return 0
 	}
-	delta := float64(latest.pct - earliest.pct)
+	delta := latest.pct - earliest.pct
 	if delta <= 0 {
 		return 0
 	}
 	return delta / span.Minutes()
+}
+
+// Spike gauge calibration, in percent of the window per hour. The bar is full
+// at a whole window per hour — five times the sustainable pace; bursts past
+// that happen (a fleet of agents all mid-turn) but past it the answer is
+// "very" either way. Yellow starts at the sustainable pace itself: faster
+// than the window can absorb, though the 5h bar's fill decides whether that
+// matters yet. Red at twice it.
+const (
+	burnGaugeMaxPerHour = 100.0
+	burnWarnPerHour     = 100.0 / 5 // 100% over the 5h window
+	burnHotPerHour      = 2 * burnWarnPerHour
+)
+
+// burnFillPct maps a %/h reading onto the bar's 0–100 fill.
+func burnFillPct(perHour float64) float64 {
+	if perHour >= burnGaugeMaxPerHour {
+		return 100
+	}
+	if perHour < 0 {
+		return 0
+	}
+	return perHour / burnGaugeMaxPerHour * 100
+}
+
+// burnColor bands the spike gauge (see the calibration constants). Reuses
+// thresholdColor's palette so the meter line stays one system.
+func burnColor(perHour float64) string {
+	switch {
+	case perHour >= burnHotPerHour:
+		return thresholdColor(85)
+	case perHour >= burnWarnPerHour:
+		return thresholdColor(70)
+	default:
+		return thresholdColor(0)
+	}
 }
 
 // Rate-limit window lengths, for pacing a window's fill against its reset.
@@ -135,10 +212,18 @@ const (
 )
 
 // paceMinElapsed is the least of a window that must have elapsed before
-// projecting from it: at 3% of the week (~5h) one busy morning would
-// otherwise extrapolate to a red bar for a week that will end nowhere near
-// the limit.
-const paceMinElapsed = 0.03
+// projecting from it. The projection is a straight line from the window's
+// start through now, so early on a single turn is most of the line. For the
+// week, 3% (~5h) is enough that one busy morning doesn't extrapolate to a red
+// bar for a week that will end nowhere near the limit. For the 5h window the
+// same 3% is nine minutes — one hot first turn after a reset painted the bar
+// red for the next half hour — so it waits 15% (45 minutes) instead.
+func paceMinElapsed(window time.Duration) float64 {
+	if window <= fiveHourWindow {
+		return 0.15
+	}
+	return 0.03
+}
 
 // paceColor colors a rate-limit gauge by whether its usage is on pace to
 // exhaust the window by its reset, rather than by how full the bar is. A bar
@@ -162,7 +247,7 @@ func paceColor(usedPct int, resetsAt time.Time, window time.Duration, now time.T
 		return thresholdColor(float64(usedPct))
 	}
 	elapsed := 1 - left.Seconds()/window.Seconds()
-	if elapsed < paceMinElapsed {
+	if elapsed < paceMinElapsed(window) {
 		return thresholdColor(float64(usedPct))
 	}
 	switch projected := float64(usedPct) / elapsed; {

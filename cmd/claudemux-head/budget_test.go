@@ -228,3 +228,109 @@ func TestPaceColor(t *testing.T) {
 		})
 	}
 }
+
+// The 5h window's pace guard is its own: 3% of five hours is nine minutes,
+// and one hot first turn after a reset would paint the bar red for the next
+// half hour. Twelve minutes in at 18% falls back to fill (green); an hour in
+// at 25% projects to 125% and is honestly red.
+func TestPaceColorFiveHourWaitsLongerBeforeProjecting(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 12, 0, 0, time.UTC)
+	resets := now.Add(fiveHourWindow - 12*time.Minute)
+	if got := paceColor(18, resets, fiveHourWindow, now); got != thresholdColor(18) {
+		t.Errorf("12 minutes into the 5h window: paceColor = %s, want fill color %s", got, thresholdColor(18))
+	}
+	resets = now.Add(fiveHourWindow - time.Hour)
+	if got := paceColor(25, resets, fiveHourWindow, now); got != thresholdColor(100) {
+		t.Errorf("an hour in at 25%%: paceColor = %s, want red", got)
+	}
+	// The week keeps its short guard: 3% of a week is five hours, plenty.
+	resets = now.Add(weekWindow - 6*time.Hour)
+	if got := paceColor(10, resets, weekWindow, now); got != thresholdColor(100) {
+		t.Errorf("6h into the week at 10%%: paceColor = %s, want red (projects to 280%%)", got)
+	}
+}
+
+// The spike-o-meter reads burn as percent of the 5h window per hour: 2
+// points in 3 minutes is 40%/h. (Sustainable is 20%/h — 100% over 5h.)
+func TestBurnPctPerHour(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-3 * time.Minute), pct: 18.0},
+		{at: now, pct: 20.0},
+	}
+	if got := burnPctPerHour(samples, now); got < 39.9 || got > 40.1 {
+		t.Errorf("burnPctPerHour = %v, want ~40", got)
+	}
+}
+
+// Sub-point movement counts: samples carry the cache's unrounded percentage,
+// so a run of readings whose rounded percent never changes still yields a
+// rate. Rounded to whole points, 18.2→18.4→18.6 is flat and would read 0x.
+func TestBurnMultipleUsesFractionalSamples(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-4 * time.Minute), pct: 18.2},
+		{at: now.Add(-2 * time.Minute), pct: 18.4},
+		{at: now, pct: 18.6},
+	}
+	if got := burnPctPerHour(samples, now); got <= 0 {
+		t.Errorf("burnPctPerHour over fractional samples = %v, want > 0", got)
+	}
+}
+
+// The spike gauge looks back five minutes, not the ETA's fifteen: a burst
+// that ended eight minutes ago is over, and the meter must say so.
+func TestBurnMultipleIgnoresOldBurst(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-12 * time.Minute), pct: 5},
+		{at: now.Add(-8 * time.Minute), pct: 25},
+		{at: now.Add(-4 * time.Minute), pct: 25},
+		{at: now, pct: 25},
+	}
+	if got := burnPctPerHour(samples, now); got != 0 {
+		t.Errorf("burnPctPerHour after a burst ended = %v, want 0", got)
+	}
+	if got := burnRatePctPerMin(samples, now); got <= 0 {
+		t.Errorf("the ETA's 15-minute rate should still see the burst, got %v", got)
+	}
+}
+
+// Idle, a fresh window (percent fell), and too little span all read 0x.
+func TestBurnMultipleZeroCases(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	cases := map[string][]pctSample{
+		"none":   nil,
+		"flat":   {{at: now.Add(-3 * time.Minute), pct: 40}, {at: now, pct: 40}},
+		"reset":  {{at: now.Add(-3 * time.Minute), pct: 90}, {at: now, pct: 2}},
+		"narrow": {{at: now.Add(-20 * time.Second), pct: 10}, {at: now, pct: 12}},
+	}
+	for name, samples := range cases {
+		if got := burnPctPerHour(samples, now); got != 0 {
+			t.Errorf("%s: burnPctPerHour = %v, want 0", name, got)
+		}
+	}
+}
+
+// readRateLimits keeps the cache's unrounded percentage alongside the
+// rounded one the gauges print, because the spike gauge needs the fraction.
+func TestReadRateLimitsKeepsExactPercent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rl.json")
+	os.WriteFile(path, []byte(`{"five_hour":{"used_percentage":18.4,"resets_at":1787608800},`+
+		`"seven_day":{"used_percentage":90,"resets_at":1787605200}}`), 0o644)
+	rl, err := readRateLimits(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rl.FiveHour.UsedPercent != 18 || rl.FiveHour.Used != 18.4 {
+		t.Errorf("five_hour = %+v, want 18 / 18.4", rl.FiveHour)
+	}
+	if got := rl.FiveHour.usedExact(); got != 18.4 {
+		t.Errorf("usedExact = %v, want 18.4", got)
+	}
+	// A Window built without the exact value (older code paths, tests) still
+	// samples from its rounded percent rather than reading as zero.
+	if got := (Window{UsedPercent: 42}).usedExact(); got != 42 {
+		t.Errorf("usedExact fallback = %v, want 42", got)
+	}
+}

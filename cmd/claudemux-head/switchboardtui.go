@@ -584,8 +584,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.rlErr == nil {
 			m.rateLimits = msg.rl
 			m.rateOK = true
-			if len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != msg.rl.FiveHour.UsedPercent {
-				m.pctSamples = append(m.pctSamples, pctSample{at: msg.at, pct: msg.rl.FiveHour.UsedPercent})
+			if used := msg.rl.FiveHour.usedExact(); len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != used {
+				m.pctSamples = append(m.pctSamples, pctSample{at: msg.at, pct: used})
 			}
 			cutoff := msg.at.Add(-1 * time.Hour)
 			trimmed := m.pctSamples[:0]

@@ -1368,8 +1368,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.rateLimitErr == nil {
 			m.rateLimits = msg.rateLimits
 			m.rateOK = true
-			if len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != msg.rateLimits.FiveHour.UsedPercent {
-				m.pctSamples = append(m.pctSamples, pctSample{at: msg.time, pct: msg.rateLimits.FiveHour.UsedPercent})
+			if used := msg.rateLimits.FiveHour.usedExact(); len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != used {
+				m.pctSamples = append(m.pctSamples, pctSample{at: msg.time, pct: used})
 			}
 			cutoff := msg.time.Add(-1 * time.Hour)
 			trimmed := m.pctSamples[:0]
@@ -1919,7 +1919,7 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 		line = " " + left + " · " + right + " "
 	default:
 		// Too narrow even inline. Drop right-group items from the end
-		// (eta → model rows → wk → 5h) until packing left + " · " + right
+		// (eta → model rows → wk → burn → 5h) until packing left + " · " + right
 		// fits.
 		for len(rightParts) > 0 {
 			right = strings.Join(rightParts, " · ")
@@ -1983,7 +1983,7 @@ type gaugeSet struct {
 // rateGaugeParts builds the right-group budget gauges — 5h, wk, any per-model
 // weekly rows, and (when there's enough burn-rate signal) a "empty in X" ETA —
 // in the fixed order callers drop from when space is tight: eta, then model
-// rows, then wk, then 5h. Returns an empty set when rate-limit data isn't
+// rows, then wk, then burn, then 5h. Returns an empty set when rate-limit data isn't
 // available (m.rateOK == false). Shared by renderStatusbar and
 // renderMetersLine so both panels build the identical gauge text from the same
 // rules. barW is each gauge's bar cell width.
@@ -2003,18 +2003,25 @@ func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now ti
 	// half-full one that will not is.
 	fhPct := float64(rl.FiveHour.UsedPercent)
 	wkPct := float64(rl.SevenDay.UsedPercent)
+	// The spike-o-meter follows 5h because it is that bar's derivative: how
+	// hard the window is filling right now, as percent of it per hour.
+	// paceColor is the window-averaged view; this is the instant one. It
+	// stays on the line at 0%/h when idle so the gauges beside it don't
+	// reflow every time a turn starts or ends.
+	perHour := burnPctPerHour(samples, now)
 	parts := []string{
 		fmt.Sprintf("5h %s %d%%→%s",
 			renderBar(barW, fhPct, paceColor(rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt, fiveHourWindow, now)),
 			rl.FiveHour.UsedPercent,
 			rl.FiveHour.ResetsAt.Local().Format("3:04p")),
+		fmt.Sprintf("burn %s %.0f%%/h", renderBar(barW, burnFillPct(perHour), burnColor(perHour)), perHour),
 		fmt.Sprintf("wk %s %d%%→%s",
 			renderBar(barW, wkPct, paceColor(rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt, weekWindow, now)),
 			rl.SevenDay.UsedPercent,
 			rl.SevenDay.ResetsAt.Local().Format("Mon")),
 	}
 	// Per-model weekly rows sit here — after wk, before the eta — so that the
-	// drop-from-the-end order comes out as eta, models, wk, 5h.
+	// drop-from-the-end order comes out as eta, models, wk, burn, 5h.
 	for _, mw := range models {
 		pct := float64(mw.UsedPercent)
 		seg := fmt.Sprintf("%s %s %d%%",
@@ -2236,7 +2243,7 @@ func renderStateLine(m model, now time.Time) string {
 // on the right (5h, wk, per-model rows, eta), here joined left-to-right with
 // " · " (no right-alignment needed since it has the full line to itself).
 // When the line overflows the pane width, gauges drop from the end in today's
-// order (eta → model rows → wk → 5h); the ctx gauge always stays. Unlike the
+// order (eta → model rows → wk → burn → 5h); the ctx gauge always stays. Unlike the
 // packed statusbar, the surviving bars then widen past defaultBarW to consume
 // the leftover columns, so the meters fill the pane rather than stranding it
 // as padding.
