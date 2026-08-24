@@ -2004,17 +2004,17 @@ func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now ti
 	fhPct := float64(rl.FiveHour.UsedPercent)
 	wkPct := float64(rl.SevenDay.UsedPercent)
 	// The spike-o-meter follows 5h because it is that bar's derivative: how
-	// hard the window is filling right now, as a multiple of the pace it can
-	// sustain. paceColor is the window-averaged view; this is the instant
-	// one. It stays on the line at 0.0x when idle so the gauges beside it
-	// don't reflow every time a turn starts or ends.
-	mult := burnMultiple(samples, now)
+	// hard the window is filling right now, as percent of it per hour.
+	// paceColor is the window-averaged view; this is the instant one. It
+	// stays on the line at 0%/h when idle so the gauges beside it don't
+	// reflow every time a turn starts or ends.
+	perHour := burnPctPerHour(samples, now)
 	parts := []string{
 		fmt.Sprintf("5h %s %d%%→%s",
 			renderBar(barW, fhPct, paceColor(rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt, fiveHourWindow, now)),
 			rl.FiveHour.UsedPercent,
 			rl.FiveHour.ResetsAt.Local().Format("3:04p")),
-		fmt.Sprintf("burn %s %.1fx", renderBar(barW, burnFillPct(mult), burnColor(mult)), mult),
+		fmt.Sprintf("burn %s %.0f%%/h", renderBar(barW, burnFillPct(perHour), burnColor(perHour)), perHour),
 		fmt.Sprintf("wk %s %d%%→%s",
 			renderBar(barW, wkPct, paceColor(rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt, weekWindow, now)),
 			rl.SevenDay.UsedPercent,

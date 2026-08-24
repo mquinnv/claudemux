@@ -4971,14 +4971,14 @@ func TestRateGaugesSpikeMeterFollowsFiveHour(t *testing.T) {
 		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
 		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
 	}
-	// 2 points in 3 minutes: 2.0x sustainable.
+	// 2 points in 3 minutes: 40% of the window per hour.
 	samples := []pctSample{{at: now.Add(-3 * time.Minute), pct: 18}, {at: now, pct: 20}}
 	gs := rateGauges(rl, nil, samples, now, defaultBarW)
 	if len(gs.parts) != 4 {
 		t.Fatalf("parts = %q, want 5h, burn, wk, eta", gs.parts)
 	}
-	if !strings.Contains(gs.parts[1], "burn") || !strings.Contains(gs.parts[1], "2.0x") {
-		t.Errorf("parts[1] = %q, want the burn gauge at 2.0x", gs.parts[1])
+	if !strings.Contains(gs.parts[1], "burn") || !strings.Contains(gs.parts[1], "40%/h") {
+		t.Errorf("parts[1] = %q, want the burn gauge at 40%%/h", gs.parts[1])
 	}
 	if !strings.Contains(gs.parts[2], "wk") {
 		t.Errorf("parts[2] = %q, want wk after burn", gs.parts[2])
@@ -4989,34 +4989,35 @@ func TestRateGaugesSpikeMeterFollowsFiveHour(t *testing.T) {
 	// Idle: the meter stays on the line at rest rather than popping in and
 	// out and reflowing everything beside it.
 	gs = rateGauges(rl, nil, nil, now, defaultBarW)
-	if len(gs.parts) != 3 || !strings.Contains(gs.parts[1], "0.0x") {
-		t.Errorf("idle parts = %q, want 5h, burn 0.0x, wk", gs.parts)
+	if len(gs.parts) != 3 || !strings.Contains(gs.parts[1], "0%/h") {
+		t.Errorf("idle parts = %q, want 5h, burn 0%%/h, wk", gs.parts)
 	}
 }
 
-// Fill and color follow the multiple: green under 1x, yellow from 1x, red
-// from 2x, and the bar pegs at 4x.
+// Fill and color follow the %/h reading: green under the sustainable 20%/h,
+// yellow from 20, red from 40, and the bar is full at a whole window per
+// hour (100%/h).
 func TestBurnGaugeColorBands(t *testing.T) {
 	cases := []struct {
-		mult float64
-		want string
+		perHour float64
+		want    string
 	}{
-		{0.5, thresholdColor(0)},
-		{1.0, thresholdColor(70)},
-		{1.9, thresholdColor(70)},
-		{2.0, thresholdColor(85)},
-		{9.0, thresholdColor(85)},
+		{10, thresholdColor(0)},
+		{20, thresholdColor(70)},
+		{39, thresholdColor(70)},
+		{40, thresholdColor(85)},
+		{180, thresholdColor(85)},
 	}
 	for _, c := range cases {
-		if got := burnColor(c.mult); got != c.want {
-			t.Errorf("burnColor(%v) = %s, want %s", c.mult, got, c.want)
+		if got := burnColor(c.perHour); got != c.want {
+			t.Errorf("burnColor(%v) = %s, want %s", c.perHour, got, c.want)
 		}
 	}
-	if got := burnFillPct(2); got != 50 {
-		t.Errorf("burnFillPct(2) = %v, want 50", got)
+	if got := burnFillPct(50); got != 50 {
+		t.Errorf("burnFillPct(50) = %v, want 50", got)
 	}
-	if got := burnFillPct(9); got != 100 {
-		t.Errorf("burnFillPct(9) = %v, want 100 (pegged)", got)
+	if got := burnFillPct(150); got != 100 {
+		t.Errorf("burnFillPct(150) = %v, want 100 (pegged)", got)
 	}
 }
 

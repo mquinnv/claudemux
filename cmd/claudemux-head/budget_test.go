@@ -229,16 +229,37 @@ func TestPaceColor(t *testing.T) {
 	}
 }
 
-// The spike-o-meter reads burn as a multiple of the sustainable pace (100%
-// per 5h). 2 points in 3 minutes is 0.667 pt/min — exactly 2x sustainable.
-func TestBurnMultipleAgainstSustainablePace(t *testing.T) {
+// The 5h window's pace guard is its own: 3% of five hours is nine minutes,
+// and one hot first turn after a reset would paint the bar red for the next
+// half hour. Twelve minutes in at 18% falls back to fill (green); an hour in
+// at 25% projects to 125% and is honestly red.
+func TestPaceColorFiveHourWaitsLongerBeforeProjecting(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 12, 0, 0, time.UTC)
+	resets := now.Add(fiveHourWindow - 12*time.Minute)
+	if got := paceColor(18, resets, fiveHourWindow, now); got != thresholdColor(18) {
+		t.Errorf("12 minutes into the 5h window: paceColor = %s, want fill color %s", got, thresholdColor(18))
+	}
+	resets = now.Add(fiveHourWindow - time.Hour)
+	if got := paceColor(25, resets, fiveHourWindow, now); got != thresholdColor(100) {
+		t.Errorf("an hour in at 25%%: paceColor = %s, want red", got)
+	}
+	// The week keeps its short guard: 3% of a week is five hours, plenty.
+	resets = now.Add(weekWindow - 6*time.Hour)
+	if got := paceColor(10, resets, weekWindow, now); got != thresholdColor(100) {
+		t.Errorf("6h into the week at 10%%: paceColor = %s, want red (projects to 280%%)", got)
+	}
+}
+
+// The spike-o-meter reads burn as percent of the 5h window per hour: 2
+// points in 3 minutes is 40%/h. (Sustainable is 20%/h — 100% over 5h.)
+func TestBurnPctPerHour(t *testing.T) {
 	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
 	samples := []pctSample{
 		{at: now.Add(-3 * time.Minute), pct: 18.0},
 		{at: now, pct: 20.0},
 	}
-	if got := burnMultiple(samples, now); got < 1.99 || got > 2.01 {
-		t.Errorf("burnMultiple = %v, want ~2.0", got)
+	if got := burnPctPerHour(samples, now); got < 39.9 || got > 40.1 {
+		t.Errorf("burnPctPerHour = %v, want ~40", got)
 	}
 }
 
@@ -252,8 +273,8 @@ func TestBurnMultipleUsesFractionalSamples(t *testing.T) {
 		{at: now.Add(-2 * time.Minute), pct: 18.4},
 		{at: now, pct: 18.6},
 	}
-	if got := burnMultiple(samples, now); got <= 0 {
-		t.Errorf("burnMultiple over fractional samples = %v, want > 0", got)
+	if got := burnPctPerHour(samples, now); got <= 0 {
+		t.Errorf("burnPctPerHour over fractional samples = %v, want > 0", got)
 	}
 }
 
@@ -267,8 +288,8 @@ func TestBurnMultipleIgnoresOldBurst(t *testing.T) {
 		{at: now.Add(-4 * time.Minute), pct: 25},
 		{at: now, pct: 25},
 	}
-	if got := burnMultiple(samples, now); got != 0 {
-		t.Errorf("burnMultiple after a burst ended = %v, want 0", got)
+	if got := burnPctPerHour(samples, now); got != 0 {
+		t.Errorf("burnPctPerHour after a burst ended = %v, want 0", got)
 	}
 	if got := burnRatePctPerMin(samples, now); got <= 0 {
 		t.Errorf("the ETA's 15-minute rate should still see the burst, got %v", got)
@@ -285,8 +306,8 @@ func TestBurnMultipleZeroCases(t *testing.T) {
 		"narrow": {{at: now.Add(-20 * time.Second), pct: 10}, {at: now, pct: 12}},
 	}
 	for name, samples := range cases {
-		if got := burnMultiple(samples, now); got != 0 {
-			t.Errorf("%s: burnMultiple = %v, want 0", name, got)
+		if got := burnPctPerHour(samples, now); got != 0 {
+			t.Errorf("%s: burnPctPerHour = %v, want 0", name, got)
 		}
 	}
 }
