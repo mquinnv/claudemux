@@ -128,6 +128,53 @@ func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
 	return delta / span.Minutes()
 }
 
+// Rate-limit window lengths, for pacing a window's fill against its reset.
+const (
+	fiveHourWindow = 5 * time.Hour
+	weekWindow     = 7 * 24 * time.Hour
+)
+
+// paceMinElapsed is the least of a window that must have elapsed before
+// projecting from it: at 3% of the week (~5h) one busy morning would
+// otherwise extrapolate to a red bar for a week that will end nowhere near
+// the limit.
+const paceMinElapsed = 0.03
+
+// paceColor colors a rate-limit gauge by whether its usage is on pace to
+// exhaust the window by its reset, rather than by how full the bar is. A bar
+// at 85% with a day left in the week is fine — it will end under the limit —
+// while 40% with most of the week left is not. The usage is projected
+// linearly to the reset (used / fraction-elapsed): red when the projection
+// reaches the limit, yellow when it lands within a few points of it (the
+// projection is a straight line through a spiky signal, so 95% projected is
+// a coin flip), green otherwise.
+//
+// Falls back to the raw fill (thresholdColor) when no projection is
+// meaningful: an unknown or already-past reset time, or a window so freshly
+// started that a sample would swamp the estimate. An exhausted window is red
+// regardless.
+func paceColor(usedPct int, resetsAt time.Time, window time.Duration, now time.Time) string {
+	if usedPct >= 100 {
+		return thresholdColor(100)
+	}
+	left := resetsAt.Sub(now)
+	if resetsAt.IsZero() || left <= 0 || left >= window {
+		return thresholdColor(float64(usedPct))
+	}
+	elapsed := 1 - left.Seconds()/window.Seconds()
+	if elapsed < paceMinElapsed {
+		return thresholdColor(float64(usedPct))
+	}
+	switch projected := float64(usedPct) / elapsed; {
+	case projected >= 100:
+		return thresholdColor(100)
+	case projected >= 95:
+		return thresholdColor(70)
+	default:
+		return thresholdColor(0)
+	}
+}
+
 // etaToEmptyPct projects time until usedPct reaches 100 at given burn rate.
 func etaToEmptyPct(usedPct int, ratePctPerMin float64) time.Duration {
 	if ratePctPerMin <= 0 || usedPct >= 100 {

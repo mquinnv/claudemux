@@ -1998,15 +1998,18 @@ func rateGaugeParts(m model, now time.Time, barW int) gaugeSet {
 // switchboard (swMetersLine) so both panels build the identical gauge text
 // from the same raw data.
 func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now time.Time, barW int) gaugeSet {
+	// Bars are colored by pace to the reset, not by fill (paceColor): a
+	// nearly-full week that will end under the limit is not an alarm, and a
+	// half-full one that will not is.
 	fhPct := float64(rl.FiveHour.UsedPercent)
 	wkPct := float64(rl.SevenDay.UsedPercent)
 	parts := []string{
 		fmt.Sprintf("5h %s %d%%→%s",
-			renderBar(barW, fhPct, thresholdColor(fhPct)),
+			renderBar(barW, fhPct, paceColor(rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt, fiveHourWindow, now)),
 			rl.FiveHour.UsedPercent,
 			rl.FiveHour.ResetsAt.Local().Format("3:04p")),
 		fmt.Sprintf("wk %s %d%%→%s",
-			renderBar(barW, wkPct, thresholdColor(wkPct)),
+			renderBar(barW, wkPct, paceColor(rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt, weekWindow, now)),
 			rl.SevenDay.UsedPercent,
 			rl.SevenDay.ResetsAt.Local().Format("Mon")),
 	}
@@ -2015,7 +2018,7 @@ func rateGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now ti
 	for _, mw := range models {
 		pct := float64(mw.UsedPercent)
 		seg := fmt.Sprintf("%s %s %d%%",
-			modelMeterLabel(mw.Name), renderBar(barW, pct, thresholdColor(pct)), mw.UsedPercent)
+			modelMeterLabel(mw.Name), renderBar(barW, pct, paceColor(mw.UsedPercent, mw.ResetsAt, weekWindow, now)), mw.UsedPercent)
 		// A row with a percent but no parseable reset time still earns its
 		// meter; only the arrow is dropped.
 		if !mw.ResetsAt.IsZero() {

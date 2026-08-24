@@ -187,3 +187,44 @@ func TestDefaultRateLimitsPathHonorsOverride(t *testing.T) {
 		t.Errorf("defaultRateLimitsPath() = %q, want the override", got)
 	}
 }
+
+func TestPaceColor(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	week := 7 * 24 * time.Hour
+	cases := []struct {
+		name string
+		used int
+		left time.Duration // until reset; 0 means no reset time known
+		want string
+	}{
+		// 85% used with 12h of the week left projects to ~92% at reset —
+		// under the limit, so green even though the bar is nearly full.
+		{"nearly full but on pace to finish under", 85, 12 * time.Hour, "#04B575"},
+		// 85% used with half the week left projects to 170%: red.
+		{"on pace to exhaust", 85, week / 2, "#EF4444"},
+		// 45% used with 90h of 168h left: 45 / (78/168) ≈ 97% projected —
+		// inside the yellow band.
+		{"close to pace", 45, 90 * time.Hour, "#FFCC00"},
+		// 40% used with 90h left projects to ~86%: green.
+		{"half full but under pace", 40, 90 * time.Hour, "#04B575"},
+		{"exhausted is always red", 100, week / 2, "#EF4444"},
+		{"exhausted with a minute left is red", 100, time.Minute, "#EF4444"},
+		// Too early in the window to project anything: fall back to fill.
+		{"window just started falls back to fill", 90, week - time.Minute, "#EF4444"},
+		{"window just started low fill is green", 10, week - time.Minute, "#04B575"},
+		{"no reset time falls back to fill", 75, 0, "#FFCC00"},
+		// A reset in the past means the cache is stale; fall back to fill.
+		{"past reset falls back to fill", 75, -time.Hour, "#FFCC00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var resets time.Time
+			if c.left != 0 {
+				resets = now.Add(c.left)
+			}
+			if got := paceColor(c.used, resets, week, now); got != c.want {
+				t.Errorf("paceColor(%d, %v left) = %s, want %s", c.used, c.left, got, c.want)
+			}
+		})
+	}
+}
