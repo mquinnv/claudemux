@@ -228,3 +228,88 @@ func TestPaceColor(t *testing.T) {
 		})
 	}
 }
+
+// The spike-o-meter reads burn as a multiple of the sustainable pace (100%
+// per 5h). 2 points in 3 minutes is 0.667 pt/min — exactly 2x sustainable.
+func TestBurnMultipleAgainstSustainablePace(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-3 * time.Minute), pct: 18.0},
+		{at: now, pct: 20.0},
+	}
+	if got := burnMultiple(samples, now); got < 1.99 || got > 2.01 {
+		t.Errorf("burnMultiple = %v, want ~2.0", got)
+	}
+}
+
+// Sub-point movement counts: samples carry the cache's unrounded percentage,
+// so a run of readings whose rounded percent never changes still yields a
+// rate. Rounded to whole points, 18.2→18.4→18.6 is flat and would read 0x.
+func TestBurnMultipleUsesFractionalSamples(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-4 * time.Minute), pct: 18.2},
+		{at: now.Add(-2 * time.Minute), pct: 18.4},
+		{at: now, pct: 18.6},
+	}
+	if got := burnMultiple(samples, now); got <= 0 {
+		t.Errorf("burnMultiple over fractional samples = %v, want > 0", got)
+	}
+}
+
+// The spike gauge looks back five minutes, not the ETA's fifteen: a burst
+// that ended eight minutes ago is over, and the meter must say so.
+func TestBurnMultipleIgnoresOldBurst(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-12 * time.Minute), pct: 5},
+		{at: now.Add(-8 * time.Minute), pct: 25},
+		{at: now.Add(-4 * time.Minute), pct: 25},
+		{at: now, pct: 25},
+	}
+	if got := burnMultiple(samples, now); got != 0 {
+		t.Errorf("burnMultiple after a burst ended = %v, want 0", got)
+	}
+	if got := burnRatePctPerMin(samples, now); got <= 0 {
+		t.Errorf("the ETA's 15-minute rate should still see the burst, got %v", got)
+	}
+}
+
+// Idle, a fresh window (percent fell), and too little span all read 0x.
+func TestBurnMultipleZeroCases(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 0, 0, 0, time.UTC)
+	cases := map[string][]pctSample{
+		"none":   nil,
+		"flat":   {{at: now.Add(-3 * time.Minute), pct: 40}, {at: now, pct: 40}},
+		"reset":  {{at: now.Add(-3 * time.Minute), pct: 90}, {at: now, pct: 2}},
+		"narrow": {{at: now.Add(-20 * time.Second), pct: 10}, {at: now, pct: 12}},
+	}
+	for name, samples := range cases {
+		if got := burnMultiple(samples, now); got != 0 {
+			t.Errorf("%s: burnMultiple = %v, want 0", name, got)
+		}
+	}
+}
+
+// readRateLimits keeps the cache's unrounded percentage alongside the
+// rounded one the gauges print, because the spike gauge needs the fraction.
+func TestReadRateLimitsKeepsExactPercent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rl.json")
+	os.WriteFile(path, []byte(`{"five_hour":{"used_percentage":18.4,"resets_at":1787608800},`+
+		`"seven_day":{"used_percentage":90,"resets_at":1787605200}}`), 0o644)
+	rl, err := readRateLimits(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rl.FiveHour.UsedPercent != 18 || rl.FiveHour.Used != 18.4 {
+		t.Errorf("five_hour = %+v, want 18 / 18.4", rl.FiveHour)
+	}
+	if got := rl.FiveHour.usedExact(); got != 18.4 {
+		t.Errorf("usedExact = %v, want 18.4", got)
+	}
+	// A Window built without the exact value (older code paths, tests) still
+	// samples from its rounded percent rather than reading as zero.
+	if got := (Window{UsedPercent: 42}).usedExact(); got != 42 {
+		t.Errorf("usedExact fallback = %v, want 42", got)
+	}
+}

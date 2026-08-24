@@ -45,8 +45,22 @@ type RateLimits struct {
 }
 
 type Window struct {
+	// UsedPercent is what the gauges print. Used is the cache's unrounded
+	// used_percentage, kept because the spike gauge measures movement over a
+	// few minutes, where a whole point is most of the signal.
 	UsedPercent int
+	Used        float64
 	ResetsAt    time.Time
+}
+
+// usedExact is the percentage to sample for burn rates: the unrounded value
+// when the Window came from the cache, else the rounded one — a Window built
+// from an integer-only source must not sample as zero.
+func (w Window) usedExact() float64 {
+	if w.Used != 0 {
+		return w.Used
+	}
+	return float64(w.UsedPercent)
 }
 
 type rawRateLimitsFile struct {
@@ -79,26 +93,52 @@ func readRateLimits(path string) (RateLimits, error) {
 		UpdatedAt: time.Unix(raw.UpdatedAt, 0),
 		FiveHour: Window{
 			UsedPercent: int(math.Round(raw.FiveHour.UsedPercentage)),
+			Used:        raw.FiveHour.UsedPercentage,
 			ResetsAt:    time.Unix(raw.FiveHour.ResetsAt, 0),
 		},
 		SevenDay: Window{
 			UsedPercent: int(math.Round(raw.SevenDay.UsedPercentage)),
+			Used:        raw.SevenDay.UsedPercentage,
 			ResetsAt:    time.Unix(raw.SevenDay.ResetsAt, 0),
 		},
 	}, nil
 }
 
-// pctSample is a snapshot of five_hour.used_percentage at a point in time.
+// pctSample is a snapshot of five_hour.used_percentage (unrounded) at a point
+// in time.
 type pctSample struct {
 	at  time.Time
-	pct int
+	pct float64
 }
 
 // burnRatePctPerMin returns percentage-points per minute over the last
-// ~15 minutes. Returns 0 sentinel for "not enough data" (<2min span) or
-// "rate is zero or negative" (idle / window resetting).
+// ~15 minutes — the smooth signal the "empty in X" projection wants. Returns
+// 0 sentinel for "not enough data" (<2min span) or "rate is zero or negative"
+// (idle / window resetting).
 func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
-	cutoff := now.Add(-15 * time.Minute)
+	return burnRate(samples, now, 15*time.Minute, 2*time.Minute)
+}
+
+// sustainablePctPerMin is the burn a fresh 5h window absorbs exactly: 100%
+// over the window. The spike gauge reads burn as a multiple of this, so "2x"
+// means the same thing whatever the window's fill or the account's limits.
+const sustainablePctPerMin = 100.0 / (5 * 60)
+
+// burnMultiple is the spike-o-meter's reading: the last five minutes' burn as
+// a multiple of sustainablePctPerMin. The lookback is short because a spike
+// meter is for seeing a burst while it happens; the ETA's fifteen minutes
+// would report it ten minutes late and average it away. A one-minute span is
+// enough only because samples carry the unrounded percentage. 0 for idle, a
+// window that just reset, or not enough data.
+func burnMultiple(samples []pctSample, now time.Time) float64 {
+	return burnRate(samples, now, 5*time.Minute, time.Minute) / sustainablePctPerMin
+}
+
+// burnRate is percentage-points per minute between the earliest and latest
+// samples inside lookback, or 0 when they span less than minSpan or the
+// percentage did not rise.
+func burnRate(samples []pctSample, now time.Time, lookback, minSpan time.Duration) float64 {
+	cutoff := now.Add(-lookback)
 	var earliest pctSample
 	var latest pctSample
 	earliestSet := false
@@ -118,14 +158,45 @@ func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
 		return 0
 	}
 	span := latest.at.Sub(earliest.at)
-	if span < 2*time.Minute {
+	if span < minSpan {
 		return 0
 	}
-	delta := float64(latest.pct - earliest.pct)
+	delta := latest.pct - earliest.pct
 	if delta <= 0 {
 		return 0
 	}
 	return delta / span.Minutes()
+}
+
+// burnGaugeMax is where the spike gauge's bar pegs, in multiples of the
+// sustainable pace. Bursts well past it happen (a fleet of agents all
+// mid-turn), but past 4x the answer is "very" either way.
+const burnGaugeMax = 4.0
+
+// burnFillPct maps a burn multiple onto the bar's 0–100 fill.
+func burnFillPct(mult float64) float64 {
+	if mult >= burnGaugeMax {
+		return 100
+	}
+	if mult < 0 {
+		return 0
+	}
+	return mult / burnGaugeMax * 100
+}
+
+// burnColor bands the spike gauge: green under the sustainable pace, yellow
+// from 1x (faster than the window can absorb, but the bar's fill decides
+// whether that matters), red from 2x. Reuses thresholdColor's palette so the
+// meter line stays one system.
+func burnColor(mult float64) string {
+	switch {
+	case mult >= 2:
+		return thresholdColor(85)
+	case mult >= 1:
+		return thresholdColor(70)
+	default:
+		return thresholdColor(0)
+	}
 }
 
 // Rate-limit window lengths, for pacing a window's fill against its reset.

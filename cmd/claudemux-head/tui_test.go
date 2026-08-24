@@ -4129,24 +4129,27 @@ func TestRateGaugesOrdersModelRowsAfterWeek(t *testing.T) {
 	samples := []pctSample{{at: now.Add(-10 * time.Minute), pct: 10}, {at: now, pct: 20}}
 
 	gs := rateGauges(rl, models, samples, now, defaultBarW)
-	if len(gs.parts) != 4 {
-		t.Fatalf("parts = %q, want 5h, wk, fab, eta", gs.parts)
+	if len(gs.parts) != 5 {
+		t.Fatalf("parts = %q, want 5h, burn, wk, fab, eta", gs.parts)
 	}
 	if !strings.Contains(gs.parts[0], "5h") {
 		t.Errorf("parts[0] = %q, want the 5h gauge", gs.parts[0])
 	}
-	if !strings.Contains(gs.parts[1], "wk") {
-		t.Errorf("parts[1] = %q, want the wk gauge", gs.parts[1])
+	if !strings.Contains(gs.parts[1], "burn") {
+		t.Errorf("parts[1] = %q, want the burn gauge", gs.parts[1])
 	}
-	if !strings.Contains(gs.parts[2], "fable") || !strings.Contains(gs.parts[2], "26%") {
-		t.Errorf("parts[2] = %q, want the Fable gauge at 26%%", gs.parts[2])
+	if !strings.Contains(gs.parts[2], "wk") {
+		t.Errorf("parts[2] = %q, want the wk gauge", gs.parts[2])
 	}
-	if !strings.Contains(gs.parts[3], "empty in") {
-		t.Errorf("parts[3] = %q, want the eta", gs.parts[3])
+	if !strings.Contains(gs.parts[3], "fable") || !strings.Contains(gs.parts[3], "26%") {
+		t.Errorf("parts[3] = %q, want the Fable gauge at 26%%", gs.parts[3])
 	}
-	// 5h, wk and fable carry bars; the eta is plain text.
-	if gs.barred != 3 {
-		t.Errorf("barred = %d, want 3", gs.barred)
+	if !strings.Contains(gs.parts[4], "empty in") {
+		t.Errorf("parts[4] = %q, want the eta", gs.parts[4])
+	}
+	// 5h, burn, wk and fable carry bars; the eta is plain text.
+	if gs.barred != 4 {
+		t.Errorf("barred = %d, want 4", gs.barred)
 	}
 }
 
@@ -4159,11 +4162,11 @@ func TestRateGaugesWithoutModelsUnchanged(t *testing.T) {
 		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
 	}
 	gs := rateGauges(rl, nil, nil, now, defaultBarW)
-	if len(gs.parts) != 2 {
-		t.Fatalf("parts = %q, want just 5h and wk", gs.parts)
+	if len(gs.parts) != 3 {
+		t.Fatalf("parts = %q, want just 5h, burn and wk", gs.parts)
 	}
-	if gs.barred != 2 {
-		t.Errorf("barred = %d, want 2", gs.barred)
+	if gs.barred != 3 {
+		t.Errorf("barred = %d, want 3", gs.barred)
 	}
 }
 
@@ -4957,5 +4960,78 @@ func TestSwitchSessionResetsSummaryEventStamp(t *testing.T) {
 
 	if m.lastSummaryEvents != 0 {
 		t.Errorf("lastSummaryEvents = %d, want 0: the stamp is per-session", m.lastSummaryEvents)
+	}
+}
+
+// The spike gauge sits right after 5h — it is that bar's derivative — and
+// carries a bar, so it counts toward barred while the eta stays plain text.
+func TestRateGaugesSpikeMeterFollowsFiveHour(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{
+		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
+	}
+	// 2 points in 3 minutes: 2.0x sustainable.
+	samples := []pctSample{{at: now.Add(-3 * time.Minute), pct: 18}, {at: now, pct: 20}}
+	gs := rateGauges(rl, nil, samples, now, defaultBarW)
+	if len(gs.parts) != 4 {
+		t.Fatalf("parts = %q, want 5h, burn, wk, eta", gs.parts)
+	}
+	if !strings.Contains(gs.parts[1], "burn") || !strings.Contains(gs.parts[1], "2.0x") {
+		t.Errorf("parts[1] = %q, want the burn gauge at 2.0x", gs.parts[1])
+	}
+	if !strings.Contains(gs.parts[2], "wk") {
+		t.Errorf("parts[2] = %q, want wk after burn", gs.parts[2])
+	}
+	if gs.barred != 3 {
+		t.Errorf("barred = %d, want 3 (5h, burn, wk)", gs.barred)
+	}
+	// Idle: the meter stays on the line at rest rather than popping in and
+	// out and reflowing everything beside it.
+	gs = rateGauges(rl, nil, nil, now, defaultBarW)
+	if len(gs.parts) != 3 || !strings.Contains(gs.parts[1], "0.0x") {
+		t.Errorf("idle parts = %q, want 5h, burn 0.0x, wk", gs.parts)
+	}
+}
+
+// Fill and color follow the multiple: green under 1x, yellow from 1x, red
+// from 2x, and the bar pegs at 4x.
+func TestBurnGaugeColorBands(t *testing.T) {
+	cases := []struct {
+		mult float64
+		want string
+	}{
+		{0.5, thresholdColor(0)},
+		{1.0, thresholdColor(70)},
+		{1.9, thresholdColor(70)},
+		{2.0, thresholdColor(85)},
+		{9.0, thresholdColor(85)},
+	}
+	for _, c := range cases {
+		if got := burnColor(c.mult); got != c.want {
+			t.Errorf("burnColor(%v) = %s, want %s", c.mult, got, c.want)
+		}
+	}
+	if got := burnFillPct(2); got != 50 {
+		t.Errorf("burnFillPct(2) = %v, want 50", got)
+	}
+	if got := burnFillPct(9); got != 100 {
+		t.Errorf("burnFillPct(9) = %v, want 100 (pegged)", got)
+	}
+}
+
+// The head samples the exact percentage, so readings that differ only in the
+// fraction still produce distinct samples for the spike gauge.
+func TestDataMsgSamplesExactPercent(t *testing.T) {
+	now := time.Now()
+	m := model{}
+	rl := RateLimits{FiveHour: Window{UsedPercent: 18, Used: 18.2, ResetsAt: now.Add(4 * time.Hour)}}
+	next, _ := m.Update(dataMsg{time: now, rateLimits: rl})
+	m = next.(model)
+	rl.FiveHour.Used = 18.4
+	next, _ = m.Update(dataMsg{time: now.Add(time.Minute), rateLimits: rl})
+	m = next.(model)
+	if len(m.pctSamples) != 2 || m.pctSamples[1].pct != 18.4 {
+		t.Fatalf("pctSamples = %+v, want two samples ending at 18.4", m.pctSamples)
 	}
 }
