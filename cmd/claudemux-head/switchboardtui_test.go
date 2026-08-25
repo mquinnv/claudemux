@@ -1373,3 +1373,22 @@ func TestSwModelFooterMentionsDefer(t *testing.T) {
 		t.Errorf("footer missing \"d defer\":\n%s", view)
 	}
 }
+
+// TestSwDeferTargetUsesHeadPane pins the lobby's set-option target to the
+// session's head pane id, never its name. A bare name is a target-PANE to
+// tmux, which tries a window-name prefix match in the caller's own session
+// before it tries session names — and the lobby's own window is called
+// "claudemux-head", so a session named "claudemux" resolved to the lobby's
+// window and the toggle silently landed on the switchboard session.
+func TestSwDeferTargetUsesHeadPane(t *testing.T) {
+	got := swDeferTarget(swSession{Name: "claudemux", HeadPane: "%25"})
+	if got != "%25" {
+		t.Fatalf("target = %q, want the head pane id", got)
+	}
+	// No head pane recorded: fall back to the explicit session form, which
+	// tmux resolves as a session and nothing else.
+	got = swDeferTarget(swSession{Name: "claudemux"})
+	if got != "claudemux:" {
+		t.Fatalf("fallback target = %q, want %q", got, "claudemux:")
+	}
+}

@@ -792,7 +792,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Guard like the other row keys: a no-op when the list is empty.
 			if m.sel < len(m.snap.Sessions) {
 				sess := m.snap.Sessions[m.sel]
-				return m, setDeferCmd(sess.Name, !sess.Deferred)
+				return m, setDeferCmd(swDeferTarget(sess), !sess.Deferred)
 			}
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
@@ -1158,4 +1158,21 @@ func runSwitchboard(stderr io.Writer) int {
 	// inside that window, so the chips never blink.
 	unsetConductOption()
 	return 0
+}
+
+// swDeferTarget is the tmux target the lobby toggles @claudemux_defer on.
+// The head pane id, not the session name: set-option's -t is a target-PANE,
+// and tmux resolves a bare name by trying a window-name PREFIX match in the
+// caller's own session before it tries session names. The lobby's window is
+// "claudemux-head", so a session named "claudemux" resolved to the lobby's
+// own window and the toggle landed on the switchboard session instead —
+// the only session in the fleet it could happen to, and the one it did. A
+// pane id is unambiguous; the head's own d key already targets one. The
+// fallback is the explicit "name:" session form for a row that has no head
+// pane recorded, which tmux resolves as a session and nothing else.
+func swDeferTarget(sess swSession) string {
+	if sess.HeadPane != "" {
+		return sess.HeadPane
+	}
+	return sess.Name + ":"
 }
