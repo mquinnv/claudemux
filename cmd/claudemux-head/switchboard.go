@@ -41,6 +41,10 @@ type swSession struct {
 	// types `R` into it — and must never type into the claude pane, where
 	// a stray R would land in the user's prompt.
 	HeadPane string
+	// Deferred mirrors @claudemux_defer: the session is marked to wait behind
+	// every other waiter rather than collect the conductor's client next. See
+	// swconductor.go's waitingQueue for the ordering this drives.
+	Deferred bool
 }
 
 type swSnapshot struct {
@@ -85,7 +89,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -127,13 +131,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 8 || f[0] == "" {
+		if len(f) != 9 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
 			continue
 		}
-		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7]}
+		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1"}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {
 			sess.Context = ctx

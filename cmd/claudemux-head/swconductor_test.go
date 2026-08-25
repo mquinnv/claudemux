@@ -22,6 +22,10 @@ func busy(name string) swSession {
 	return swSession{Name: name, State: "Thinking", Since: time.Unix(1754700000, 0)}
 }
 
+func deferredWaiting(name string, since int64) swSession {
+	return swSession{Name: name, State: "Idle", Since: time.Unix(since, 0), Deferred: true}
+}
+
 func TestWaitingQueueOrdersOldestFirst(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	s := snapAt("switchboard", waiting("young", 200), waiting("old", 100), busy("work"))
@@ -42,6 +46,52 @@ func TestWaitingQueueSnoozeAndTiebreak(t *testing.T) {
 	q = s.waitingQueue(map[string]swSnooze{"a": {since: time.Unix(50, 0), at: now}}, now)
 	if len(q) != 2 || q[0].Name != "a" || q[1].Name != "b" {
 		t.Errorf("same-Since tiebreak is by name, queue = %v", q)
+	}
+}
+
+// A deferred waiter always waits behind every normal waiter, even one that
+// started waiting more recently — the mark trades position for being
+// remembered, not the other way around.
+func TestWaitingQueueDeferredWaitsBehindYoungerNormal(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	s := snapAt("switchboard", deferredWaiting("old-deferred", 50), waiting("young", 200))
+	q := s.waitingQueue(nil, now)
+	if len(q) != 2 || q[0].Name != "young" || q[1].Name != "old-deferred" {
+		t.Errorf("queue = %v, want young before old-deferred despite Since", q)
+	}
+}
+
+// With no competing normal waiter, a deferred session is still the one
+// dispatched — deferred means "wait your turn," not "never."
+func TestWaitingQueueDeferredAloneIsDispatched(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	s := snapAt("switchboard", deferredWaiting("solo", 100))
+	q := s.waitingQueue(nil, now)
+	if len(q) != 1 || q[0].Name != "solo" {
+		t.Errorf("queue = %v, want the sole deferred waiter", q)
+	}
+}
+
+// Snooze semantics apply identically to deferred sessions: a deferred
+// session's snoozed episode is excluded from the queue exactly like a
+// normal one's.
+func TestWaitingQueueSnoozedDeferredExcluded(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	s := snapAt("switchboard", deferredWaiting("a", 100), waiting("b", 200))
+	q := s.waitingQueue(map[string]swSnooze{"a": {since: time.Unix(100, 0), at: now}}, now)
+	if len(q) != 1 || q[0].Name != "b" {
+		t.Errorf("snoozed deferred session must be excluded, queue = %v", q)
+	}
+}
+
+// Two deferred waiters order oldest-first among themselves, the same rule
+// that governs normal waiters.
+func TestWaitingQueueTwoDeferredOrderedOldestFirst(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	s := snapAt("switchboard", deferredWaiting("young", 200), deferredWaiting("old", 100))
+	q := s.waitingQueue(nil, now)
+	if len(q) != 2 || q[0].Name != "old" || q[1].Name != "young" {
+		t.Errorf("queue = %v, want old before young among deferred waiters", q)
 	}
 }
 
@@ -353,6 +403,50 @@ func TestStatusLineOmitsExpiredSnoozeFromCount(t *testing.T) {
 	got := c.statusLine(snapAt("switchboard", waiting("a", 100)), now)
 	if want := "conducting · 1 waiting"; got != want {
 		t.Errorf("statusLine = %q, want %q (expired snooze must not count)", got, want)
+	}
+}
+
+// The deferred suffix appears after the snoozed suffix, and only when a
+// deferred session is actually waiting.
+func TestStatusLineShowsDeferredCount(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	got := c.statusLine(snapAt("switchboard", waiting("a", 100), deferredWaiting("b", 200)), now)
+	if want := "conducting · 2 waiting · 1 deferred"; got != want {
+		t.Errorf("statusLine = %q, want %q", got, want)
+	}
+}
+
+func TestStatusLineOmitsZeroDeferred(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	got := c.statusLine(snapAt("switchboard", waiting("a", 100)), now)
+	if want := "conducting · 1 waiting"; got != want {
+		t.Errorf("statusLine = %q, want %q", got, want)
+	}
+}
+
+// Both suffixes together: snoozed first, deferred after — matching the order
+// the constraints specify.
+func TestStatusLineShowsSnoozedThenDeferred(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.snoozed["a"] = swSnooze{since: time.Unix(100, 0), at: now}
+	got := c.statusLine(snapAt("switchboard", waiting("a", 100), deferredWaiting("b", 200)), now)
+	if want := "conducting · 1 waiting · 1 snoozed · 1 deferred"; got != want {
+		t.Errorf("statusLine = %q, want %q", got, want)
+	}
+}
+
+// A deferred session that isn't waiting (still busy) must not inflate the
+// count: the suffix reports waiting-but-deferred, not merely marked.
+func TestStatusLineOmitsDeferredNotWaiting(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	busyDeferred := swSession{Name: "b", State: "Thinking", Since: time.Unix(1754700000, 0), Deferred: true}
+	got := c.statusLine(snapAt("switchboard", waiting("a", 100), busyDeferred), now)
+	if want := "conducting · 1 waiting"; got != want {
+		t.Errorf("statusLine = %q, want %q", got, want)
 	}
 }
 

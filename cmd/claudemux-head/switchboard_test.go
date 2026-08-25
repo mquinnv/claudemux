@@ -8,11 +8,11 @@ import (
 // Raw tmux outputs as the switchboard's three -F formats produce them.
 // An unset user option renders as an empty field.
 const (
-	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\tb34dff\n" +
-		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\t\n" +
-		"scratch\t\t\t\t\t\t\t\n" +
-		"switchboard\t\t\t\t\t\t\t\n" +
-		"plain\t\t\t\t\t\t\t\n"
+	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\tb34dff\t1\n" +
+		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\t\t\n" +
+		"scratch\t\t\t\t\t\t\t\t\n" +
+		"switchboard\t\t\t\t\t\t\t\t\n" +
+		"plain\t\t\t\t\t\t\t\t\n"
 	swPaneOut = "api\t%1\tclaudemux-head\tbuild fixes\n" +
 		"api\t%2\tclaude\tbuild fixes\n" +
 		"web\t%5\tclaudemux-head\tcolor picker\n" +
@@ -44,6 +44,12 @@ func TestBuildSwSnapshot(t *testing.T) {
 	web, _ := s.session("web")
 	if web.State != "Tool:AskUserQuestion" {
 		t.Errorf("web.State = %q", web.State)
+	}
+	if !api.Deferred {
+		t.Errorf("api.Deferred = %v, want true", api.Deferred)
+	}
+	if web.Deferred {
+		t.Errorf("web.Deferred = %v, want false", web.Deferred)
 	}
 	scratch, _ := s.session("scratch")
 	if scratch.State != "" || !scratch.Since.IsZero() {
@@ -88,6 +94,34 @@ func TestBuildSwSnapshotMalformedLines(t *testing.T) {
 	sevenField := buildSwSnapshot("api\tIdle\t1754700000\t37\tsum\tprompt\tm\n", "api\t%1\tclaudemux-head\tt\n", "", "%9")
 	if len(sevenField.Sessions) != 0 {
 		t.Errorf("pre-color 7-field lines must be skipped, got %+v", sevenField.Sessions)
+	}
+	eightField := buildSwSnapshot("api\tIdle\t1754700000\t37\tsum\tprompt\tm\tc\n", "api\t%1\tclaudemux-head\tt\n", "", "%9")
+	if len(eightField.Sessions) != 0 {
+		t.Errorf("pre-defer 8-field lines must be skipped, got %+v", eightField.Sessions)
+	}
+}
+
+// Deferred parses from the ninth field: "1" is deferred, anything else
+// (empty, or any other value) is not.
+func TestBuildSwSnapshotParsesDeferred(t *testing.T) {
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t1\n" +
+		"web\tIdle\t1754700000\t37\t\t\t\t\t0\n" +
+		"scratch\tIdle\t1754700000\t37\t\t\t\t\t\n"
+	paneOut := "api\t%1\tclaudemux-head\tt\n" +
+		"web\t%2\tclaudemux-head\tt\n" +
+		"scratch\t%3\tclaudemux-head\tt\n"
+	s := buildSwSnapshot(sessOut, paneOut, "", "")
+	api, _ := s.session("api")
+	if !api.Deferred {
+		t.Errorf("api.Deferred = %v, want true", api.Deferred)
+	}
+	web, _ := s.session("web")
+	if web.Deferred {
+		t.Errorf("web.Deferred = %v, want false (value \"0\")", web.Deferred)
+	}
+	scratch, _ := s.session("scratch")
+	if scratch.Deferred {
+		t.Errorf("scratch.Deferred = %v, want false (unset)", scratch.Deferred)
 	}
 }
 
@@ -148,8 +182,8 @@ func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
 		"api\t%3\tclaude\ttopic\n" +
 		"shim\t%4\tclaudemux-head\ttopic\n" +
 		"shim\t%5\tnode\ttopic\n"
-	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\n" +
-		"shim\tIdle\t1754700000\t37\t\t\t\t\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t\n" +
+		"shim\tIdle\t1754700000\t37\t\t\t\t\t\n"
 	s := buildSwSnapshot(sessOut, paneOut, swClientOut, "")
 	api, _ := s.session("api")
 	if api.ClaudePane != "%3" {

@@ -73,8 +73,13 @@ func newConductor() conductor {
 	return conductor{snoozed: map[string]swSnooze{}}
 }
 
-// waitingQueue lists waiting, un-snoozed sessions oldest-first (name as
-// tiebreak so equal timestamps still order deterministically).
+// waitingQueue lists waiting, un-snoozed sessions with non-deferred waiters
+// first, deferred ones after — a deferred session waits behind everything
+// normal, not because it matters less, but because the user asked not to be
+// pulled to it while anything else needs them. Within each group, oldest
+// Since first (name as tiebreak so equal timestamps still order
+// deterministically). Snooze semantics are unchanged and apply identically
+// to deferred sessions.
 func (s swSnapshot) waitingQueue(snoozed map[string]swSnooze, now time.Time) []swSession {
 	var q []swSession
 	for _, sess := range s.Sessions {
@@ -87,6 +92,9 @@ func (s swSnapshot) waitingQueue(snoozed map[string]swSnooze, now time.Time) []s
 		q = append(q, sess)
 	}
 	sort.SliceStable(q, func(i, j int) bool {
+		if q[i].Deferred != q[j].Deferred {
+			return !q[i].Deferred
+		}
 		if !q[i].Since.Equal(q[j].Since) {
 			return q[i].Since.Before(q[j].Since)
 		}
@@ -287,6 +295,15 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	}
 	if z > 0 {
 		suffix = fmt.Sprintf(" · %d snoozed", z)
+	}
+	d := 0
+	for _, sess := range s.Sessions {
+		if sess.Deferred && isWaiting(sess.State) {
+			d++
+		}
+	}
+	if d > 0 {
+		suffix += fmt.Sprintf(" · %d deferred", d)
 	}
 	switch c.phase {
 	case swPaused:
