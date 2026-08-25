@@ -1237,3 +1237,106 @@ func TestSwTopicStyleHasNoHardcodedColor(t *testing.T) {
 		t.Errorf("swTopicStyle sets Foreground(%v); it must stay unset so the terminal default applies", fg)
 	}
 }
+
+// TestSwModelDeferKeyTogglesSelected: d on a populated list must fire a
+// tmux toggle for the selected row. Guarded like every other row key —
+// TestSwModelDeferKeyEmptyListNoop covers the empty-list side.
+func TestSwModelDeferKeyTogglesSelected(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd == nil {
+		t.Fatal("d with a selected row must produce a cmd")
+	}
+}
+
+func TestSwModelDeferKeyEmptyListNoop(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions = nil
+	m.sel = 0
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Error("d on an empty list must be a no-op")
+	}
+}
+
+func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
+	m := swTestModel()
+	// Wide enough that clipLine leaves room for the badge after the model
+	// column — this test is about the badge appearing at all, not fitting a
+	// narrow pane.
+	m.width = 140
+	m.snap.Sessions[0].Deferred = true
+	view := ansi.Strip(m.View())
+	var row string
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "api") {
+			row = l
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("could not find api's row:\n%s", view)
+	}
+	if !strings.Contains(row, "◆") {
+		t.Errorf("deferred row missing ◆ marker:\n%q", row)
+	}
+	if !strings.Contains(row, "DEFER") {
+		t.Errorf("deferred row missing DEFER badge:\n%q", row)
+	}
+}
+
+func TestSwModelViewNormalRowHasNoDeferMarkerOrBadge(t *testing.T) {
+	m := swTestModel()
+	view := ansi.Strip(m.View())
+	var row string
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "api") {
+			row = l
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("could not find api's row:\n%s", view)
+	}
+	if strings.Contains(row, "◆") {
+		t.Errorf("non-deferred row must not show the ◆ marker:\n%q", row)
+	}
+	if strings.Contains(row, "DEFER") {
+		t.Errorf("non-deferred row must not show the DEFER badge:\n%q", row)
+	}
+}
+
+// A deferred but currently-waiting session must still show the defer
+// marker, not the waiting dot — deferred is shown whether or not the
+// session is waiting.
+func TestSwModelViewDeferredWaitingSessionShowsDeferNotWaitDot(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions[1].State = "Idle"
+	m.snap.Sessions[1].Deferred = true
+	view := ansi.Strip(m.View())
+	var row string
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "web") {
+			row = l
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("could not find web's row:\n%s", view)
+	}
+	if !strings.Contains(row, "◆") {
+		t.Errorf("deferred+waiting row must show ◆:\n%q", row)
+	}
+	if strings.Contains(row, "●") {
+		t.Errorf("deferred+waiting row must not show the waiting dot:\n%q", row)
+	}
+}
+
+func TestSwModelFooterMentionsDefer(t *testing.T) {
+	m := swTestModel()
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "d defer") {
+		t.Errorf("footer missing \"d defer\":\n%s", view)
+	}
+}

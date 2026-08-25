@@ -779,6 +779,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Republish immediately rather than waiting out the poll beat, so
 			// the heads' chips track the toggle as fast as the badge does.
 			return m, publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
+		case "d":
+			// Guard like the other row keys: a no-op when the list is empty.
+			if m.sel < len(m.snap.Sessions) {
+				sess := m.snap.Sessions[m.sel]
+				return m, setDeferCmd(sess.Name, !sess.Deferred)
+			}
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
 				m.sel++
@@ -924,7 +930,13 @@ func (m swModel) View() string {
 			break
 		}
 		marker := "  "
-		if isWaiting(sess.State) {
+		switch {
+		case sess.Deferred:
+			// Deferred wins over the waiting dot: a deferred session is shown
+			// as deferred whether or not it is currently waiting — it must not
+			// be forgotten, so it never falls back to the plain wait marker.
+			marker = swDeferStyle.Render("◆ ")
+		case isWaiting(sess.State):
 			if m.cond.isSnoozed(sess, now) {
 				marker = swUnknownStyle.Render("● ") // waiting, deliberately skipped
 			} else {
@@ -963,12 +975,17 @@ func (m swModel) View() string {
 		// cells.
 		name := swNameStyle(sess.Color, i == m.sel).
 			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
-		line := fmt.Sprintf(" %s%s %s %s%s  %s %s", marker, name,
+		badge := ""
+		if sess.Deferred {
+			badge = " " + swBadgeDeferStyle.Render(" DEFER ")
+		}
+		line := fmt.Sprintf(" %s%s %s %s%s  %s %s%s", marker, name,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),
 			swPad(ctx, swCtxColW),
-			swCell(modelTxt, swModelColW, swUnknownStyle, false))
+			swCell(modelTxt, swModelColW, swUnknownStyle, false),
+			badge)
 		if m.width > 0 {
 			line = clipLine(line, m.width)
 		}
@@ -1082,7 +1099,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · R restart · ^R restart all · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · d defer · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}
