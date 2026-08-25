@@ -63,7 +63,16 @@ const (
 
 // swTopicW is the topic column's width for one render — swTopicColW when the
 // pane can afford it, less when it cannot. Every row in a render gets the same
-// answer (it depends only on the pane width), so the grid holds either way.
+// answer (it depends only on the pane width and reserve), so the grid holds
+// either way.
+//
+// reserve is extra chrome to hold room for beyond swRowChromeW — the DEFER
+// badge's width when any listed session is deferred, 0 otherwise. Without
+// this, swTopicColW was sized to exactly fill the pane before the badge was
+// appended, so clipLine (the final width guard) truncated the badge away on
+// any pane not wide enough to spare its width for free; reserving it here
+// means every row's topic column shrinks by the same amount, badge or no
+// badge on that particular row, and the grid still holds.
 //
 // Shrink-only, deliberately: sess.Topic is already clamped to
 // tabTitleMaxRunes upstream, so a wider column would buy trailing blanks
@@ -71,11 +80,11 @@ const (
 // topic to the second column put the context meters and the model at the right
 // edge, and without this a lobby under swRowChromeW+swTopicColW cells would
 // lose the meters entirely to make room for a topic that is mostly padding.
-func swTopicW(width int) int {
+func swTopicW(width, reserve int) int {
 	if width <= 0 {
 		return swTopicColW
 	}
-	switch avail := width - swRowChromeW; {
+	switch avail := width - swRowChromeW - reserve; {
 	case avail >= swTopicColW:
 		return swTopicColW
 	case avail < swTopicColMinW:
@@ -901,8 +910,12 @@ func (m swModel) View() string {
 	// Rows each session wants on screen. The layout needs this up front so the
 	// preview can grow into rows a small fleet would otherwise leave blank.
 	want := 0
+	anyDeferred := false
 	for _, sess := range m.snap.Sessions {
 		want += swSessionRows(sess)
+		if sess.Deferred {
+			anyDeferred = true
+		}
 	}
 	lay := computePreviewLayout(m.height, m.lastErr != "", m.rateOK, want)
 
@@ -918,8 +931,16 @@ func (m swModel) View() string {
 		}
 	}
 
-	// One width for the whole render, so the topic column is a column.
-	topicW := swTopicW(m.width)
+	// One width for the whole render, so the topic column is a column. The
+	// badge's width is reserved whenever ANY session in the fleet is
+	// deferred, not just on that session's own row — every row must agree on
+	// topicW, so a per-row reserve would shear the grid the same way an
+	// unreserved one truncates the badge (see swTopicW).
+	reserve := 0
+	if anyDeferred {
+		reserve = lipgloss.Width(swDeferBadgeText())
+	}
+	topicW := swTopicW(m.width, reserve)
 
 	used, shown := 0, 0
 	for i, sess := range m.snap.Sessions {
@@ -977,7 +998,7 @@ func (m swModel) View() string {
 			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
 		badge := ""
 		if sess.Deferred {
-			badge = " " + swBadgeDeferStyle.Render(" DEFER ")
+			badge = swDeferBadgeText()
 		}
 		line := fmt.Sprintf(" %s%s %s %s%s  %s %s%s", marker, name,
 			swCell(sess.Topic, topicW, swTopicStyle, false),

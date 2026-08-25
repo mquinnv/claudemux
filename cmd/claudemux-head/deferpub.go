@@ -54,13 +54,24 @@ func readDeferOption(ctx context.Context, target string) string {
 }
 
 // swDeferStyle and swBadgeDeferStyle share one color across both surfaces —
-// ANSI 256 "39" (blue) — deliberately NOT a dim/faint style: a deferred
+// ANSI 256 "45" (cyan) — deliberately NOT a dim/faint style: a deferred
 // session is one that must not be forgotten, so it stays as visually loud as
-// a waiting one, just a different hue.
+// a waiting one, just a different hue. Not "39": that's swBusyStyle's
+// "Thinking" blue already, and defer needs a hue of its own so a deferred row
+// can't be mistaken for a busy one at a glance.
 var (
-	swDeferStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	swBadgeDeferStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("39"))
+	swDeferStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
+	swBadgeDeferStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("45"))
 )
+
+// swDeferBadgeText is the lobby row's DEFER badge, leading separator space
+// included — the exact text the row loop appends after the model column.
+// Extracted so swTopicW's reserve calculation (switchboardtui.go) and the
+// per-row render measure and emit the identical string; if they drifted, a
+// too-small reserve would let clipLine truncate the badge again.
+func swDeferBadgeText() string {
+	return " " + swBadgeDeferStyle.Render(" DEFER ")
+}
 
 // deferChip renders the head's defer chip from the raw option value: visible
 // only when the mark is actually set, blank otherwise (no lobby-liveness

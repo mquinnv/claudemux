@@ -118,7 +118,9 @@ up with the secrets in its environment rather than without them.
 Run `claudemux` with no arguments to open a **switchboard** (`claudemux switch` does the
 same thing, explicitly): a full-screen lobby session that watches
 every claudemux session and automatically carries your tmux client to whichever one
-is waiting on input — Claude's turn ended, or it asked you a question — oldest first.
+is waiting on input — Claude's turn ended, or it asked you a question — oldest first
+among the non-deferred, then oldest first among any deferred sessions (see **Deferring
+a session** below).
 Answer, and it moves you to the next waiting session; when nothing waits, you're
 returned to the lobby — unless the session you're in is the only one there is, in
 which case you stay put. A lobby whose entire fleet is the session you were just
@@ -159,6 +161,18 @@ To **skip** a session you don't want to answer right now, jump back to the lobby
 `claudemux switch` binds `prefix + S` to do exactly that (unless you've bound
 `prefix + S` yourself, in which case it's left alone). The skipped session is
 snoozed and the conductor carries you to the next waiting one.
+
+**Deferring a session** is different from a snooze: it says this session is waiting on
+something outside claudemux — a review, a build, another person — and should sit at the
+back of the queue until nothing else needs you. Press `d` on the selected row in the
+lobby, or `d` from inside the session's own status pane, to toggle it. A deferred
+session still shows up when it's genuinely the only thing waiting — with a small fleet
+it may be the only session in the queue at all — but any non-deferred session that
+starts waiting jumps ahead of it, and a busy session never blocks it either way. A
+deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, and the session's own
+status pane shows a `◆ defer` chip. Unlike a snooze, defer never clears itself — the
+blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
+press `d` again.
 
 The lobby is a dispatch point: whenever you're parked there and something waits,
 you get carried to it. To sit and watch the fleet instead, press `Space` — it
@@ -206,9 +220,9 @@ attaching.
 below — so you can stop the conductor without coming back here first.
 
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
-jumps to a session (and pauses conducting), `Esc` returns to the session you
-came from (tmux's per-client last session), `n` starts a new session, `q`
-quits.
+jumps to a session (and pauses conducting), `d` toggles defer on the selected
+row, `Esc` returns to the session you came from (tmux's per-client last
+session), `n` starts a new session, `q` quits.
 
 ## Install
 
@@ -602,6 +616,12 @@ the request to the lobby, which flips the mode for the whole fleet. The chip
 answers the keypress immediately and settles on what the lobby actually did
 within a couple of seconds. With no lobby running there is nothing to conduct,
 so the chip is absent and `Space` does nothing.
+
+**Deferring from the status pane.** Press `d` to toggle defer on this session —
+the same mark the lobby's `d` sets on the selected row (see **Deferring a
+session** above). The pane shows a `◆ defer` chip while it's set, and the mark
+persists on the tmux session itself, so it survives a head restart and is
+visible to the lobby with no head running at all.
 
 **Restarting the status pane.** Press `R` (capital) to restart it in place. The
 process re-execs the `claudemux-head` binary as it stands on disk right now, so

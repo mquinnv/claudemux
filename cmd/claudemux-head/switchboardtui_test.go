@@ -1158,18 +1158,20 @@ func TestSwModelViewEmphasizesTheTopic(t *testing.T) {
 // to that upstream and the extra cells would be padding.
 func TestSwTopicWShrinksOnlyWhenItMust(t *testing.T) {
 	for _, tt := range []struct {
-		width, want int
-		why         string
+		width, reserve, want int
+		why                  string
 	}{
-		{0, swTopicColW, "unmeasured pane keeps the full column"},
-		{200, swTopicColW, "wide pane is capped, not grown"},
-		{swRowChromeW + swTopicColW, swTopicColW, "exactly enough is enough"},
-		{swRowChromeW + swTopicColW - 5, swTopicColW - 5, "five cells short yields five cells"},
-		{swRowChromeW + swTopicColMinW, swTopicColMinW, "the floor is reachable"},
-		{40, swTopicColMinW, "far too narrow stops at the floor"},
+		{0, 0, swTopicColW, "unmeasured pane keeps the full column"},
+		{200, 0, swTopicColW, "wide pane is capped, not grown"},
+		{swRowChromeW + swTopicColW, 0, swTopicColW, "exactly enough is enough"},
+		{swRowChromeW + swTopicColW - 5, 0, swTopicColW - 5, "five cells short yields five cells"},
+		{swRowChromeW + swTopicColMinW, 0, swTopicColMinW, "the floor is reachable"},
+		{40, 0, swTopicColMinW, "far too narrow stops at the floor"},
+		{swRowChromeW + swTopicColW, 8, swTopicColW - 8, "reserve shrinks the column just like less width would"},
+		{swRowChromeW + swTopicColMinW, 8, swTopicColMinW, "reserve cannot push the column below the floor"},
 	} {
-		if got := swTopicW(tt.width); got != tt.want {
-			t.Errorf("swTopicW(%d) = %d, want %d (%s)", tt.width, got, tt.want, tt.why)
+		if got := swTopicW(tt.width, tt.reserve); got != tt.want {
+			t.Errorf("swTopicW(%d, %d) = %d, want %d (%s)", tt.width, tt.reserve, got, tt.want, tt.why)
 		}
 	}
 }
@@ -1179,7 +1181,7 @@ func TestSwTopicWShrinksOnlyWhenItMust(t *testing.T) {
 // moved to the second column with a hard 40-cell width.
 func TestSwModelViewKeepsMetersOnANarrowPane(t *testing.T) {
 	m := swTestModel() // 100 cells: too narrow for name + full topic + the rest
-	if w := swTopicW(m.width); w >= swTopicColW {
+	if w := swTopicW(m.width, 0); w >= swTopicColW {
 		t.Fatalf("swTopicW(%d) = %d; this test needs a width that forces a shrink", m.width, w)
 	}
 	view := ansi.Strip(m.View())
@@ -1261,11 +1263,12 @@ func TestSwModelDeferKeyEmptyListNoop(t *testing.T) {
 }
 
 func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
+	// swTestModel's default width (100) is deliberate here: it is already
+	// narrow enough that the topic column fills the rest of the pane (see
+	// TestSwModelViewKeepsMetersOnANarrowPane), which is exactly the width
+	// that used to make swTopicW leave the DEFER badge no room and let
+	// clipLine drop it. A wide pane like 140 never exercised that path.
 	m := swTestModel()
-	// Wide enough that clipLine leaves room for the badge after the model
-	// column — this test is about the badge appearing at all, not fitting a
-	// narrow pane.
-	m.width = 140
 	m.snap.Sessions[0].Deferred = true
 	view := ansi.Strip(m.View())
 	var row string
@@ -1281,8 +1284,38 @@ func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
 	if !strings.Contains(row, "◆") {
 		t.Errorf("deferred row missing ◆ marker:\n%q", row)
 	}
-	if !strings.Contains(row, "DEFER") {
-		t.Errorf("deferred row missing DEFER badge:\n%q", row)
+	if !strings.HasSuffix(row, "DEFER ") {
+		t.Errorf("deferred row missing full DEFER badge at the end:\n%q", row)
+	}
+}
+
+// The badge must survive across a sweep of widths, not just the default one:
+// swTopicW's reserve has to hold everywhere the topic column is still
+// shrinking (100), right up to where it caps out at swTopicColW and the
+// reserve is the only thing standing between the badge and clipLine (120).
+// 97 is the narrowest width at which the badge can appear at all — below it
+// even the topic's own floor (swTopicColMinW) leaves no room, a pane too
+// narrow for this row's other columns regardless of defer, and outside what
+// this fix is about.
+func TestSwModelViewDeferBadgeSurvivesNarrowWidths(t *testing.T) {
+	for _, width := range []int{97, 100, 120} {
+		m := swTestModel()
+		m.width = width
+		m.snap.Sessions[0].Deferred = true
+		view := ansi.Strip(m.View())
+		var row string
+		for _, l := range strings.Split(view, "\n") {
+			if strings.Contains(l, "api") {
+				row = l
+				break
+			}
+		}
+		if row == "" {
+			t.Fatalf("width %d: could not find api's row:\n%s", width, view)
+		}
+		if !strings.HasSuffix(row, "DEFER ") {
+			t.Errorf("width %d: deferred row does not end with the full DEFER badge (partial or dropped):\n%q", width, row)
+		}
 	}
 }
 

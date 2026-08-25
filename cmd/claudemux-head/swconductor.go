@@ -287,20 +287,17 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	// render or two. This keeps the suffix exactly matching what
 	// waitingQueue excluded at this instant.
 	suffix := ""
-	z := 0
+	z, d := 0, 0
 	for _, sess := range s.Sessions {
 		if c.isSnoozed(sess, now) {
 			z++
 		}
-	}
-	if z > 0 {
-		suffix = fmt.Sprintf(" · %d snoozed", z)
-	}
-	d := 0
-	for _, sess := range s.Sessions {
 		if sess.Deferred && isWaiting(sess.State) {
 			d++
 		}
+	}
+	if z > 0 {
+		suffix = fmt.Sprintf(" · %d snoozed", z)
 	}
 	if d > 0 {
 		suffix += fmt.Sprintf(" · %d deferred", d)

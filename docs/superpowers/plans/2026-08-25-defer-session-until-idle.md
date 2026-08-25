@@ -25,9 +25,10 @@ block a deferred dispatch.
   `tmux set-option -t <target> -u @claudemux_defer`. Fire-and-forget with the
   usual 2s deadline, like every other tmux shell-out.
 - Visuals: deferred must NOT be dim — it is a session that must not be
-  forgotten. Use one new color, ANSI 256 `39` (blue), shared by both surfaces:
-  `swDeferStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))` and
-  `swBadgeDeferStyle = Bold, Foreground "232", Background "39"`.
+  forgotten. Use one new color, ANSI 256 `45` (cyan; `39` is already
+  `swBusyStyle`'s "Thinking" blue), shared by both surfaces:
+  `swDeferStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))` and
+  `swBadgeDeferStyle = Bold, Foreground "232", Background "45"`.
   - Lobby row: when `sess.Deferred`, the leading marker is `swDeferStyle.Render("◆ ")`
     (replacing the waiting dot / blank — deferred is shown whether or not the
     session is currently waiting), AND a ` DEFER ` badge (`swBadgeDeferStyle`)
