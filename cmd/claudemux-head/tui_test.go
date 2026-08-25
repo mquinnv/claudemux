@@ -5036,3 +5036,66 @@ func TestDataMsgSamplesExactPercent(t *testing.T) {
 		t.Fatalf("pctSamples = %+v, want two samples ending at 18.4", m.pctSamples)
 	}
 }
+
+// dataMsg.deferRaw must land on model.deferRaw, alongside conductRaw, so the
+// chip has something to render off the very next poll.
+func TestDataMsgCopiesDeferRaw(t *testing.T) {
+	m := model{}
+	next, _ := m.Update(dataMsg{time: time.Now(), conductRaw: "standby", deferRaw: "1"})
+	got := next.(model)
+	if got.deferRaw != "1" {
+		t.Errorf("deferRaw = %q, want %q", got.deferRaw, "1")
+	}
+}
+
+// The d key toggles the mark on this head's own session when running inside
+// tmux (selfPane set), same as space toggles conduct mode.
+func TestKeyDTogglesDeferInsideTmux(t *testing.T) {
+	m := model{ready: true, selfPane: "%1", deferRaw: ""}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd == nil {
+		t.Fatal("d must issue a toggle cmd inside tmux")
+	}
+}
+
+// Outside tmux there is no session to mark, so d must be a no-op — same
+// contract as space's conduct toggle.
+func TestKeyDNoopOutsideTmux(t *testing.T) {
+	m := model{ready: true, selfPane: ""}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Error("d must be a no-op outside tmux")
+	}
+}
+
+// The defer chip renders next to the conduct chip in both statusbar layouts
+// once the mark is set.
+func TestRenderStatusbarShowsDeferChip(t *testing.T) {
+	now := time.Now()
+	m := model{ready: true, width: 500, height: 4, deferRaw: "1"}
+	line := renderStatusbar(m, now, "")
+	if !strings.Contains(line, "defer") {
+		t.Errorf("renderStatusbar = %q, want it to contain the defer chip", line)
+	}
+}
+
+func TestRenderStateLineShowsDeferChip(t *testing.T) {
+	now := time.Now()
+	m := model{ready: true, width: 500, height: 4, deferRaw: "1"}
+	line := renderStateLine(m, now)
+	if !strings.Contains(line, "defer") {
+		t.Errorf("renderStateLine = %q, want it to contain the defer chip", line)
+	}
+}
+
+// Unset (or unreadable) mark means no chip in either layout.
+func TestRenderLinesOmitDeferChipWhenUnset(t *testing.T) {
+	now := time.Now()
+	m := model{ready: true, width: 500, height: 4}
+	if line := renderStatusbar(m, now, ""); strings.Contains(line, "defer") {
+		t.Errorf("renderStatusbar = %q, want no defer chip", line)
+	}
+	if line := renderStateLine(m, now); strings.Contains(line, "defer") {
+		t.Errorf("renderStateLine = %q, want no defer chip", line)
+	}
+}

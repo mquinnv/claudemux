@@ -254,6 +254,11 @@ type model struct {
 	// render time (not poll time) so its heartbeat keeps decaying against the
 	// clock even if polls stall — see conductChip.
 	conductRaw string
+	// deferRaw is the last-read @claudemux_defer value, "1" when this
+	// session is marked deferred, "" when unset/unreadable. Unlike
+	// conductRaw there is no pending/optimistic layer for it — see the
+	// defer-toggle brief: a one-poll lag on the chip is fine.
+	deferRaw string
 	// conductPendingMode holds the mode this head's space key just asked the
 	// lobby for, shown in place of conductRaw until a poll confirms it or
 	// conductPendingUntil passes. Without it the chip would answer a keypress
@@ -937,9 +942,11 @@ func (m model) pollData() tea.Cmd {
 		// everything else. Only inside tmux (selfPane set); a failed or absent
 		// read is "" and the chip simply stays off.
 		conductRaw := ""
+		deferRaw := ""
 		if selfPane != "" {
 			cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
 			conductRaw = readConductOption(cctx)
+			deferRaw = readDeferOption(cctx, selfPane)
 			ccancel()
 		}
 		return dataMsg{
@@ -949,6 +956,7 @@ func (m model) pollData() tea.Cmd {
 			rateLimits:   rl,
 			rateLimitErr: rlErr,
 			conductRaw:   conductRaw,
+			deferRaw:     deferRaw,
 		}
 	}
 }
@@ -960,6 +968,7 @@ type dataMsg struct {
 	rateLimits   RateLimits
 	rateLimitErr error
 	conductRaw   string // raw @claudemux_conducting value, "" when unset/unreadable
+	deferRaw     string // raw @claudemux_defer value, "" when unset/unreadable
 }
 
 // turnEndedByIdle reports whether kind reads as "the main thread's turn
@@ -1225,6 +1234,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.conductPendingUntil = now.Add(conductPendingWindow)
 			return m, requestConductToggleCmd(now)
+		case "d":
+			// Toggle this session's own defer mark. Unlike space there is no
+			// pending/optimistic layer here — deferRaw simply lags one poll
+			// behind a keypress, which the brief accepts. No-op outside tmux:
+			// there is no owning session to mark.
+			if m.selfPane == "" {
+				return m, nil
+			}
+			return m, setDeferCmd(m.selfPane, m.deferRaw != "1")
 		case "x":
 			return m.teardownKey()
 		case "X":
@@ -1321,6 +1339,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ahead of the rotation early-returns below: the conduct chip must
 		// track the lobby regardless of which transcript this head is bound to.
 		m.conductRaw = msg.conductRaw
+		m.deferRaw = msg.deferRaw
 		// A poll that agrees with an outstanding space retires it early, so the
 		// chip stops being a promise the moment it becomes a fact. Compared by
 		// conductOn, not by mode string: the lobby may answer a "conducting"
@@ -1880,6 +1899,9 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if c := conductChip(m.conductRawFor(now), now); c != "" {
 		leftParts = append(leftParts, c)
 	}
+	if c := deferChip(m.deferRaw); c != "" {
+		leftParts = append(leftParts, c)
+	}
 	if chip == noWorktreeWarning {
 		// No glyph: this message is about having NO worktree, and the branch
 		// chip below still renders beside it.
@@ -2205,6 +2227,9 @@ func renderStateLine(m model, now time.Time) string {
 		parts = append(parts, c)
 	}
 	if c := conductChip(m.conductRawFor(now), now); c != "" {
+		parts = append(parts, c)
+	}
+	if c := deferChip(m.deferRaw); c != "" {
 		parts = append(parts, c)
 	}
 
