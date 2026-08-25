@@ -33,7 +33,7 @@ func TestBinChangedStatsRealFile(t *testing.T) {
 	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	launch, ok := binStampOf(p)
+	launch, ok := launchBinStampOf(p)
 	if !ok {
 		t.Fatal("stampOf failed")
 	}
@@ -58,5 +58,67 @@ func TestBinChangedStatsRealFile(t *testing.T) {
 	}
 	if binChanged(launch, time.Now()) {
 		t.Error("stat failure must read as unchanged")
+	}
+}
+
+// TestBinChangedFollowsSymlinkSwap covers a Homebrew-style upgrade: the launch
+// path is a symlink into a versioned directory, and upgrading repoints the
+// symlink at a NEW file and deletes the old one. Stamping only the resolved
+// path made that invisible — the old path's stat failed forever, and "failed
+// stat reads as unchanged" meant a brew-installed fleet never restarted (a
+// 1.2.0 lobby and head sat under a 1.3.0 symlink, reading a meters file that
+// no longer existed).
+func TestBinChangedFollowsSymlinkSwap(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "1.2.0", "bin")
+	neu := filepath.Join(dir, "1.3.0", "bin")
+	for _, p := range []string{old, neu} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(filepath.Base(filepath.Dir(p))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(dir, "claudemux-head")
+	if err := os.Symlink(old, link); err != nil {
+		t.Fatal(err)
+	}
+	launch, ok := launchBinStampOf(link)
+	if !ok {
+		t.Fatal("launch stamp failed")
+	}
+	now := time.Now()
+	if binChanged(launch, now) {
+		t.Fatal("unchanged symlink reported as changed")
+	}
+	// The upgrade: repoint the symlink, delete the old build. The new file's
+	// mtime is backdated so the settle window has already passed.
+	settled := now.Add(-binSettle - time.Second)
+	if err := os.Chtimes(neu, settled, settled); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(neu, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(old)); err != nil {
+		t.Fatal(err)
+	}
+	if !binChanged(launch, now) {
+		t.Fatal("symlink repointed at a new build was not detected")
+	}
+	// A dangling symlink (mid-upgrade) still reads as unchanged: the next
+	// tick re-checks, and exec'ing nothing would kill the pane.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "missing"), link); err != nil {
+		t.Fatal(err)
+	}
+	if binChanged(launch, now) {
+		t.Fatal("dangling symlink reported as changed")
 	}
 }

@@ -916,7 +916,7 @@ func TestSwitchboardShouldAutoRestart(t *testing.T) {
 	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stamp, _ := binStampOf(p)
+	stamp, _ := launchBinStampOf(p)
 	m := newSwModel("%1")
 	m.launchBin, m.launchBinOK = stamp, true
 	now := time.Now()
@@ -961,7 +961,7 @@ func TestSwitchboardShouldAutoRestartLiveSnooze(t *testing.T) {
 	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stamp, _ := binStampOf(p)
+	stamp, _ := launchBinStampOf(p)
 	m := newSwModel("%1")
 	m.launchBin, m.launchBinOK = stamp, true
 	m.cond.phase = swParked

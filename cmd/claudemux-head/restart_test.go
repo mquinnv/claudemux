@@ -47,7 +47,7 @@ func TestShouldAutoRestart(t *testing.T) {
 	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stamp, ok := binStampOf(p)
+	stamp, ok := launchBinStampOf(p)
 	if !ok {
 		t.Fatal("stampOf failed")
 	}

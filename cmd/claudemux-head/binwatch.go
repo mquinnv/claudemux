@@ -21,24 +21,43 @@ const binSettle = 2 * time.Second
 
 // binStamp identifies one on-disk build of this binary.
 type binStamp struct {
-	path  string
+	// exe is the path the process was launched through, symlinks intact.
+	// Every check re-resolves it, because an upgrade can replace the binary
+	// two ways: `go install` rewrites the file at the resolved path in place,
+	// while Homebrew repoints the symlink at a NEW versioned file and deletes
+	// the old one. Stamping only the resolved path caught the first and was
+	// blind to the second — the old path's stat failed forever, and a
+	// brew-installed fleet never restarted.
+	exe   string
+	path  string // resolved at stamp time
 	mtime time.Time
 	size  int64
 }
 
-// launchBinStamp stamps the binary this process is running, symlinks resolved
-// first for the same reason siblingOfExecutable does. ok=false when anything
-// fails; callers then never auto-restart, the safe default.
+// launchBinStamp stamps the binary this process is running. ok=false when
+// anything fails; callers then never auto-restart, the safe default.
 func launchBinStamp() (binStamp, bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return binStamp{}, false
 	}
+	return launchBinStampOf(exe)
+}
+
+// launchBinStampOf stamps whatever exe resolves to right now, symlinks
+// resolved for the same reason siblingOfExecutable does, and remembers exe
+// itself so later checks can follow a repointed link.
+func launchBinStampOf(exe string) (binStamp, bool) {
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
 		return binStamp{}, false
 	}
-	return binStampOf(resolved)
+	st, ok := binStampOf(resolved)
+	if !ok {
+		return binStamp{}, false
+	}
+	st.exe = exe
+	return st, true
 }
 
 func binStampOf(path string) (binStamp, bool) {
@@ -49,21 +68,28 @@ func binStampOf(path string) (binStamp, bool) {
 	return binStamp{path: path, mtime: fi.ModTime(), size: fi.Size()}, true
 }
 
-// binChanged reports whether the binary at launch.path has been replaced and
-// settled. A failed stat (deleted, or mid-replace) reads as unchanged — the
-// caller polls, so the next tick re-checks.
+// binChanged reports whether the binary behind launch.exe has been replaced
+// and settled — rewritten in place, or the link moved to another file. A
+// failed resolve or stat (deleted, dangling, or mid-replace) reads as
+// unchanged — the caller polls, so the next tick re-checks, and exec'ing a
+// path that is not there would kill the pane.
 func binChanged(launch binStamp, now time.Time) bool {
-	cur, ok := binStampOf(launch.path)
+	resolved, err := filepath.EvalSymlinks(launch.exe)
+	if err != nil {
+		return false
+	}
+	cur, ok := binStampOf(resolved)
 	if !ok {
 		return false
 	}
 	return binChangedStamps(launch, cur, now)
 }
 
-// binChangedStamps is the pure comparison: replaced means mtime or size
-// moved; settled means the new mtime is at least binSettle in the past.
+// binChangedStamps is the pure comparison: replaced means the link now lands
+// on a different file, or the same file's mtime or size moved; settled means
+// the new mtime is at least binSettle in the past.
 func binChangedStamps(launch, cur binStamp, now time.Time) bool {
-	if cur.mtime.Equal(launch.mtime) && cur.size == launch.size {
+	if cur.path == launch.path && cur.mtime.Equal(launch.mtime) && cur.size == launch.size {
 		return false
 	}
 	return now.Sub(cur.mtime) >= binSettle
