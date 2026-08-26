@@ -97,6 +97,7 @@ a top-level **`toolUseResult`** — a sibling of `message`, read exactly like th
 | async agent | `toolUseResult.isAsync == true` | `toolUseResult.agentId` |
 | forked background skill | `toolUseResult.background == true` | `toolUseResult.agentId` |
 | resumed agent | `toolUseResult.resumedAgentId` is a non-empty string | that string |
+| queued message | `toolUseResult.success` with a `pin.id`, and none of the keys above | `toolUseResult.pin.id` |
 
 Verified across all 1915 transcripts under `~/.claude/projects` on this machine:
 
@@ -126,15 +127,40 @@ shape — `resumedAgentId`, a non-empty string, with **neither `isAsync` nor
 or after the harness reports *"No completion record was found for background agent …
 from the previous session"*. The resumed agent runs in the background, writes the same
 `subagents/agent-<id>.jsonl` liveness file, and notifies under that same id, so it
-follows the agent expiry regime. **203** of these exist across the 1915 transcripts on
+follows the agent expiry regime. **270** of these exist across the 2008 transcripts on
 this machine, all with `success: true` and a string id — captured as
 `testdata/launch-agent-resume.jsonl`. `SendMessage`'s other two outcomes carry no such
-key: a message *queued* to an agent that is already running writes `pin` and a
-"Message queued for delivery to …" message (38 observed — nothing starts, and whatever
-started that agent is already tracked), and an unreachable recipient writes
-`success: false` with no `pin` at all. Before detection learned this shape, a session
-whose only running work was a resumed agent published `Idle` to the switchboard for
-the agent's whole life.
+key: a message *queued* for the recipient's next tool round (below), and an unreachable
+recipient, which writes `success: false` with no `pin` at all. Before detection learned
+this shape, a session whose only running work was a resumed agent published `Idle` to
+the switchboard for the agent's whole life.
+
+Added 2026-08-26: the **queued `SendMessage`** — `success: true`, a `pin` echoing the
+recipient's id, the message *"Message queued for delivery to … at its next tool round"*,
+and no `resumedAgentId` (**53** observed; captured as
+`testdata/launch-agent-queued.jsonl`). This was read as "nothing started, and whatever is
+running is already tracked", on the reasoning that an agent able to take delivery must
+already be running. That reasoning fails once the tracker has *retired* the agent, which
+a completion notification does:
+
+```
+launch (isAsync)            -> tracked
+task-notification completed -> RETIRED
+SendMessage, queued         -> the agent runs again, under no launch record
+```
+
+Observed live in `boats-work` on 2026-08-26: the session nudged an agent that had just
+notified, the agent worked on for twenty minutes, and nothing in the transcript recorded
+that run except the queued record. Nothing distinguishes this from the harmless case at
+parse time, so the queued id is tracked — for an id already tracked that is a no-op, and
+it deliberately does **not** restart the launch clock the switchboard shows.
+
+Its weakness is that a `pin` also comes back for a recipient that is not one of this
+session's agents (another session, a teammate), where nothing at all starts. The liveness
+file settles it: an agent taking delivery has written `subagents/agent-<id>.jsonl` long
+since, so a queued launch counts only while that file exists and is fresh — no spawn
+grace, since there is no spawn. A non-agent recipient has no such file and is dropped on
+the next poll rather than hiding the session from the conductor for two minutes.
 
 This is structural in a way no text rule can be: a command's stdout lands *inside*
 `toolUseResult.stdout` and cannot add a key beside it, so no output — no matter what it
@@ -246,7 +272,9 @@ day.
    - if the file does not exist yet, the launch is within `bgAgentSpawnGrace` (2 minutes)
      of now — the ordinary gap between the launch record and the harness creating the
      file; anything older with still no file is a launch that predates a head restart, its
-     agent long gone;
+     agent long gone. A launch inferred from a **queued `SendMessage`** gets no such
+     grace: there was no spawn, so a missing file means the recipient was never an agent
+     of this session;
    - the launch is within `bgAgentMaxAge` (24 hours) of now regardless of liveness — a
      backstop against a wedged agent that keeps writing forever.
 
