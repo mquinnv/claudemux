@@ -129,9 +129,8 @@ func bgResumeResult(id string) map[string]any {
 	}
 }
 
-// bgQueuedResult is the harness record on a SendMessage to an agent that is
-// ALREADY running: the message is queued, nothing is launched, and the record
-// carries a pin but no resumedAgentId.
+// bgQueuedResult is the harness record on a SendMessage the recipient will
+// pick up at its next tool round: a pin echoing the id, and no resumedAgentId.
 func bgQueuedResult(id string) map[string]any {
 	return map[string]any{
 		"success": true,
@@ -252,9 +251,18 @@ func bgAssertFixtureRegisters(t *testing.T, fixture, wantID string) {
 // from the previous session". The harness runs the resumed agent in the
 // background exactly like a fresh async launch, and it notifies under the same
 // id, but the record says neither isAsync nor background — the id comes back
-// under `resumedAgentId` instead. 203 of these exist in this machine's
+// under `resumedAgentId` instead. 270 of these exist in this machine's
 // transcripts. Missing the shape is what made a session with a resumed agent
 // working for hours publish Idle to the switchboard.
+//
+// launch-agent-queued is the fifth, and the weakest: a SendMessage the harness
+// only queued — "at its next tool round", success, a pin, no resumedAgentId.
+// Captured from the session that exposed it, which had already consumed its
+// agent's completion notification (so the id was retired) and then nudged that
+// same agent back into a twenty-minute run while publishing Idle throughout.
+// See TestBgQueuedSendMessageRevivesARetiredAgent for the sequence and
+// TestBgQueuedSendMessageWithoutAnAgentTranscriptIsNotALaunch for the guard
+// that keeps a pin from a non-agent recipient out.
 func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 	tests := []struct {
 		fixture string
@@ -264,6 +272,7 @@ func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 		{"launch-agent.jsonl", "a99a8221a00c2d373"},
 		{"launch-skill-fork.jsonl", "aaba848fe04645123"},
 		{"launch-agent-resume.jsonl", "aad446f291008f662"},
+		{"launch-agent-queued.jsonl", "aae6f316ac814766f"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
@@ -863,17 +872,72 @@ func TestBgResumedAgentFollowsAgentLiveness(t *testing.T) {
 	}
 }
 
-// The other SendMessage outcome: the target agent is already running, so the
-// message is only queued. Nothing was launched — the session's busy-ness is
-// already accounted for by the launch that started that agent — and the record
-// says so by carrying a pin but no resumedAgentId.
-func TestBgQueuedSendMessageIsNotALaunch(t *testing.T) {
+// The other SendMessage outcome: the harness only QUEUES the message, for the
+// recipient's next tool round. This was read as "nothing started", on the
+// reasoning that an agent taking delivery must already be running and so
+// already tracked. The session below is why that reasoning fails — it is the
+// boats-work sequence that made claudemux publish Idle while an agent worked
+// on for twenty minutes:
+//
+//	launch (isAsync)            -> tracked
+//	task-notification completed -> RETIRED
+//	SendMessage, queued         -> the agent runs again, under no launch record
+//
+// Nothing else in the transcript marks that third step, so the queued record
+// has to count. The agent's own transcript is what says it is real.
+func TestBgQueuedSendMessageRevivesARetiredAgent(t *testing.T) {
+	launch := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agentrev", "2026-08-17T10:00:00Z"), launch)
+	b.observe([]Event{bgDoneEvent("agentrev")}, launch.Add(5*time.Minute))
+	if n, _ := b.outstanding(launch.Add(5 * time.Minute)); n != 0 {
+		t.Fatalf("outstanding = %d, want 0: the completion notification must retire the launch", n)
+	}
+
+	nudge := launch.Add(6 * time.Minute)
+	b.observe(bgSendMessageLaunch(t, "agentrev", "2026-08-17T10:06:00Z", bgQueuedResult("agentrev")), nudge)
+	bgTouchAgentFile(t, b.subagentsDir, "agentrev", nudge)
+	now := nudge.Add(20 * time.Minute)
+	bgTouchAgentFile(t, b.subagentsDir, "agentrev", now.Add(-1*time.Minute))
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: a queued nudge set the agent running again", n)
+	}
+}
+
+// The same record comes back for a message queued to something that is not one
+// of this session's agents at all — another session, a teammate — and that
+// starts no background work here. There is no launch to grant a spawn grace
+// to, so the absence of an agent transcript settles it immediately rather than
+// hiding the session from the conductor for two minutes.
+func TestBgQueuedSendMessageWithoutAnAgentTranscriptIsNotALaunch(t *testing.T) {
 	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	b := newBgTracker()
 	b.subagentsDir = t.TempDir()
-	b.observe(bgSendMessageLaunch(t, "agentrun", "2026-08-17T10:00:00Z", bgQueuedResult("agentrun")), now)
+	b.observe(bgSendMessageLaunch(t, "not-an-agent", "2026-08-17T10:00:00Z", bgQueuedResult("not-an-agent")), now)
 	if n, _ := b.outstanding(now); n != 0 {
-		t.Errorf("outstanding = %d, want 0: queueing a message to a running agent launches nothing", n)
+		t.Errorf("outstanding = %d, want 0: nothing this session launched writes agent-not-an-agent.jsonl", n)
+	}
+}
+
+// A queued message to work already being counted must not restart the clock:
+// the switchboard shows the Background age from the oldest outstanding launch,
+// and a session that nudges a long-running agent every few minutes would
+// otherwise always look freshly busy.
+func TestBgQueuedSendMessageKeepsTheOriginalLaunchTime(t *testing.T) {
+	launch := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agentbusy", "2026-08-17T10:00:00Z"), launch)
+	nudge := launch.Add(30 * time.Minute)
+	b.observe(bgSendMessageLaunch(t, "agentbusy", "2026-08-17T10:30:00Z", bgQueuedResult("agentbusy")), nudge)
+	bgTouchAgentFile(t, b.subagentsDir, "agentbusy", nudge)
+	n, oldest := b.outstanding(nudge)
+	if n != 1 {
+		t.Fatalf("outstanding = %d, want 1", n)
+	}
+	if !oldest.Equal(launch) {
+		t.Errorf("oldest = %v, want %v: the nudge is not a new piece of work", oldest, launch)
 	}
 }
 

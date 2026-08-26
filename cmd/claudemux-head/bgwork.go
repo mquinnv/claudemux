@@ -15,12 +15,14 @@ import (
 // conductor into a session that is busy.
 //
 // Whether a launch happened is decided by the harness's own record on the
-// tool_result entry — Event.BgTaskID and Event.BgAgentID, read from the
-// top-level `toolUseResult` — never by the result's text. That covers all four
-// ways background work starts: a backgrounded shell, an async agent, a forked
-// background skill, and a SendMessage that RESUMES a stopped agent (see
-// extractLaunch for each record's shape). Completions are recognized by the
-// notification that carries the same id back. See
+// tool_result entry — Event.BgTaskID, Event.BgAgentID and
+// Event.BgQueuedAgentID, read from the top-level `toolUseResult` — never by
+// the result's text. That covers all five ways background work starts: a
+// backgrounded shell, an async agent, a forked background skill, a SendMessage
+// that RESUMES a stopped agent, and a SendMessage the harness only QUEUED,
+// which sets an agent running again after its previous run has already
+// notified (see extractLaunch for each record's shape). Completions are
+// recognized by the notification that carries the same id back. See
 // docs/superpowers/specs/2026-08-11-background-work-state-design.md for the
 // verified event shapes.
 //
@@ -58,6 +60,12 @@ const bgNotificationPrefix = "<task-notification>"
 type bgLaunch struct {
 	ID    string
 	Agent bool
+	// Queued marks the weak record: a SendMessage the harness only queued,
+	// which starts an agent running again when its previous run had already
+	// notified, but which is also what a message to a non-agent recipient
+	// looks like. Such a launch counts only while the agent's own transcript
+	// proves it — no spawn grace, since the file is already there.
+	Queued bool
 }
 
 // bgLaunches returns the background work this event started. An entry
@@ -69,6 +77,9 @@ func bgLaunches(e Event) []bgLaunch {
 	}
 	if e.BgAgentID != "" {
 		ids = append(ids, bgLaunch{ID: e.BgAgentID, Agent: true})
+	}
+	if e.BgQueuedAgentID != "" {
+		ids = append(ids, bgLaunch{ID: e.BgQueuedAgentID, Agent: true, Queued: true})
 	}
 	return ids
 }
@@ -121,6 +132,10 @@ const (
 type bgTask struct {
 	at    time.Time
 	agent bool
+	// queued is bgLaunch.Queued carried forward: this entry rests on a
+	// queued SendMessage rather than a launch record, so it never gets the
+	// spawn grace.
+	queued bool
 }
 
 // bgTracker holds the background tasks a session has launched and not yet
@@ -173,7 +188,13 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 			delete(b.tasks, id)
 		}
 		for _, l := range bgLaunches(e) {
-			b.tasks[l.ID] = bgTask{at: at, agent: l.Agent}
+			// A queued message to work already being counted changes
+			// nothing — least of all when that work started, which is what
+			// the switchboard shows as the session's Background age.
+			if _, tracked := b.tasks[l.ID]; tracked && l.Queued {
+				continue
+			}
+			b.tasks[l.ID] = bgTask{at: at, agent: l.Agent, queued: l.Queued}
 		}
 	}
 }
@@ -210,7 +231,12 @@ func (b *bgTracker) alive(id string, task bgTask, now time.Time) bool {
 	}
 	fi, err := os.Stat(filepath.Join(b.subagentsDir, "agent-"+id+".jsonl"))
 	if err != nil {
-		return now.Sub(task.at) <= bgAgentSpawnGrace
+		// No file yet. A real launch is allowed the moment it takes the
+		// harness to create one; a queued SendMessage is not, because an
+		// agent already running has written its transcript long since, so a
+		// missing file means the recipient was never an agent of this
+		// session and nothing here is running.
+		return !task.queued && now.Sub(task.at) <= bgAgentSpawnGrace
 	}
 	return now.Sub(fi.ModTime()) <= bgAgentStallAge
 }

@@ -111,10 +111,16 @@ type Event struct {
 	// sibling of `message`, so no tool's output can forge one: a command's
 	// stdout lands inside `toolUseResult.stdout` and cannot add a key beside
 	// it. Empty when the entry is not a launch, which is nearly always.
-	BgTaskID    string
-	BgAgentID   string
-	IsSidechain bool // true for subagent (Task) entries — excluded from the worktree chip
-	RawLine     string
+	BgTaskID  string
+	BgAgentID string
+	// BgQueuedAgentID is the recipient of a SendMessage the harness only
+	// QUEUED — evidence that background work may be running, but not proof it
+	// is: the same record comes back for a message queued to something that is
+	// not one of this session's agents. It is kept apart from BgAgentID so
+	// bgTracker can hold it to a stricter liveness test. See extractLaunch.
+	BgQueuedAgentID string
+	IsSidechain     bool // true for subagent (Task) entries — excluded from the worktree chip
+	RawLine         string
 }
 
 type EventReader struct {
@@ -339,6 +345,10 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 		Background       bool   `json:"background"`
 		AgentID          string `json:"agentId"`
 		ResumedAgentID   string `json:"resumedAgentId"`
+		Success          bool   `json:"success"`
+		Pin              struct {
+			ID string `json:"id"`
+		} `json:"pin"`
 	}
 	if json.Unmarshal(toolUseResult, &res) != nil {
 		return
@@ -362,14 +372,29 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 	// and guarded on non-empty, so it can only ever add an id: a record that
 	// somehow carried both keys must not have its async agentId overwritten.
 	//
-	// The key is written ONLY on a resume: 203 of these across every transcript
-	// on this machine, all with success true and a string id. The other two
-	// SendMessage outcomes carry no such key — a message queued to an agent
-	// that is ALREADY running (nothing starts; the launch that started it is
-	// already tracked) and an unreachable recipient (nothing starts at all) —
-	// which is exactly the distinction wanted.
+	// The key is written ONLY on a resume: 270 of these across every transcript
+	// on this machine, all with success true and a string id. Neither of the
+	// other two SendMessage outcomes carries it — a message merely QUEUED to
+	// the recipient (below) and an unreachable recipient, whose record is
+	// success:false with no pin at all.
 	if res.ResumedAgentID != "" {
 		ev.BgAgentID = res.ResumedAgentID
+	}
+	// The queued outcome — "Message queued for delivery to <id> at its next
+	// tool round", success:true, a pin echoing the recipient's id, no
+	// resumedAgentId. This was read as "nothing started, and whatever is
+	// running was already tracked" until a session that had just consumed its
+	// agent's completion notification nudged that same agent with a queued
+	// message: the agent ran for another twenty minutes while the session,
+	// having retired the id on the notification, published Idle.
+	//
+	// So a queued message is a launch record too — but a weak one, because a
+	// pin also comes back for a recipient that is not this session's agent at
+	// all. Its id therefore lands in its own field, and bgTracker holds it to
+	// the strict liveness rule that distinguishes the two: a running agent has
+	// a recently-written transcript, and anything else has no file to find.
+	if ev.BgAgentID == "" && res.Success && res.Pin.ID != "" {
+		ev.BgQueuedAgentID = res.Pin.ID
 	}
 }
 
