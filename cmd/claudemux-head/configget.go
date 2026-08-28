@@ -84,6 +84,17 @@ func runConfigGet(args []string, stdout, stderr io.Writer) int {
 		return 3
 	}
 
+	// head.rows is DERIVED, not stored: it is how many rows HeadConfig's row
+	// toggles add up to, which is the number bin/claudemux pins the head pane
+	// to. Answered before configLookup because it is not a path through the
+	// struct at all — there is no `head: rows:` to write in config.yml, and
+	// KnownFields rejects one, so the launcher can only ever get the computed
+	// answer.
+	if args[0] == "head.rows" {
+		fmt.Fprintln(stdout, strconv.Itoa(cfg.Head.Rows()))
+		return 0
+	}
+
 	v, ok := configLookup(cfg, args[0])
 	if !ok {
 		return 1

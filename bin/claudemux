@@ -6,7 +6,8 @@
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
 #
 # Each directory gets its own session named after the directory basename.
-# Layout: claudemux-head is always a full-width, 4-row pane; `launch.layout`
+# Layout: claudemux-head is always a full-width pane, as many rows tall as its
+# configured context rows need (`head.rows`, 4 by default); `launch.layout`
 # in config.yml then chooses where claude and the optional shell go —
 # shell-right (default), no-shell, shell-bottom, or head-bottom. See
 # create_session's layout comment block below for what each one looks like.
@@ -807,11 +808,11 @@ create_session() {
   fi
   claude_cmd="${worktree_env}${claude_cmd}"
 
-  # claudemux-head (4 rows: first prompt, last prompt, state line, meters) is
-  # ALWAYS full window width and exactly 4 rows — the four `launch.layout`
-  # values (config.go's legalLayouts; empty/unrecognized here defaults to
-  # shell-right, defense only, the head validates) only move it and the
-  # optional shell:
+  # claudemux-head (state line, meters, and the context rows below them) is
+  # ALWAYS full window width and exactly $head_rows tall — the four
+  # `launch.layout` values (config.go's legalLayouts; empty/unrecognized here
+  # defaults to shell-right, defense only, the head validates) only move it and
+  # the optional shell:
   #   shell-right (default) — head across the top; claude below it; shell
   #     30% wide on the right.
   #   no-shell    — head across the top; claude below it; no shell pane.
@@ -820,13 +821,17 @@ create_session() {
   #   head-bottom — claude and shell side by side on top; head full-width
   #     across the bottom.
   # The 30%/20% are defaults: shell_size_for lets a project or config.yml
-  # replace them with any size tmux's `-l` accepts. The head's 4 rows are NOT
-  # configurable — that is what its four lines need.
+  # replace them with any size tmux's `-l` accepts. The head's height is NOT
+  # sized here and has no key of its own — it is exactly what the head's
+  # configured rows need, computed by the head itself (HeadConfig.Rows) and
+  # asked for as `head.rows`. Turning on head.show_first is therefore all it
+  # takes to get the row AND the line to draw it in; there is no second
+  # setting to leave out of step.
   # Track panes by ID — the short head pane never sits at a fixed positional
   # index across layouts, so positional indices would shift under us.
   #
   # Pane creation ORDER is what makes the head full width without a
-  # split-window -f: `split-window -v [-b] -l 4` run while the window still
+  # split-window -f: `split-window -v [-b] -l $head_rows` run while the window still
   # has a single column spans the whole width; run it after the claude|shell
   # split instead and it would only span claude's column. So in every layout
   # the head is split off claude FIRST, and the shell (if any) SECOND.
@@ -840,12 +845,24 @@ create_session() {
   # created with a command never draws a prompt at all, so there is nothing to
   # hide.
   local layout claude_pane head_pane shell_pane head_bin holder_cmd
-  local shell_size shell_cmd
+  local shell_size shell_cmd head_rows
   ch_config_get launch.layout
   layout="$CH_CONFIG_VALUE"
   case "$layout" in
     shell-right | no-shell | shell-bottom | head-bottom) ;;
     *) layout="shell-right" ;;
+  esac
+  # How tall the head pane has to be for the rows it is configured to draw.
+  # Derived by the head (HeadConfig.Rows), never written here: this is the same
+  # split that legalShellSize has to be maintained on both sides of, and one of
+  # those is enough. A broken config (ch_config_get returns "") or a build of
+  # claudemux-head predating the key falls back to 4 — the height every layout
+  # has always used, and still the minimum the head draws a full view in.
+  ch_config_get head.rows
+  head_rows="$CH_CONFIG_VALUE"
+  case "$head_rows" in
+    [1-9] | [1-9][0-9]) ;;
+    *) head_rows=4 ;;
   esac
   shell_size="$(shell_size_for "$layout" "$work_dir")"
   shell_cmd="$(shell_command_for "$work_dir")"
@@ -856,18 +873,18 @@ create_session() {
   shell_pane=""
   case "$layout" in
     shell-right)
-      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      head_pane="$(tmux split-window -v -b -l "$head_rows" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       shell_pane="$(tmux split-window -h -l "$shell_size" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       ;;
     no-shell)
-      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      head_pane="$(tmux split-window -v -b -l "$head_rows" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       ;;
     shell-bottom)
-      head_pane="$(tmux split-window -v -b -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      head_pane="$(tmux split-window -v -b -l "$head_rows" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       shell_pane="$(tmux split-window -v -l "$shell_size" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       ;;
     head-bottom)
-      head_pane="$(tmux split-window -v -l 4 -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
+      head_pane="$(tmux split-window -v -l "$head_rows" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       shell_pane="$(tmux split-window -h -l "$shell_size" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       ;;
   esac
@@ -906,13 +923,17 @@ create_session() {
   fi
   tmux select-pane -t "$claude_pane"
 
-  # Pin the head pane to exactly 4 rows. The `-l 4` at split time does NOT
-  # survive attach: with window-size=latest, attaching a client whose size
-  # differs from the tput-derived new-session size makes tmux redistribute
-  # pane heights proportionally, shrinking the head pane below 4 (losing the
-  # prompt lines and/or statusbar). A window-resized hook re-pins it to 4 on
-  # every resize — the attach included — so all four rows always render.
-  tmux set-hook -t "$session_name" window-resized "resize-pane -t $head_pane -y 4"
+  # Pin the head pane to exactly $head_rows rows. The `-l` at split time does
+  # NOT survive attach: with window-size=latest, attaching a client whose size
+  # differs from the tput-derived new-session size makes tmux redistribute pane
+  # heights proportionally, shrinking the head pane (losing the bottom context
+  # rows and/or the statusbar). A window-resized hook re-pins it on every
+  # resize — the attach included — so every configured row always renders.
+  #
+  # The height is baked into the hook at creation, so a session already running
+  # keeps the height it launched with when head.rows changes. That is the same
+  # deal as launch.layout and shell_size: the arrangement is decided at launch.
+  tmux set-hook -t "$session_name" window-resized "resize-pane -t $head_pane -y $head_rows"
 
   # Let the terminal tab track the tmux window name — claudemux-head renames the
   # window to the Haiku `tab` label as the session's focus settles. Set here so

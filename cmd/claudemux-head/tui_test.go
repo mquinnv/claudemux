@@ -1451,6 +1451,170 @@ func TestPromptRowLabelsAreFiveColumns(t *testing.T) {
 			t.Errorf("fallback label %q is %d columns, want 5", l, len(l))
 		}
 	}
+
+	// Same rule for the optional rows: they share renderPromptLine's fixed
+	// text column with the two above them.
+	m = model{
+		summary: Summary{Topic: "a", Now: "b"}, firstPrompt: "c", lastPrompt: "d",
+		showLast: true, showFirst: true,
+	}
+	for _, r := range m.contextRows() {
+		if len(r.label) != 5 {
+			t.Errorf("context row label %q is %d columns, want 5", r.label, len(r.label))
+		}
+	}
+}
+
+// The row order runs oldest-last: topic, now, last, first. `last` sits next to
+// the summary because it is the row that moves; `first` goes to the bottom,
+// where the pane drops rows first.
+func TestContextRowsOrderPutsLastBeforeFirst(t *testing.T) {
+	m := model{
+		summary:     Summary{Topic: "fixing the chip", Now: "running tests"},
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+		showLast:    true,
+		showFirst:   true,
+	}
+	rows := m.contextRows()
+
+	want := []contextRow{
+		{"topic", "fixing the chip"},
+		{"now  ", "running tests"},
+		{"last ", "go test ./..."},
+		{"first", "fix the worktree chip"},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("contextRows() returned %d rows, want %d: %+v", len(rows), len(want), rows)
+	}
+	for i := range want {
+		if rows[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, rows[i], want[i])
+		}
+	}
+}
+
+// head.show_first ships OFF, so the default pane is topic/now/last and nothing
+// below it — the shape HeadConfig.Rows sizes the pane to.
+func TestContextRowsDefaultOmitsFirst(t *testing.T) {
+	m := model{
+		summary:     Summary{Topic: "fixing the chip", Now: "running tests"},
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+		showLast:    true,
+	}
+	rows := m.contextRows()
+
+	if len(rows) != 3 {
+		t.Fatalf("contextRows() returned %d rows, want 3: %+v", len(rows), rows)
+	}
+	if rows[2].label != "last " {
+		t.Errorf("bottom row = %q, want the `last` row", rows[2].label)
+	}
+	for _, r := range rows {
+		if r.label == "first" {
+			t.Error("`first` row is present with show_first off")
+		}
+	}
+}
+
+// Both rows off is the pre-feature pane exactly: the two summary rows and
+// nothing else, which is what HeadConfig.Rows()==4 has to keep drawable.
+func TestContextRowsBothOffIsJustTheSummaryPair(t *testing.T) {
+	m := model{
+		summary:     Summary{Topic: "fixing the chip", Now: "running tests"},
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+	}
+	if rows := m.contextRows(); len(rows) != 2 {
+		t.Fatalf("contextRows() returned %d rows, want 2: %+v", len(rows), rows)
+	}
+}
+
+// On the keyless fallback the leading rows ALREADY are first/last, so the
+// toggles must not append a second copy of either prompt.
+func TestContextRowsSkipTogglesOnTheKeylessFallback(t *testing.T) {
+	m := model{
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+		showLast:    true,
+		showFirst:   true,
+	}
+	rows := m.contextRows()
+
+	if len(rows) != 2 {
+		t.Fatalf("fallback contextRows() returned %d rows, want 2 — the toggles duplicated a prompt: %+v", len(rows), rows)
+	}
+	if rows[0].label != "first" || rows[1].label != "last " {
+		t.Errorf("fallback rows = %q/%q, want first/last", rows[0].label, rows[1].label)
+	}
+}
+
+// The pane at its configured height draws every configured row, in order.
+func TestViewDrawsEveryContextRowAtItsConfiguredHeight(t *testing.T) {
+	m := model{
+		ready: true, width: 100, height: 6,
+		state:       State{Kind: StateIdle, Since: time.Now()},
+		summary:     Summary{Topic: "fixing the chip", Now: "running tests"},
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+		showLast:    true,
+		showFirst:   true,
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("View() produced %d lines, want 6:\n%s", len(lines), m.View())
+	}
+	for i, want := range []string{"fixing the chip", "running tests", "go test ./...", "fix the worktree chip"} {
+		if !strings.Contains(lines[i+2], want) {
+			t.Errorf("line %d = %q, want it to carry %q", i+2, lines[i+2], want)
+		}
+	}
+}
+
+// A pane SHORTER than its configuration drops from the bottom, keeping the
+// most specific rows. Nothing pins the pane's height beyond the launcher's
+// resize hook, so this is a real state, not a defensive one.
+func TestViewDropsBottomContextRowsWhenThePaneIsShort(t *testing.T) {
+	m := model{
+		ready: true, width: 100, height: 5,
+		state:       State{Kind: StateIdle, Since: time.Now()},
+		summary:     Summary{Topic: "fixing the chip", Now: "running tests"},
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+		showLast:    true,
+		showFirst:   true,
+	}
+	out := m.View()
+
+	if !strings.Contains(out, "go test ./...") {
+		t.Errorf("`last` must survive at height 5\ngot:\n%s", out)
+	}
+	if strings.Contains(out, "fix the worktree chip") {
+		t.Errorf("`first` is the bottom row and must be the one dropped at height 5\ngot:\n%s", out)
+	}
+}
+
+// A pane TALLER than its configuration pads with blank lines rather than
+// inventing rows — View's one-row-per-line invariant.
+func TestViewPadsBelowTheLastConfiguredRow(t *testing.T) {
+	m := model{
+		ready: true, width: 100, height: 7,
+		state:       State{Kind: StateIdle, Since: time.Now()},
+		summary:     Summary{Topic: "fixing the chip", Now: "running tests"},
+		firstPrompt: "fix the worktree chip",
+		lastPrompt:  "go test ./...",
+		showLast:    true,
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 7 {
+		t.Fatalf("View() produced %d lines, want 7:\n%s", len(lines), m.View())
+	}
+	for i, l := range lines[5:] {
+		if l != "" {
+			t.Errorf("line %d = %q, want blank padding", 5+i, l)
+		}
+	}
 }
 
 // With room for exactly one context row, the row that survives is the SUBJECT

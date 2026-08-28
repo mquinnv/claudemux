@@ -18,7 +18,7 @@ You run `claudemux`; `claudemux-head` is what it draws.
 
 ```
 ┌────────────────────────────────────────┐
-│ claudemux-head                (4 rows) │
+│ claudemux-head                (5 rows) │
 ├─────────────────────────────┬──────────┤
 │                             │          │
 │ claude                      │  shell   │
@@ -27,14 +27,21 @@ You run `claudemux`; `claudemux-head` is what it draws.
 ```
 
 `claudemux-head` gets a fixed-height pane across the FULL width of the top (it re-pins
-itself to 4 rows on every resize), `claude` runs below it, and a shell takes the right 30%
+itself on every resize), `claude` runs below it, and a shell takes the right 30%
 of the remaining width, spanning that remaining height — it sits beside `claude`, not
 beside the head.
 
 That 30% is the default, not a fixed quantity: `launch.shell_size` resizes the shell pane
 and `launch.shell_command` gives it something to run instead of a bare prompt — both
 settable per project. See **Sizing the shell pane** and **Running something in the shell
-pane** below. The head's 4 rows are not configurable; that is what its four lines need.
+pane** below.
+
+The head's height is not a setting of its own — it is however many rows its **context
+rows** need. Four are always there (state line, meters, and the `topic`/`now` pair);
+`head.show_last` adds the newest prompt below them and ships **on**, `head.show_first`
+adds the session's opening prompt at the bottom and ships **off**. So a default session
+gets 5 rows, and turning `show_first` on gets you 6 — the row and the line to draw it in
+arrive together, with nothing to keep in step by hand. See **Configuration** below.
 
 The head and `claude` panes **run their program directly** — they are not shells with a
 command typed into them, so a new session never shows a prompt or an echoed command. Two
@@ -403,6 +410,10 @@ summary:
   min_interval: 20s
   api_key_file: ~/.config/claudemux/env
 
+head:
+  show_last: true
+  show_first: false
+
 onepassword:
   default_account: ""
   accounts: {}
@@ -438,6 +449,35 @@ teardown:
   tab) to the short Haiku `tab` label, so a row of tabs reads like a list of what
   each session is doing. Default `true`. Set `false` to keep the status-pane
   summary but leave the window/tab untouched. Independent of `summary.enabled`.
+- `head.show_last` / `head.show_first` — the raw-prompt context rows the status pane
+  draws under its `topic`/`now` pair, top to bottom:
+
+  ```
+  ● idle 3m   sonnet-5   ⟳ summarizing         ← state line   (always)
+  ctx ███░░ 34%   5h ██░ 21%   wk █░ 12%       ← meters       (always)
+  topic ❯ head shows last/first prompt rows    ← topic        (always)
+  now   ❯ editing cmd/claudemux-head/tui.go    ← now          (always)
+  last  ❯ go test ./...                        ← head.show_last   (default on)
+  first ❯ add last/first rows to the head      ← head.show_first  (default off)
+  ```
+
+  `last` is next to the summary because it is the row that keeps moving — what you
+  actually typed, beside the summarizer's account of it — and `first` is at the bottom
+  because past the first few turns it has stopped changing. `show_first` ships off for
+  that reason; turn it on for long sessions that drift, where *what was I actually asked
+  for* stops being obvious from the topic.
+
+  **These also size the pane.** There is no separate height key: `claudemux` asks the head
+  for `head.rows` at launch (4, plus one per enabled row) and pins the pane to it on every
+  resize, so a row you turn on always has a line to draw in. `head.rows` is derived, not
+  writable — `head: rows:` in `config.yml` is an unknown-key startup error like any other
+  typo. A session already running keeps the height it launched with; the new one takes
+  effect on the next `claudemux` launch, the same as `launch.layout` and
+  `launch.shell_size`.
+
+  Both are ignored while the pane is on its keyless fallback — before the first summary
+  lands, or with no API key at all, the two rows under the meters already *are*
+  `first`/`last`, and a toggle would only print the same prompt twice.
 - `onepassword.default_account` / `onepassword.accounts` — consumed by `claudemux`, not
   by the TUI itself, to pick a 1Password account when injecting an `op_env`. Ships empty;
   see `.claudemux.yml` below.
@@ -733,10 +773,10 @@ nothing, same as `x`.
 
 **claudemux needs no `~/.tmux.conf`.** It sets everything it depends on per session at
 launch — the status-bar style, the split layout, and a `window-resized` hook that
-re-pins the `claudemux-head` pane to exactly 4 rows on every resize (including on
-attach). That hook exists specifically to cope with tmux's default `window-size latest`
+re-pins the `claudemux-head` pane to exactly `head.rows` rows on every resize (including
+on attach). That hook exists specifically to cope with tmux's default `window-size latest`
 behavior, which otherwise redistributes pane heights when a client attaches and would
-shrink the head pane below 4 rows, clipping the status line. So the tool works out of the
+shrink the head pane, clipping its bottom rows. So the tool works out of the
 box regardless of your tmux configuration; it doesn't read, require, or recommend any
 particular settings.
 

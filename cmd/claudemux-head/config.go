@@ -45,9 +45,64 @@ func (d Duration) MarshalYAML() (any, error) {
 // secret manager can serve over a FIFO, which YAML cannot be.
 type Config struct {
 	Summary     SummaryConfig     `yaml:"summary"`
+	Head        HeadConfig        `yaml:"head"`
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
 	Launch      LaunchConfig      `yaml:"launch"`
 	Teardown    TeardownConfig    `yaml:"teardown"`
+}
+
+// HeadConfig picks which context rows the status pane draws under its state and
+// meters lines. It is also what SIZES the pane: bin/claudemux asks for
+// `head.rows` at launch and pins the pane to that many rows, so turning a row
+// on is enough to make it visible. There is deliberately no second height
+// setting to keep in step — and so no way to configure a row the pane has no
+// room to draw.
+//
+// The two rows directly under the meters (topic/now, or the raw first/last
+// prompts before a summary lands) are not optional: they are the pane's reason
+// to be more than a statusbar. These are the rows BELOW them.
+type HeadConfig struct {
+	// ShowLast draws the newest prompt as a third context row. Default true.
+	// `now` says what the session is doing in the summarizer's words; this says
+	// what you actually typed to get it there, which is what you reach for when
+	// the summary reads wrong or has gone stale.
+	//
+	// Ignored while the pane is on its keyless fallback, where the two rows
+	// above ALREADY are first/last — a third row would print `last` twice.
+	ShowLast bool `yaml:"show_last"`
+	// ShowFirst draws the prompt that opened the session as a fourth context
+	// row. Default false, and deliberately the one that ships off: past the
+	// first few turns the opening prompt is the row that has stopped changing,
+	// which makes it the hardest row to justify a permanent line of pane height
+	// for. Turn it on for long sessions that drift, where "what was I actually
+	// asked for" stops being obvious from the topic.
+	//
+	// Ignored on the keyless fallback, same as ShowLast.
+	ShowFirst bool `yaml:"show_first"`
+}
+
+// headBaseRows is the pane height HeadConfig adds to: the state line, the
+// meters line, and the two summary rows. Every bin/claudemux layout gets at
+// least these.
+const headBaseRows = 4
+
+// Rows is the pane height this configuration needs — what `claudemux-head
+// config get head.rows` prints, and what bin/claudemux pins the head pane to on
+// every resize.
+//
+// Deliberately computed HERE rather than written out in shell. The launcher
+// already re-implements one config shape by hand (legalShellSize) and has to be
+// kept in step with it; this one stays in Go, and the launcher only has to know
+// how to ask.
+func (h HeadConfig) Rows() int {
+	rows := headBaseRows
+	if h.ShowLast {
+		rows++
+	}
+	if h.ShowFirst {
+		rows++
+	}
+	return rows
 }
 
 type SummaryConfig struct {
@@ -167,6 +222,9 @@ func defaultConfig() Config {
 			Model:       "claude-haiku-4-5",
 			MinInterval: Duration{20 * time.Second},
 			TabTitle:    true,
+		},
+		Head: HeadConfig{
+			ShowLast: true,
 		},
 		Teardown: TeardownConfig{
 			Command: "/done",

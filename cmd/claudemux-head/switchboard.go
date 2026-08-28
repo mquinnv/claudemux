@@ -34,8 +34,8 @@ type swSession struct {
 	// ClaudePane is the tmux pane id running claude, "" when the session has
 	// none. The lobby previews this pane rather than the session's active one:
 	// a session left focused on its shell would preview a shell prompt, and
-	// one left on its head pane would preview the four rows the lobby row
-	// already summarizes.
+	// one left on its head pane would preview the rows the lobby row already
+	// summarizes.
 	ClaudePane string
 	// HeadPane is the session's claudemux-head pane. The fleet-restart key
 	// types `R` into it — and must never type into the claude pane, where

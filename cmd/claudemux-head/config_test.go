@@ -377,6 +377,76 @@ func TestTeardownCommandDefaultsToDone(t *testing.T) {
 	}
 }
 
+// The shipped default is `last` on and `first` off: the newest prompt is the
+// row that keeps moving and earns its line of pane height, the opening prompt
+// is the one that stops changing. Five rows, not six.
+func TestHeadRowDefaults(t *testing.T) {
+	cfg := defaultConfig()
+	if !cfg.Head.ShowLast {
+		t.Error("default head.show_last = false, want true")
+	}
+	if cfg.Head.ShowFirst {
+		t.Error("default head.show_first = true, want false")
+	}
+	if got := cfg.Head.Rows(); got != 5 {
+		t.Errorf("default head.rows = %d, want 5", got)
+	}
+}
+
+// Rows is the height bin/claudemux pins the pane to, so every combination has
+// to answer with the height that combination actually draws in — one row short
+// and the bottom row is configured but never visible.
+func TestHeadRowsCountsEnabledRows(t *testing.T) {
+	tests := []struct {
+		last, first bool
+		want        int
+	}{
+		{false, false, 4},
+		{true, false, 5},
+		{false, true, 5},
+		{true, true, 6},
+	}
+	for _, tt := range tests {
+		h := HeadConfig{ShowLast: tt.last, ShowFirst: tt.first}
+		if got := h.Rows(); got != tt.want {
+			t.Errorf("HeadConfig{last:%v first:%v}.Rows() = %d, want %d", tt.last, tt.first, got, tt.want)
+		}
+	}
+}
+
+// show_last defaults to TRUE, so turning it off is the case that has to survive
+// decoding rather than being re-defaulted the way an absent key is.
+func TestHeadShowLastFalseIsPreserved(t *testing.T) {
+	writeConfig(t, "head:\n  show_last: false\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Head.ShowLast {
+		t.Error("head.show_last = true, want false")
+	}
+	if got := cfg.Head.Rows(); got != 4 {
+		t.Errorf("head.rows = %d, want 4", got)
+	}
+}
+
+func TestHeadShowFirstOverride(t *testing.T) {
+	writeConfig(t, "head:\n  show_first: true\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !cfg.Head.ShowFirst {
+		t.Error("head.show_first = false, want true")
+	}
+	// show_last is absent, so it keeps its default: both rows, six high.
+	if got := cfg.Head.Rows(); got != 6 {
+		t.Errorf("head.rows = %d, want 6", got)
+	}
+}
+
 // An explicitly empty command is a legal opt-out (press x becomes a gated
 // exit-and-kill), so it must survive decoding rather than being re-defaulted.
 func TestTeardownCommandEmptyStringIsPreserved(t *testing.T) {

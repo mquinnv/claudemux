@@ -284,6 +284,13 @@ type model struct {
 	lastKeyAttemptAt   time.Time
 	minSummaryInterval time.Duration
 	tabTitle           bool
+	// showLast/showFirst are head.show_last / head.show_first: the raw-prompt
+	// context rows drawn under the summary pair. bin/claudemux sizes the pane
+	// from the same two values (HeadConfig.Rows), so a row turned on here has
+	// the height to render in — but View still sizes to the pane it actually
+	// has, since nothing stops a user resizing it by hand.
+	showLast  bool
+	showFirst bool
 	// tabPinned holds the window name and the session's project colors at
 	// their launch-time values, suppressing the summary-driven rename until
 	// it is toggled off. Deliberately not persisted: a head restart already
@@ -440,6 +447,8 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		summaryCfg:         cfg.Summary,
 		minSummaryInterval: cfg.Summary.MinInterval.Duration,
 		tabTitle:           cfg.Summary.TabTitle,
+		showLast:           cfg.Head.ShowLast,
+		showFirst:          cfg.Head.ShowFirst,
 		teardownCmdText:    cfg.Teardown.Command,
 		// Init fires the seed summarize call when summarizer != nil and a
 		// session is actually bound (see Init below); this flag must already
@@ -1670,28 +1679,24 @@ func (m model) View() string {
 		lines = []string{renderStatusbar(m, now, m.worktreeChip())}
 	case m.height == 2:
 		lines = []string{renderStateLine(m, now), renderMetersLine(m, now)}
-	case m.height == 3:
-		// One context row: keep the SUBJECT. `now` describes the step; the
-		// topic describes the work, and a pane this short has room for the
-		// point but not the running commentary. An empty subject is the one
-		// exception — rendering its "—" placeholder over a populated row
-		// below would trade real context for none.
-		topLabel, top, bottomLabel, bottom := m.promptRows()
-		if strings.TrimSpace(top) == "" {
-			topLabel, top = bottomLabel, bottom
+	default: // height >= 3
+		// Context rows fill whatever is left under the state and meters lines,
+		// in contextRows order — subject first, so a pane too short for the
+		// whole set drops from the BOTTOM, losing the least specific rows.
+		rows := m.contextRows()
+		room := m.height - 2
+		if room == 1 && len(rows) > 1 && strings.TrimSpace(rows[0].text) == "" {
+			// One row, and the SUBJECT is the empty one: rendering its "—"
+			// placeholder over a populated row below would trade real context
+			// for none. The only case where the subject does not lead.
+			rows = rows[1:]
 		}
-		lines = []string{
-			renderStateLine(m, now),
-			renderMetersLine(m, now),
-			renderPromptLine(topLabel, top, m.width, true),
+		if len(rows) > room {
+			rows = rows[:room]
 		}
-	default: // height >= 4
-		topLabel, top, bottomLabel, bottom := m.promptRows()
-		lines = []string{
-			renderStateLine(m, now),
-			renderMetersLine(m, now),
-			renderPromptLine(topLabel, top, m.width, true),
-			renderPromptLine(bottomLabel, bottom, m.width, false),
+		lines = []string{renderStateLine(m, now), renderMetersLine(m, now)}
+		for i, r := range rows {
+			lines = append(lines, renderPromptLine(r.label, r.text, m.width, i == 0))
 		}
 	}
 	fill := m.height - len(lines)
@@ -1701,19 +1706,62 @@ func (m model) View() string {
 	return strings.Join(lines, "\n") + strings.Repeat("\n", fill)
 }
 
-// promptRows resolves the two context rows. The Haiku summary is preferred; with
-// no summary yet — no API key, a failed call, or nothing back — the pane falls back
-// to the raw first/last prompts, so nothing regresses without a key.
+// summarized reports whether the Haiku summary is driving the pane's leading
+// two context rows, as opposed to the keyless first/last fallback. Both halves
+// have to be present: promptRows will not mix a topic with a raw prompt.
+func (m model) summarized() bool {
+	return m.summary.Topic != "" && m.summary.Now != ""
+}
+
+// promptRows resolves the two leading context rows. The Haiku summary is
+// preferred; with no summary yet — no API key, a failed call, or nothing back —
+// the pane falls back to the raw first/last prompts, so nothing regresses
+// without a key.
 //
 // The top row is the SUBJECT in both cases (the topic, or the prompt that
 // opened the session) and the bottom row qualifies it. View leans on that:
 // the top row is the emphasized one, and the one that survives when only a
 // single context row fits.
 func (m model) promptRows() (topLabel, top, bottomLabel, bottom string) {
-	if m.summary.Topic != "" && m.summary.Now != "" {
+	if m.summarized() {
 		return "topic", m.summary.Topic, "now  ", m.summary.Now
 	}
 	return "first", m.firstPrompt, "last ", m.lastPrompt
+}
+
+// contextRow is one labelled line of prompt context under the meters.
+type contextRow struct {
+	label string
+	text  string
+}
+
+// contextRows is every context row this pane wants to draw, in top-to-bottom
+// order: the summary pair from promptRows, then the raw prompts head.show_last
+// and head.show_first turn on.
+//
+// The order is deliberate and runs oldest-LAST. `last` sits directly under the
+// summary because it is the row that moves — the thing you just typed, next to
+// the summarizer's account of it — while `first` has stopped changing by the
+// time a session is long enough to need either, so it goes at the bottom where
+// dropping it costs least. View sizes off this list from the top, and
+// bin/claudemux sizes the PANE off the same config (see HeadConfig.Rows), so
+// under normal launches the whole list fits.
+//
+// On the keyless fallback the two leading rows already ARE first/last, so the
+// toggles are skipped rather than printing the same prompt twice.
+func (m model) contextRows() []contextRow {
+	topLabel, top, bottomLabel, bottom := m.promptRows()
+	rows := []contextRow{{topLabel, top}, {bottomLabel, bottom}}
+	if !m.summarized() {
+		return rows
+	}
+	if m.showLast {
+		rows = append(rows, contextRow{"last ", m.lastPrompt})
+	}
+	if m.showFirst {
+		rows = append(rows, contextRow{"first", m.firstPrompt})
+	}
+	return rows
 }
 
 // renderPromptLine renders a single prompt as a background-filled line,

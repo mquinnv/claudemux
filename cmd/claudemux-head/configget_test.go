@@ -215,3 +215,46 @@ func TestConfigGetLaunchLayoutInvalidValueExitsThree(t *testing.T) {
 		t.Errorf("stderr = %q, want it to mention launch.layout", stderr.String())
 	}
 }
+
+// head.rows is bin/claudemux's contract for how tall to make the head pane. It
+// is DERIVED from the row toggles, not stored, so it has to answer on a config
+// file that never mentions it — including no config file at all.
+func TestConfigGetHeadRows(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"defaults", "", "5"},
+		{"first on", "head:\n  show_first: true\n", "6"},
+		{"last off", "head:\n  show_last: false\n", "4"},
+		{"both off", "head:\n  show_last: false\n  show_first: false\n", "4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeConfig(t, tt.yaml)
+
+			var stdout, stderr bytes.Buffer
+			code := runConfigGet([]string{"head.rows"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if got := strings.TrimSpace(stdout.String()); got != tt.want {
+				t.Errorf("config get head.rows = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// `head: rows: 9` is not a way to override the derived height: HeadConfig has
+// no such field, and KnownFields turns the attempt into a startup error rather
+// than a silently ignored key.
+func TestConfigGetHeadRowsIsNotWritable(t *testing.T) {
+	writeConfig(t, "head:\n  rows: 9\n")
+
+	var stdout, stderr bytes.Buffer
+	code := runConfigGet([]string{"head.rows"}, &stdout, &stderr)
+	if code != 3 {
+		t.Errorf("exit code = %d, want 3 for an unknown head key; stdout: %q", code, stdout.String())
+	}
+}
