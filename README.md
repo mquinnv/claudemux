@@ -54,6 +54,16 @@ In a project with an `op_env`, the `claude` pane is held by a waiting screen whi
 by `claude` itself, with the secrets in its environment. Pressing any key skips the wait
 and starts `claude` immediately, *without* those secrets.
 
+Alongside the variables, the session gets `CLAUDEMUX_OP_ENV` set to the injected
+Environment's id. A project whose scripts wrap commands in
+`op run --environment <id> -- …` can check it to skip `op` — and its per-call 1Password
+authorization prompt — when that exact environment is already loaded:
+
+```sh
+[ "$CLAUDEMUX_OP_ENV" = "<id>" ] && exec "$@"
+exec op run --environment "<id>" -- "$@"
+```
+
 ### Layouts
 
 The arrangement above — `shell-right` — is the default of four layouts. Pick one with

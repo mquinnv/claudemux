@@ -479,6 +479,12 @@ op_account_for() {
 # (deferred_launch) then respawns the panes whose shells predate the
 # injection. Multiline values are truncated at the first newline — keep
 # those out of Environments.
+#
+# CLAUDEMUX_OP_ENV is set to the Environment's id alongside the variables so
+# that project scripts wrapping commands in `op run --environment <id>` can
+# recognize that THIS environment is already loaded and exec the command
+# directly — skipping op's per-call 1Password authorization prompt — while
+# behaving exactly as before anywhere claudemux didn't inject.
 inject_op_env() {
   local session="$1" work_dir="$2" env_id acct env_out line key
   env_id="$(project_field "$work_dir" op_env)"
@@ -495,6 +501,7 @@ inject_op_env() {
     key="${line%%=*}"
     tmux set-environment -t "$session" "$key" "${line#*=}"
   done <<< "$env_out"
+  tmux set-environment -t "$session" CLAUDEMUX_OP_ENV "$env_id"
 }
 
 # pane_cmd PANE — PANE's current foreground command, "" if the pane is gone.
