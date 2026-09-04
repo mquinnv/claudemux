@@ -377,3 +377,35 @@ quoted above.
   older than that window is still invisible.
 - **Foreground agents are unaffected**, and deliberately so — they already classify
   correctly through the unresolved `tool_use` path.
+
+## Addendum 2026-09-04: doubt after expiry, and following `continued-in`
+
+Two failures from one afternoon, both "the head said Idle while the pane was working".
+
+**Expiry is a guess.** A hung `ssh` backgrounded by the Bash tool ran past
+`bgShellMaxAge` (30m). The tracker dropped it, `classifyState` published `Idle`
+anchored at the last Stop, and the conductor escorted the human into a pane that
+still read "2 shells still running". The cap stays (a backgrounded dev server must
+not hide a session forever), but a drop by cap or stall is now remembered in
+`bgTracker.expired` until the next `user`/`assistant` event newer than the drop.
+`classifyState` turns a non-zero count into `StateUnsure`, published as `Unsure:N`,
+labelled `Unsure N`, amber dot. `isWaiting` does not match it, so the conductor
+skips the session exactly as it skips `Background:N`. Live work still wins: while
+anything counts, the state is `Background`.
+
+**Parked sessions move their transcript.** A "fleet" attach parks the interactive
+claude and continues the conversation in a daemon-hosted fork. The old transcript
+ends with `{"type":"continued-in","continuedInSessionId":"<new>"}` and every later
+turn lands in `<new>.jsonl` in the same project dir. The pane map is not rewritten
+(the fork runs outside the pane, so the map hook never fires), so `mappedTranscript`
+kept naming the dead file and the head read it forever. `parseEvent` now carries
+`Event.ContinuedIn`; the model records `old id -> new id` in `superseded`; and
+`pollData` resolves both the mapped path and its own binding through
+`followContinuation` (successor must exist on disk) before deciding to rotate. Once
+on the fork, the stale map resolves to the same file, so there is no bounce.
+
+Not covered: a `!`-typed command that the harness backgrounds is recorded as a
+`user` message beginning `<bash-stdout>Command did not complete within its ...` with
+no `toolUseResult`, so it is never tracked at all. Process liveness (snapshot-zsh
+children of the pane's claude pid) would catch it; deliberately left for a later
+change.
