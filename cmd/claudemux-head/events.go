@@ -119,8 +119,15 @@ type Event struct {
 	// not one of this session's agents. It is kept apart from BgAgentID so
 	// bgTracker can hold it to a stricter liveness test. See extractLaunch.
 	BgQueuedAgentID string
-	IsSidechain     bool // true for subagent (Task) entries — excluded from the worktree chip
-	RawLine         string
+	// ContinuedIn is the successor session id from a `continued-in` record —
+	// the harness's note that this transcript is finished and the
+	// conversation carries on in <continuedInSessionId>.jsonl (a park into a
+	// daemon-hosted fork, observed 2026-09-04). Empty on every other record.
+	// The head follows it: a pane map that still names this file would
+	// otherwise pin the head to a transcript nobody writes to again.
+	ContinuedIn string
+	IsSidechain bool // true for subagent (Task) entries — excluded from the worktree chip
+	RawLine     string
 }
 
 type EventReader struct {
@@ -286,6 +293,7 @@ func parseEvent(line string) (Event, bool) {
 		// actually did, written beside `message` rather than inside it. Raw
 		// because its shape varies per tool — see extractLaunch.
 		ToolUseResult json.RawMessage `json:"toolUseResult"`
+		ContinuedIn   string          `json:"continuedInSessionId"` // present on type=continued-in
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Event{}, false
@@ -300,6 +308,10 @@ func parseEvent(line string) (Event, bool) {
 
 	if raw.Type == "queue-operation" {
 		ev.QueueText = flattenText(raw.Content)
+	}
+
+	if raw.Type == "continued-in" {
+		ev.ContinuedIn = raw.ContinuedIn
 	}
 
 	extractLaunch(&ev, raw.ToolUseResult)

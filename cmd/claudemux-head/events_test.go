@@ -272,3 +272,29 @@ func TestParseEventGitBranchAbsent(t *testing.T) {
 		t.Errorf("GitBranch = %q, want empty", ev.GitBranch)
 	}
 }
+
+// The harness parks a session and continues it elsewhere by appending a
+// continued-in record to the old transcript. Verbatim from ag-admin,
+// 2026-09-04: everything after it was written to the successor's file.
+func TestParseEventContinuedIn(t *testing.T) {
+	line := `{"type":"continued-in","timestamp":"2026-09-04T17:17:50.149Z","sessionId":"ebe355f0-0929-4718-a310-76ac61b31c37","continuedInSessionId":"6de04257-9bb6-4bc8-ba3c-5607593c35f7"}`
+	ev, ok := parseEvent(line)
+	if !ok {
+		t.Fatal("parseEvent rejected the record")
+	}
+	if ev.Type != "continued-in" {
+		t.Errorf("Type = %q, want continued-in", ev.Type)
+	}
+	if ev.ContinuedIn != "6de04257-9bb6-4bc8-ba3c-5607593c35f7" {
+		t.Errorf("ContinuedIn = %q, want the successor id", ev.ContinuedIn)
+	}
+}
+
+// The field is keyed on the record type, never on the bare key: a
+// session's own sessionId is not a continuation.
+func TestParseEventContinuedInOnlyOnItsType(t *testing.T) {
+	ev, ok := parseEvent(`{"type":"user","timestamp":"2026-09-04T17:17:50.149Z","sessionId":"abc","continuedInSessionId":"zzz","message":{"role":"user","content":"hi"}}`)
+	if !ok || ev.ContinuedIn != "" {
+		t.Errorf("ContinuedIn = %q on a user record, want empty", ev.ContinuedIn)
+	}
+}
