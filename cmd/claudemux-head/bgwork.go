@@ -163,6 +163,22 @@ type bgTracker struct {
 	// detection ever seems to be quietly capping out fast, this is where to
 	// look first.
 	subagentsDir string
+
+	// expired counts launches that outstanding dropped because their
+	// liveness regime gave up on them — a cap or a stalled transcript —
+	// never because a completion arrived. expiredAt is when the latest such
+	// drop happened.
+	//
+	// An expiry is a guess about work the head can no longer see. Publishing
+	// a confident Idle on it is what sent the conductor into a session
+	// whose pane still read "2 shells still running" (2026-09-04, a hung
+	// ssh past bgShellMaxAge). classifyState turns a non-zero count into
+	// StateUnsure, which isWaiting does not match. The doubt clears on the
+	// next conversation event newer than expiredAt (see observe): a human
+	// prompt or an assistant turn means someone engaged, and the Stop that
+	// follows is a real one.
+	expired   int
+	expiredAt time.Time
 }
 
 // subagentsDirFor maps a session transcript path to the directory holding
@@ -184,6 +200,15 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 	}
 	for _, e := range events {
 		at := parseTimestampOr(e.Timestamp, now)
+
+		// A newer conversation event resolves any doubt an expiry left —
+		// bookkeeping types (attachment, system, snapshots) are written with
+		// nobody present and do not count.
+		if b.expired > 0 && (e.Type == "user" || e.Type == "assistant") && at.After(b.expiredAt) {
+			b.expired = 0
+			b.expiredAt = time.Time{}
+		}
+
 		for _, id := range bgCompletions(e) {
 			delete(b.tasks, id)
 		}
@@ -194,19 +219,35 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 			if _, tracked := b.tasks[l.ID]; tracked && l.Queued {
 				continue
 			}
-			b.tasks[l.ID] = bgTask{at: at, agent: l.Agent, queued: l.Queued}
+			task := bgTask{at: at, agent: l.Agent, queued: l.Queued}
+			// A launch the head never once saw alive is history, not news: a
+			// seed replaying an 8-hour-old shell that never notified must not
+			// be counted, because it would expire on the very next poll and
+			// manufacture doubt that no replayed event can clear (expiredAt
+			// is newer than all of them). Only OLD records qualify — a
+			// record younger than the shortest liveness window cannot be
+			// dead unless it is a queued revival of an agent whose
+			// transcript is stale, and that is live news: it is tracked, and
+			// if the agent stays silent it expires into doubt as before.
+			if _, tracked := b.tasks[l.ID]; !tracked && now.Sub(at) > bgAgentSpawnGrace && !b.alive(l.ID, task, now) {
+				continue
+			}
+			b.tasks[l.ID] = task
 		}
 	}
 }
 
 // outstanding reports how many launches are still counting and when the
 // oldest of them started. Dead entries are dropped as they are found, so a
-// stale tracker heals itself without a separate sweep.
+// stale tracker heals itself without a separate sweep — but each drop is
+// remembered in expired until the next conversation turn (see unsure).
 func (b *bgTracker) outstanding(now time.Time) (int, time.Time) {
 	var oldest time.Time
 	for id, task := range b.tasks {
 		if !b.alive(id, task, now) {
 			delete(b.tasks, id)
+			b.expired++
+			b.expiredAt = now
 			continue
 		}
 		if oldest.IsZero() || task.at.Before(oldest) {
@@ -214,6 +255,13 @@ func (b *bgTracker) outstanding(now time.Time) (int, time.Time) {
 		}
 	}
 	return len(b.tasks), oldest
+}
+
+// unsure reports how many launches the tracker gave up on since the last
+// conversation turn — dropped by expiry, not retired by a completion. Zero
+// means every retirement so far was a fact.
+func (b *bgTracker) unsure() int {
+	return b.expired
 }
 
 // alive decides whether an unfinished launch still counts — see the expiry

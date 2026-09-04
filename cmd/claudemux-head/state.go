@@ -34,13 +34,22 @@ const (
 	// conductor doesn't escort a human into a session that can't take input
 	// yet, and so the pane says "Starting" instead of a misleading "Idle".
 	StateWaiting
+	// StateUnsure: the main thread's turn ended and the head stopped
+	// counting background work because a liveness cap gave up on it — not
+	// because the work was seen to finish. It is Idle with an asterisk: the
+	// transcript says the turn ended, but the pane may well still read
+	// "2 shells still running". Distinct from Idle so isWaiting does not
+	// match it and the conductor does not escort a human into it; distinct
+	// from Background because nothing is known to be running. Clears on the
+	// next conversation event (see bgTracker.expired).
+	StateUnsure
 )
 
 type State struct {
 	Kind     StateKind
 	ToolName string // populated for StateTool / StateAwaiting
 	Since    time.Time
-	BgCount  int // outstanding background tasks; populated for StateBackground
+	BgCount  int // outstanding background tasks (StateBackground) or tasks given up on (StateUnsure)
 
 	// Anchored: Since came from an event timestamp (or a launch time), not a
 	// now-fallback. Only an anchored Since is a real episode boundary the
@@ -49,7 +58,7 @@ type State struct {
 	Anchored bool
 }
 
-func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Time) State {
+func classifyState(events []Event, bgCount int, bgOldest time.Time, bgUnsure int, now time.Time) State {
 	if len(events) == 0 {
 		return State{Kind: StateIdle, Since: now}
 	}
@@ -89,7 +98,11 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Tim
 	// user/assistant turns; only the latter describe conversational state.
 	last, ok := lastConversationEvent(events)
 	if !ok {
-		return State{Kind: StateIdle, Since: now}
+		// No user/assistant event at all — e.g. a fork stub holding only
+		// bookkeeping records ("ai-title", "agent-name"). Still route
+		// through bgOverride: the tracker may know about work this session
+		// launched even though its transcript has no conversation turn yet.
+		return bgOverride(State{Kind: StateIdle, Since: now}, bgCount, bgOldest, bgUnsure)
 	}
 	switch last.Type {
 	case "assistant":
@@ -100,7 +113,7 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Tim
 		}
 		if last.UserText != "" {
 			idle := State{Kind: StateIdle, Since: since, Anchored: anchored}
-			return bgOverride(idle, bgCount, bgOldest)
+			return bgOverride(idle, bgCount, bgOldest, bgUnsure)
 		}
 		return State{Kind: StateThinking, Since: since, Anchored: anchored}
 	case "user":
@@ -113,22 +126,33 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, now time.Tim
 		}
 		return State{Kind: StateThinking, Since: since, Anchored: anchored}
 	}
-	return bgOverride(State{Kind: StateIdle, Since: now}, bgCount, bgOldest)
+	return bgOverride(State{Kind: StateIdle, Since: now}, bgCount, bgOldest, bgUnsure)
 }
 
-// bgOverride upgrades an Idle verdict to Background when the session has work
-// outstanding. Only Idle is overridden: an unresolved foreground tool_use is
-// the more specific truth and already classifies correctly, and Thinking is
-// not-waiting either way.
-func bgOverride(s State, count int, oldest time.Time) State {
-	if s.Kind != StateIdle || count <= 0 {
+// bgOverride upgrades an Idle verdict when the session has work outstanding
+// (Background) or when the tracker gave up on work by expiry rather than
+// seeing it finish (Unsure). Only Idle is overridden: an unresolved
+// foreground tool_use is the more specific truth and already classifies
+// correctly, and Thinking is not-waiting either way. Live work wins over
+// doubt — while anything is still counting, Background is the fact.
+func bgOverride(s State, count int, oldest time.Time, unsure int) State {
+	if s.Kind != StateIdle {
 		return s
 	}
-	since, anchored := oldest, true
-	if since.IsZero() {
-		since, anchored = s.Since, s.Anchored
+	if count > 0 {
+		since, anchored := oldest, true
+		if since.IsZero() {
+			since, anchored = s.Since, s.Anchored
+		}
+		return State{Kind: StateBackground, Since: since, BgCount: count, Anchored: anchored}
 	}
-	return State{Kind: StateBackground, Since: since, BgCount: count, Anchored: anchored}
+	if unsure > 0 {
+		// Since stays the Stop's timestamp: the doubt began when the turn
+		// ended, and the lobby's age column should say how long the human
+		// has been unsure-of, not when the cap fired.
+		return State{Kind: StateUnsure, Since: s.Since, BgCount: unsure, Anchored: s.Anchored}
+	}
+	return s
 }
 
 // askOverride upgrades s to Asking when the ask-marker says an
@@ -150,7 +174,7 @@ func askOverride(s State, events []Event, markerTime time.Time) State {
 		return s
 	}
 	switch s.Kind {
-	case StateIdle, StateThinking, StateBackground:
+	case StateIdle, StateThinking, StateBackground, StateUnsure:
 	default:
 		return s
 	}
@@ -209,6 +233,8 @@ func (s State) Label() string {
 		return "Compacting"
 	case StateBackground:
 		return "Working " + strconv.Itoa(s.BgCount)
+	case StateUnsure:
+		return "Unsure " + strconv.Itoa(s.BgCount)
 	case StateAsking:
 		return "Asking"
 	case StateWaiting:

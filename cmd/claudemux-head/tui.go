@@ -117,6 +117,12 @@ type model struct {
 	// one to appear. switchSession sets it when rotation adopts a real file.
 	sessionID string
 
+	// superseded maps a session id to the id its transcript says it
+	// continued in (see continuation.go). Kept across rotations: after the
+	// head follows a park, the pane map still names the old file, and only
+	// this memory stops the next poll rotating straight back.
+	superseded map[string]string
+
 	// waitingSince anchors StateWaiting's duration and publish timestamp — a
 	// fixed instant, so maybePublishState's anchored-Since guard publishes
 	// the waiting state once, not every tick. Zero outside waiting mode.
@@ -473,6 +479,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		// block every future call.
 		summarizing: summarizer != nil && sessionID != "",
 	}
+	m.superseded = noteContinuations(m.superseded, sessionID, seeded)
 	m.launchBin, m.launchBinOK = launchBinStamp()
 	if m.summarizing {
 		// Init's seed is issued from a value receiver that cannot stamp itself,
@@ -513,7 +520,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 
 func (m *model) recomputeFromEvents(now time.Time) {
 	bgCount, bgOldest := m.bg.outstanding(now)
-	m.state = classifyState(m.allEvents, bgCount, bgOldest, now)
+	m.state = classifyState(m.allEvents, bgCount, bgOldest, m.bg.unsure(), now)
 	m.state = askOverride(m.state, m.allEvents, askMarkerTime(m.askDir, m.sessionID))
 	if !m.waitingSince.IsZero() {
 		// Waiting mode: no transcript exists yet, so classifyState's empty-ring
@@ -608,6 +615,7 @@ func (m *model) moveSession(jsonlPath string, now time.Time) {
 	r := newEventReader(jsonlPath)
 	r.SeedFromEnd(500)
 	seeded, _ := r.Seeded()
+	m.superseded = noteContinuations(m.superseded, m.sessionID, seeded)
 	m.jsonlPath = jsonlPath
 	m.reader = r
 	m.allEvents = seeded
@@ -656,6 +664,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 
 	m.jsonlPath = jsonlPath
 	m.sessionID = sessionID
+	m.superseded = noteContinuations(m.superseded, sessionID, seeded)
 	// Adopting a real session ends waiting mode (recomputeFromEvents keys on
 	// sessionID, but a stale anchor must not linger into a later rebind).
 	m.waitingSince = time.Time{}
@@ -933,6 +942,11 @@ func (m model) pollData() tea.Cmd {
 	follow := m.followActive
 	selfPane := m.selfPane
 	paneDir := m.paneDir
+	superseded := make(map[string]string, len(m.superseded))
+	for k, v := range m.superseded {
+		superseded[k] = v
+	}
+	projectsDir := claudeProjectsPath()
 	return func() tea.Msg {
 		// Follow session rotation: if a newer .jsonl has appeared in the
 		// project dir, surface it so Update can re-bind. Empty when not
@@ -944,11 +958,12 @@ func (m model) pollData() tea.Cmd {
 				claudePane = pane
 				// mapped is "" when the pane's live cwd is known but its
 				// transcript isn't yet — keep the current binding then rather
-				// than adopting an empty path.
-				if mapped != "" && mapped != jsonlPath {
-					teardownLogf("rotate via=mapped pane=%s cwd=%s from=%s to=%s",
-						pane, cwd, jsonlPath, mapped)
-					activeJSONL = mapped
+				// than adopting an empty path. A mapped file that the harness
+				// has since continued elsewhere resolves to its successor:
+				// the pane map is not rewritten by a park.
+				if next := resolveActiveTranscript(mapped, jsonlPath, superseded, projectsDir); next != "" {
+					teardownLogf("rotate via=mapped pane=%s cwd=%s from=%s to=%s", pane, cwd, jsonlPath, next)
+					activeJSONL = next
 				}
 			} else if mra, ok := mostRecentlyActiveSession(filepath.Dir(jsonlPath)); ok && mra != jsonlPath {
 				// mappedTranscript said "no claude pane at all" — a wedged or
@@ -957,6 +972,15 @@ func (m model) pollData() tea.Cmd {
 				// whichever transcript in the dir was touched last.
 				teardownLogf("rotate via=mru-fallback from=%s to=%s", jsonlPath, mra)
 				activeJSONL = mra
+			}
+			// The current binding itself may have been continued elsewhere
+			// with no pane map to say so (no claude pane found, or the map
+			// still naming this very file).
+			if activeJSONL == "" {
+				if next := resolveActiveTranscript("", jsonlPath, superseded, projectsDir); next != "" {
+					teardownLogf("rotate via=continued-in from=%s to=%s", jsonlPath, next)
+					activeJSONL = next
+				}
 			}
 		}
 		newEvents, _ := reader.Tail()
@@ -1002,9 +1026,10 @@ type dataMsg struct {
 // human — there's nothing new to summarize either way — so folding them into
 // one side of shouldSummarize's edge check means Idle<->Background never
 // fires a spurious extra call by itself, while Thinking/Tool ending the turn
-// as either Idle OR Background still does.
+// as either Idle OR Background still does. Unsure is a turn-ended verdict
+// too — Idle with doubt attached — so it sits on the same side.
 func turnEndedByIdle(kind StateKind) bool {
-	return kind == StateIdle || kind == StateBackground
+	return kind == StateIdle || kind == StateBackground || kind == StateUnsure
 }
 
 // shouldSummarize reports whether this poll crossed the busy → ended edge,
@@ -1411,6 +1436,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if len(msg.newEvents) > 0 {
+			m.superseded = noteContinuations(m.superseded, m.sessionID, msg.newEvents)
 			m.bg.observe(msg.newEvents, msg.time)
 			m.allEvents = append(m.allEvents, msg.newEvents...)
 			if len(m.allEvents) > 1000 {
@@ -2059,6 +2085,10 @@ func stateDot(kind StateKind) string {
 		// Work is still running even though the main thread's turn ended —
 		// the busy dot is the honest read, not the idle one "Working N" sits
 		// next to.
+		return dotTool
+	case StateUnsure:
+		// Not confidently idle: the amber busy dot, because "come look" green
+		// is exactly the claim this state exists to withhold.
 		return dotTool
 	case StateWaiting:
 		// Claude is booting: something is happening, but not attention-worthy.

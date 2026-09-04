@@ -333,6 +333,13 @@ hook. And a session that was already running when this hook was installed or upg
 won't pick it up until its next start — hooks are snapshotted at session startup, so a
 live session keeps running whatever it started with.
 
+**Unsure** is Idle the head no longer trusts. Background work is counted from the
+transcript and expires on a timer when nothing reports it finished; when that timer,
+not a completion, is what emptied the count, the head shows **Unsure N** with an amber
+dot and publishes `Unsure:N`. The switchboard does not treat it as waiting, so the
+conductor will not escort you into a session whose pane may still say "2 shells still
+running". It clears on your next prompt or Claude's next turn.
+
 `claudemux-head hook ensure` installs and repairs all three scripts together.
 
 ## The statusline command and the account meters
