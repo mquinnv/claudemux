@@ -5,18 +5,22 @@ package main
 // Claude Code can park an interactive session and continue the conversation
 // in a daemon-hosted fork (observed 2026-09-04 via a "fleet" attach). The
 // old transcript then ends with a `continued-in` record naming the new
-// session id, and every later turn is written to <new id>.jsonl in the same
-// project dir. Nothing updates the pane map: the fork runs outside the tmux
-// pane, so the hook that writes ~/.claude/claudemux/panes/<n>.json never
-// fires for it, and mappedTranscript keeps returning the dead file. The
-// head then reads a transcript nobody writes to again and publishes Idle
-// forever — while the pane is visibly working.
+// session id, and every later turn is written to <new id>.jsonl — not
+// necessarily under the same project dir. Nothing updates the pane map: the
+// fork runs outside the tmux pane, so the hook that writes
+// ~/.claude/claudemux/panes/<n>.json never fires for it, and
+// mappedTranscript keeps returning the dead file. The head then reads a
+// transcript nobody writes to again and publishes Idle forever — while the
+// pane is visibly working.
 //
 // The harness's own record is the fix: whichever path the pane map (or the
 // current binding) names, resolve it through the recorded successors before
-// deciding whether to rotate. The successor must exist on disk; until it
-// does, the head stays on the old file (its last verdict is still the best
-// available).
+// deciding whether to rotate. followContinuation finds the successor via
+// transcriptForSession, which globs projectsDir/*/<id>.jsonl across every
+// project dir — deliberately, so the fork's transcript resolves even when a
+// worktree move also lands it under a different project dir than the parked
+// session's. The successor must exist on disk; until it does, the head
+// stays on the old file (its last verdict is still the best available).
 
 // continuationMaxHops bounds followContinuation. Real chains are one hop
 // (a fork of a fork is two); the bound only guards a malformed cycle.

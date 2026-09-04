@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -115,5 +116,29 @@ func TestResolveActiveTranscriptFollowsPark(t *testing.T) {
 	other := filepath.Join(proj, "other.jsonl")
 	if got := resolveActiveTranscript(other, parked, nil, projects); got != other {
 		t.Errorf("plain rotation: got %q, want %q", got, other)
+	}
+}
+
+// End to end through the model: newModel seeds from the transcript's tail,
+// and a continued-in record in that seed must land in m.superseded — this is
+// what lets a later poll follow the park via resolveActiveTranscript (see
+// pollData). Nothing exercised this wiring directly before; only
+// noteContinuations and followContinuation were tested in isolation.
+func TestNewModelRecordsContinuationFromSeed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "old.jsonl")
+	lines := []string{
+		`{"type":"user","timestamp":"2026-09-04T17:17:48.000Z","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","timestamp":"2026-09-04T17:17:49.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}`,
+		`{"type":"continued-in","timestamp":"2026-09-04T17:17:50.149Z","sessionId":"old","continuedInSessionId":"new"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(defaultConfig(), path, "old", false)
+
+	if got := m.superseded["old"]; got != "new" {
+		t.Errorf("superseded[old] = %q, want %q", got, "new")
 	}
 }
