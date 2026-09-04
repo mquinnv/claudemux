@@ -896,14 +896,6 @@ func TestBgQueuedSendMessageRevivesARetiredAgent(t *testing.T) {
 	}
 
 	nudge := launch.Add(6 * time.Minute)
-	// The agent's own transcript already exists from its first (completed)
-	// run — realistically it is on disk, with an mtime from that run, before
-	// the queued acknowledgment is ever observed. Without this, observe()
-	// would (correctly, per the "history, not news" guard) see no liveness
-	// file at all for a queued-but-not-yet-tracked id and decline to track
-	// it — which is exactly right for a pin to a non-agent recipient, but
-	// wrong here, where the recipient IS this session's own agent.
-	bgTouchAgentFile(t, b.subagentsDir, "agentrev", launch.Add(4*time.Minute))
 	b.observe(bgSendMessageLaunch(t, "agentrev", "2026-08-17T10:06:00Z", bgQueuedResult("agentrev")), nudge)
 	bgTouchAgentFile(t, b.subagentsDir, "agentrev", nudge)
 	now := nudge.Add(20 * time.Minute)
@@ -1137,6 +1129,47 @@ func TestBgTrackerSeededLiveLaunchIsTracked(t *testing.T) {
 	}
 	if got := b.unsure(); got != 0 {
 		t.Errorf("unsure = %d, want 0", got)
+	}
+}
+
+// The live counterpart to TestBgTrackerSeededDeadLaunchIsHistoryNotDoubt: a
+// queued revival is not a replayed seed, so the "history, not news" guard
+// must not swallow it just because the agent it targets has gone quiet.
+// Regression (fixed here): the guard as originally written applied to every
+// observe() call, including live ones — a parent nudging a retired agent
+// whose transcript is more than bgAgentStallAge old got no spawn grace and
+// the launch was dropped outright, publishing Idle while the agent ran.
+// Because the launch RECORD itself is fresh (now == its own timestamp), it
+// must be tracked; the agent's stale transcript then earns doubt on the next
+// outstanding() call, exactly as it did before the seeding guard existed.
+func TestBgTrackerLiveQueuedRevivalOfStaleAgentIsTracked(t *testing.T) {
+	launch := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.subagentsDir = t.TempDir()
+	b.observe(bgAgentLaunch(t, "agentstale", "2026-08-17T10:00:00Z"), launch)
+	bgTouchAgentFile(t, b.subagentsDir, "agentstale", launch.Add(5*time.Minute))
+	b.observe([]Event{bgDoneEvent("agentstale")}, launch.Add(5*time.Minute))
+	if n, _ := b.outstanding(launch.Add(5 * time.Minute)); n != 0 {
+		t.Fatalf("outstanding = %d, want 0: the completion notification must retire the launch", n)
+	}
+
+	// The parent nudges the retired agent 40 minutes after its transcript
+	// last moved. The queued-revival record is observed live (now equals its
+	// own timestamp), so the spawn-grace guard must not apply to it.
+	revival := launch.Add(45 * time.Minute)
+	b.observe(bgSendMessageLaunch(t, "agentstale", "2026-08-17T10:45:00Z", bgQueuedResult("agentstale")), revival)
+	if _, tracked := b.tasks["agentstale"]; !tracked {
+		t.Fatalf("a live queued revival must be tracked even though the target agent's transcript is stale")
+	}
+
+	// outstanding() then finds the transcript stale (untouched since T+5m,
+	// past bgAgentStallAge) and expires it — this is the pre-regression
+	// behavior: doubt, not silence.
+	if n, _ := b.outstanding(revival); n != 0 {
+		t.Errorf("outstanding = %d, want 0: the transcript is stale, so the launch expires", n)
+	}
+	if got := b.unsure(); got != 1 {
+		t.Errorf("unsure = %d, want 1: a live revival of a since-gone-quiet agent must become doubt, not silently vanish", got)
 	}
 }
 
