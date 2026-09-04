@@ -897,6 +897,15 @@ create_session() {
   esac
   run_in_pane "$head_pane" "${worktree_env}$(printf '%q' "$head_bin")"
 
+  # Record claude's exact command on its pane so claudemux-head can respawn
+  # it later (the head's `c` key: restart claude, with or without --resume).
+  # A pane option rather than a session one: a `-n` clone is its own pane
+  # with its own command. Set before anything runs in the pane, so a restart
+  # is possible from the first second — and stored verbatim, which is why the
+  # head does not try to reverse tmux's own re-quoting of pane_start_command
+  # except for sessions launched before this line existed.
+  tmux set -p -t "$claude_pane" @claudemux_claude_cmd "$claude_cmd"
+
   # With an op_env, claude's launch is handed to a background injector so the
   # attach below happens NOW rather than after op's ~25s decryption (see
   # deferred_launch). The pane is held by `claudemux-head boot`, a real TUI that
