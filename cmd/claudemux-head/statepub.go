@@ -37,6 +37,9 @@ func statePublishValue(s State) string {
 		return "Compacting"
 	case StateBackground:
 		return "Background:" + strconv.Itoa(s.BgCount)
+	case StateUnsure:
+		// Deliberately NOT in isWaiting's set — see StateUnsure.
+		return "Unsure:" + strconv.Itoa(s.BgCount)
 	case StateAsking:
 		return "Asking"
 	case StateWaiting:

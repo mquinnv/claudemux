@@ -501,7 +501,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 
 func (m *model) recomputeFromEvents(now time.Time) {
 	bgCount, bgOldest := m.bg.outstanding(now)
-	m.state = classifyState(m.allEvents, bgCount, bgOldest, now)
+	m.state = classifyState(m.allEvents, bgCount, bgOldest, m.bg.unsure(), now)
 	m.state = askOverride(m.state, m.allEvents, askMarkerTime(m.askDir, m.sessionID))
 	if !m.waitingSince.IsZero() {
 		// Waiting mode: no transcript exists yet, so classifyState's empty-ring
@@ -986,9 +986,10 @@ type dataMsg struct {
 // human — there's nothing new to summarize either way — so folding them into
 // one side of shouldSummarize's edge check means Idle<->Background never
 // fires a spurious extra call by itself, while Thinking/Tool ending the turn
-// as either Idle OR Background still does.
+// as either Idle OR Background still does. Unsure is a turn-ended verdict
+// too — Idle with doubt attached — so it sits on the same side.
 func turnEndedByIdle(kind StateKind) bool {
-	return kind == StateIdle || kind == StateBackground
+	return kind == StateIdle || kind == StateBackground || kind == StateUnsure
 }
 
 // shouldSummarize reports whether this poll crossed the busy → ended edge,
@@ -2028,6 +2029,10 @@ func stateDot(kind StateKind) string {
 		// Work is still running even though the main thread's turn ended —
 		// the busy dot is the honest read, not the idle one "Working N" sits
 		// next to.
+		return dotTool
+	case StateUnsure:
+		// Not confidently idle: the amber busy dot, because "come look" green
+		// is exactly the claim this state exists to withhold.
 		return dotTool
 	case StateWaiting:
 		// Claude is booting: something is happening, but not attention-worthy.

@@ -193,3 +193,15 @@ func TestMaybePublishInfoOutsideTmux(t *testing.T) {
 		t.Errorf("outside tmux: %d cmds, want 0", got)
 	}
 }
+
+// Unsure publishes with its count and is NOT escortable: doubt is the whole
+// point — the conductor skips it exactly as it skips Background.
+func TestStatePublishValueUnsureIsNotEscortable(t *testing.T) {
+	v := statePublishValue(State{Kind: StateUnsure, BgCount: 2})
+	if v != "Unsure:2" {
+		t.Errorf("value = %q, want %q", v, "Unsure:2")
+	}
+	if isWaiting(v) {
+		t.Errorf("isWaiting(%q) = true, want false", v)
+	}
+}

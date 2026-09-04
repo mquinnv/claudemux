@@ -6,7 +6,7 @@ import (
 )
 
 func TestClassifyEmptyStream(t *testing.T) {
-	got := classifyState(nil, 0, time.Time{}, time.Now())
+	got := classifyState(nil, 0, time.Time{}, 0, time.Now())
 	if got.Kind != StateIdle {
 		t.Errorf("empty stream: got %v, want StateIdle", got.Kind)
 	}
@@ -14,7 +14,7 @@ func TestClassifyEmptyStream(t *testing.T) {
 
 func TestClassifyLastIsAssistantText(t *testing.T) {
 	events := []Event{{Type: "assistant", UserText: "all done"}}
-	got := classifyState(events, 0, time.Time{}, time.Now())
+	got := classifyState(events, 0, time.Time{}, 0, time.Now())
 	if got.Kind != StateIdle {
 		t.Errorf("got %v, want StateIdle", got.Kind)
 	}
@@ -24,7 +24,7 @@ func TestClassifyToolInFlight(t *testing.T) {
 	events := []Event{
 		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
 	}
-	got := classifyState(events, 0, time.Time{}, time.Now())
+	got := classifyState(events, 0, time.Time{}, 0, time.Now())
 	if got.Kind != StateTool || got.ToolName != "Bash" {
 		t.Errorf("got %v/%q, want StateTool/Bash", got.Kind, got.ToolName)
 	}
@@ -35,7 +35,7 @@ func TestClassifyToolCompletedNotInFlight(t *testing.T) {
 		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
 		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1"}}},
 	}
-	got := classifyState(events, 0, time.Time{}, time.Now())
+	got := classifyState(events, 0, time.Time{}, 0, time.Now())
 	if got.Kind != StateThinking {
 		t.Errorf("after tool result with no new assistant turn: got %v, want StateThinking", got.Kind)
 	}
@@ -53,7 +53,7 @@ func TestClassifySkipsBookkeepingEvents(t *testing.T) {
 		{Type: "attachment"},
 		{Type: "last-prompt", UserText: "tail of user input"},
 	}
-	got := classifyState(events, 0, time.Time{}, now)
+	got := classifyState(events, 0, time.Time{}, 0, now)
 	if got.Kind != StateThinking {
 		t.Errorf("got %v, want StateThinking (last conversation event was user/tool_result)", got.Kind)
 	}
@@ -65,7 +65,7 @@ func TestClassifyError(t *testing.T) {
 		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1", IsError: true}}},
 		{Type: "assistant", UserText: "I hit an error"},
 	}
-	got := classifyState(events, 0, time.Time{}, time.Now())
+	got := classifyState(events, 0, time.Time{}, 0, time.Now())
 	// Last event is assistant text — that's idle, not error. Errors should not
 	// surface here as StateError. This guards against false positives.
 	if got.Kind == StateError {
@@ -81,10 +81,10 @@ func TestClassifyStateBackgroundOverridesIdle(t *testing.T) {
 	oldest := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	events := []Event{{Type: "assistant", Timestamp: "2026-08-11T10:09:00Z", UserText: "Kicked that off in the background."}}
 
-	if got := classifyState(events, 0, time.Time{}, now); got.Kind != StateIdle {
+	if got := classifyState(events, 0, time.Time{}, 0, now); got.Kind != StateIdle {
 		t.Errorf("Kind = %v, want StateIdle with no background work", got.Kind)
 	}
-	got := classifyState(events, 2, oldest, now)
+	got := classifyState(events, 2, oldest, 0, now)
 	if got.Kind != StateBackground {
 		t.Errorf("Kind = %v, want StateBackground", got.Kind)
 	}
@@ -105,7 +105,7 @@ func TestClassifyStateToolBeatsBackground(t *testing.T) {
 		Timestamp: "2026-08-11T10:09:00Z",
 		ToolUses:  []ToolUse{{ID: "toolu_1", Name: "Bash"}},
 	}}
-	got := classifyState(events, 3, now.Add(-time.Minute), now)
+	got := classifyState(events, 3, now.Add(-time.Minute), 0, now)
 	if got.Kind != StateTool || got.ToolName != "Bash" {
 		t.Errorf("got %v/%q, want StateTool/Bash", got.Kind, got.ToolName)
 	}
@@ -121,18 +121,74 @@ func TestClassifyAnchoredSince(t *testing.T) {
 	now := time.Now()
 	// Event-stamped Idle: anchored.
 	events := []Event{{Type: "assistant", UserText: "done", Timestamp: "2026-08-13T10:00:00Z"}}
-	if got := classifyState(events, 0, time.Time{}, now); !got.Anchored {
+	if got := classifyState(events, 0, time.Time{}, 0, now); !got.Anchored {
 		t.Errorf("event-stamped Idle must be Anchored")
 	}
 	// Empty stream: Since is a now-fallback, not anchored — publishing it as
 	// a change every poll is exactly the flap the publish guard must avoid.
-	if got := classifyState(nil, 0, time.Time{}, now); got.Anchored {
+	if got := classifyState(nil, 0, time.Time{}, 0, now); got.Anchored {
 		t.Errorf("empty-stream Idle must not be Anchored")
 	}
 	// Background inherits anchoring from the oldest launch time.
 	events = []Event{{Type: "assistant", UserText: "launched", Timestamp: "2026-08-13T10:00:00Z"}}
-	got := classifyState(events, 2, time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC), now)
+	got := classifyState(events, 2, time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC), 0, now)
 	if got.Kind != StateBackground || !got.Anchored {
 		t.Errorf("got %v anchored=%v, want StateBackground anchored", got.Kind, got.Anchored)
+	}
+}
+
+// Idle reached because the tracker gave up on work (an expiry) is doubt,
+// not Idle: the conductor must not treat it as waiting on the human.
+func TestClassifyStateUnsureAfterExpiry(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 20, 0, 0, time.UTC)
+	events := []Event{{Type: "assistant", UserText: "I'll pick this up when the run finishes.", Timestamp: "2026-09-04T16:45:53Z"}}
+	got := classifyState(events, 0, time.Time{}, 2, now)
+	if got.Kind != StateUnsure {
+		t.Fatalf("kind = %v, want StateUnsure", got.Kind)
+	}
+	if got.BgCount != 2 {
+		t.Errorf("BgCount = %d, want 2 (the expired count)", got.BgCount)
+	}
+	want, _ := time.Parse(time.RFC3339, "2026-09-04T16:45:53Z")
+	if !got.Since.Equal(want) || !got.Anchored {
+		t.Errorf("Since = %v anchored=%v, want the Stop's timestamp, anchored", got.Since, got.Anchored)
+	}
+}
+
+// Live work beats doubt: while anything is still counting, Background is
+// the truth and the expired count is irrelevant.
+func TestClassifyStateBackgroundBeatsUnsure(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 20, 0, 0, time.UTC)
+	events := []Event{{Type: "assistant", UserText: "done", Timestamp: "2026-09-04T16:45:53Z"}}
+	got := classifyState(events, 1, now.Add(-time.Minute), 3, now)
+	if got.Kind != StateBackground || got.BgCount != 1 {
+		t.Errorf("got %+v, want Background with 1 outstanding", got)
+	}
+}
+
+// Only Idle is overridden — a session mid-turn is Thinking whatever the
+// tracker gave up on earlier.
+func TestClassifyStateUnsureDoesNotOverrideThinking(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 20, 0, 0, time.UTC)
+	events := []Event{{Type: "user", UserText: "how's it going?", Timestamp: "2026-09-04T17:19:00Z"}}
+	got := classifyState(events, 0, time.Time{}, 2, now)
+	if got.Kind != StateThinking {
+		t.Errorf("kind = %v, want StateThinking", got.Kind)
+	}
+}
+
+// A pending AskUserQuestion is a more specific truth than doubt.
+func TestAskOverrideUpgradesUnsure(t *testing.T) {
+	marker := time.Date(2026, 9, 4, 17, 0, 0, 0, time.UTC)
+	events := []Event{{Type: "assistant", UserText: "done", Timestamp: "2026-09-04T16:45:53Z"}}
+	s := State{Kind: StateUnsure, BgCount: 1, Since: marker.Add(-time.Hour), Anchored: true}
+	if got := askOverride(s, events, marker); got.Kind != StateAsking {
+		t.Errorf("kind = %v, want StateAsking", got.Kind)
+	}
+}
+
+func TestUnsureLabel(t *testing.T) {
+	if got := (State{Kind: StateUnsure, BgCount: 2}).Label(); got != "Unsure 2" {
+		t.Errorf("Label = %q, want %q", got, "Unsure 2")
 	}
 }
