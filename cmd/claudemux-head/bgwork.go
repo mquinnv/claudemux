@@ -219,7 +219,27 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 			if _, tracked := b.tasks[l.ID]; tracked && l.Queued {
 				continue
 			}
-			b.tasks[l.ID] = bgTask{at: at, agent: l.Agent, queued: l.Queued}
+			task := bgTask{at: at, agent: l.Agent, queued: l.Queued}
+			// A launch already dead the first time it is seen is history,
+			// not news: newModel/switchSession/moveSession seed or reseed
+			// up to 500 events on every head start, rotation, or worktree
+			// move, and a backgrounded shell or agent in that window that
+			// never notified (a dev server, a killed process) can already
+			// be past its cap by the time this runs. Adding it anyway and
+			// letting the next outstanding() call expire it would stamp
+			// expiredAt = now — newer than every replayed event — so the
+			// resulting doubt could never clear from history, and a reseed
+			// onto the same tracker (moveSession) would keep re-adding and
+			// re-expiring it, double-counting unsure() across reseeds. A
+			// launch this tracker never once counted as alive was never
+			// counted at all, so it can never be doubted — this is what
+			// keeps a head restart or reseed from hiding a genuinely idle
+			// session (background work that outlived its cap) from the
+			// conductor.
+			if _, tracked := b.tasks[l.ID]; !tracked && !b.alive(l.ID, task, now) {
+				continue
+			}
+			b.tasks[l.ID] = task
 		}
 	}
 }

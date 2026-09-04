@@ -896,6 +896,14 @@ func TestBgQueuedSendMessageRevivesARetiredAgent(t *testing.T) {
 	}
 
 	nudge := launch.Add(6 * time.Minute)
+	// The agent's own transcript already exists from its first (completed)
+	// run — realistically it is on disk, with an mtime from that run, before
+	// the queued acknowledgment is ever observed. Without this, observe()
+	// would (correctly, per the "history, not news" guard) see no liveness
+	// file at all for a queued-but-not-yet-tracked id and decline to track
+	// it — which is exactly right for a pin to a non-agent recipient, but
+	// wrong here, where the recipient IS this session's own agent.
+	bgTouchAgentFile(t, b.subagentsDir, "agentrev", launch.Add(4*time.Minute))
 	b.observe(bgSendMessageLaunch(t, "agentrev", "2026-08-17T10:06:00Z", bgQueuedResult("agentrev")), nudge)
 	bgTouchAgentFile(t, b.subagentsDir, "agentrev", nudge)
 	now := nudge.Add(20 * time.Minute)
@@ -1086,5 +1094,84 @@ func TestBgTrackerDoubtIgnoresOlderTurns(t *testing.T) {
 	b.observe([]Event{{Type: "assistant", Timestamp: "2026-08-11T10:01:00Z", UserText: "old text"}}, late.Add(time.Second))
 	if got := b.unsure(); got != 1 {
 		t.Errorf("unsure = %d, want 1: an older turn does not resolve a later expiry", got)
+	}
+}
+
+// A launch already dead the first time the tracker ever sees it is history,
+// not news: newModel/switchSession seed up to 500 events on every head start
+// or rotation, and a backgrounded shell in that window that never notified
+// (a dev server, a killed process) is already well past bgShellMaxAge by the
+// time it is observed. Before the fix, observe() added it anyway, and the
+// very next outstanding() call expired it with expiredAt == now — newer than
+// every replayed event — so unsure() could never clear from history and the
+// session was stuck publishing Unsure:1 until a human typed. It must never be
+// tracked in the first place: never counted, so never doubted.
+func TestBgTrackerSeededDeadLaunchIsHistoryNotDoubt(t *testing.T) {
+	now := time.Date(2026, 8, 20, 18, 0, 0, 0, time.UTC)
+	launchTS := now.Add(-8 * time.Hour)
+	events := bgShellLaunch(t, "aaa", launchTS.Format(time.RFC3339))
+	events = append(events, Event{
+		Type: "assistant", Timestamp: now.Add(-time.Minute).Format(time.RFC3339), UserText: "wrapped up",
+	})
+	b := newBgTracker()
+	b.observe(events, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0: an already-dead seeded launch must not be tracked", n)
+	}
+	if got := b.unsure(); got != 0 {
+		t.Errorf("unsure = %d, want 0: a launch the head never once saw alive was never counted, so it cannot be doubted", got)
+	}
+}
+
+// The seeding-recovery counterpart: a launch still inside its liveness
+// window at seed time IS tracked, which is what lets newModel/switchSession
+// recover a session's real Background state across a head restart or
+// rotation (see the seeding comment in tui.go).
+func TestBgTrackerSeededLiveLaunchIsTracked(t *testing.T) {
+	launchTS := time.Date(2026, 8, 20, 18, 0, 0, 0, time.UTC)
+	now := launchTS.Add(5 * time.Minute)
+	b := newBgTracker()
+	b.observe(bgShellLaunch(t, "aaa", launchTS.Format(time.RFC3339)), now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Errorf("outstanding = %d, want 1: a launch still inside its window at seed time must be tracked", n)
+	}
+	if got := b.unsure(); got != 0 {
+		t.Errorf("unsure = %d, want 0", got)
+	}
+}
+
+// A reseed onto the SAME tracker (moveSession) must not resurrect cleared
+// doubt or double-count: before the fix 1 guard, re-observing an expired
+// launch's original events after the doubt had already cleared re-added the
+// dead task, and the next outstanding() call expired it again — unsure()
+// went 1 -> 0 -> 1 across reseeds, and would go to 2 on a third.
+func TestBgTrackerReseedAfterClearDoesNotDoubleCount(t *testing.T) {
+	b := newBgTracker()
+	launchEvents := bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z")
+	b.observe(launchEvents, time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
+
+	late := time.Date(2026, 8, 11, 10, 31, 0, 0, time.UTC)
+	if n, _ := b.outstanding(late); n != 0 {
+		t.Fatalf("outstanding = %d, want 0 after expiry", n)
+	}
+	if got := b.unsure(); got != 1 {
+		t.Fatalf("unsure = %d, want 1 after expiry", got)
+	}
+
+	// A newer conversation turn clears the doubt.
+	clearAt := late.Add(time.Minute)
+	b.observe([]Event{{Type: "user", Timestamp: "2026-08-11T10:32:00Z", UserText: "still there?"}}, clearAt)
+	if got := b.unsure(); got != 0 {
+		t.Fatalf("unsure = %d, want 0 after a newer turn clears it", got)
+	}
+
+	// A reseed (e.g. moveSession) replays the ORIGINAL launch events again,
+	// with today's now.
+	b.observe(launchEvents, clearAt)
+	if n, _ := b.outstanding(clearAt); n != 0 {
+		t.Errorf("outstanding = %d, want 0: a reseeded, already-dead launch must not be re-tracked", n)
+	}
+	if got := b.unsure(); got != 0 {
+		t.Errorf("unsure = %d, want 0: the reseed must not resurrect cleared doubt", got)
 	}
 }
