@@ -409,3 +409,10 @@ Not covered: a `!`-typed command that the harness backgrounds is recorded as a
 no `toolUseResult`, so it is never tracked at all. Process liveness (snapshot-zsh
 children of the pane's claude pid) would catch it; deliberately left for a later
 change.
+
+Also not covered: doubt has no lifetime of its own. `Unsure` persists until the
+next conversation turn, so a deliberately backgrounded dev server that outlives
+its cap hides its session from the conductor until the human types there (the
+amber lobby row stays visible indefinitely). A decay on the doubt itself, or a
+process-liveness check that can positively confirm the work is still running
+(or gone), is a possible follow-up.
