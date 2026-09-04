@@ -685,6 +685,29 @@ the shell pane carry on — but the only way back is a new session, which is wha
 `R` exists to avoid. An armed teardown does not survive a restart; it disarms,
 the same as it does across any other head restart.
 
+**Restarting `claude`.** Press `c` to restart the `claude` pane itself — for a
+`claude` that has hung, crashed, or needs to pick up a new build or an edited
+settings file. The first press arms: the status pane shows
+`↻ restart claude? c resume · n new`. Then:
+
+- `c` again resumes the session the pane is following — `claude --resume <id>` —
+  so the conversation carries on where it left off.
+- `n` starts a new session in the same pane instead.
+- `esc` cancels.
+
+Either way the pane is respawned with the exact command `claudemux` launched it
+with, so the permission mode, project name, color and worktree marker all come
+back as they were. This is a kill, not a polite exit: the running `claude` is
+terminated on the spot, which is the only thing that works on a hung one. Nothing
+that had reached the transcript is lost, and a `claude` that already exited (its
+pane held on screen with the error) is restarted in place the same way.
+
+The status pane follows along on its own — it rebinds to the resumed or new
+session as soon as `claude` announces it. While a session has no transcript yet
+(`c` right after launch) there is nothing to resume, so the chip offers only
+`n new`. `c` does nothing while a teardown is in flight, and `x`/`X` do nothing
+while a restart is armed; outside tmux `c` does nothing at all.
+
 ### Tearing down a session
 
 When the work is finished, click the status pane and press `x`. It runs the whole

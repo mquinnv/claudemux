@@ -370,6 +370,18 @@ type model struct {
 	// teardownNoteTTL and then dropped.
 	teardownNote   string
 	teardownNoteAt time.Time
+	// claudeRestartArmed is the `c` ladder: armed by one press, committed by
+	// `c` (resume) or `n` (new session), cancelled by esc. See claudereboot.go.
+	// Not persisted across a head restart, for the same reason teardown isn't.
+	claudeRestartArmed bool
+	// claudeRestartNote / claudeRestartNoteAt are the last respawn's outcome,
+	// shown on the chip for teardownNoteTTL.
+	claudeRestartNote   string
+	claudeRestartNoteAt time.Time
+	// claudePane is the claude pane the poll last saw, kept after the pane
+	// stops being listed: a claude that exited leaves a dead pane behind that
+	// listPanes filters out but that a restart still needs to respawn into.
+	claudePane string
 
 	// workDir is the head process's OWN launch directory with symlinks
 	// resolved — which is NOT necessarily where the session is working (see
@@ -926,8 +938,10 @@ func (m model) pollData() tea.Cmd {
 		// project dir, surface it so Update can re-bind. Empty when not
 		// following or nothing newer exists.
 		activeJSONL := ""
+		claudePane := ""
 		if follow {
 			if mapped, cwd, pane, ok := mappedTranscript(selfPane, paneDir); ok {
+				claudePane = pane
 				// mapped is "" when the pane's live cwd is known but its
 				// transcript isn't yet — keep the current binding then rather
 				// than adopting an empty path.
@@ -966,6 +980,7 @@ func (m model) pollData() tea.Cmd {
 			rateLimitErr: rlErr,
 			conductRaw:   conductRaw,
 			deferRaw:     deferRaw,
+			claudePane:   claudePane,
 		}
 	}
 }
@@ -978,6 +993,7 @@ type dataMsg struct {
 	rateLimitErr error
 	conductRaw   string // raw @claudemux_conducting value, "" when unset/unreadable
 	deferRaw     string // raw @claudemux_defer value, "" when unset/unreadable
+	claudePane   string // the claude pane this poll bound to, "" when none was seen
 }
 
 // turnEndedByIdle reports whether kind reads as "the main thread's turn
@@ -1177,9 +1193,14 @@ func (m model) acquireSummarizer() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.claudeRestartArmed {
+			return m.claudeRestartArmedKey(msg.String())
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "c":
+			return m.claudeRestartKey()
 		case "esc":
 			// esc cancels an armed teardown rather than quitting: a key that
 			// arms a kill-session needs a way out, and adding a second cancel
@@ -1349,6 +1370,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// track the lobby regardless of which transcript this head is bound to.
 		m.conductRaw = msg.conductRaw
 		m.deferRaw = msg.deferRaw
+		if msg.claudePane != "" {
+			m.claudePane = msg.claudePane
+		}
 		// A poll that agrees with an outstanding space retires it early, so the
 		// chip stops being a promise the moment it becomes a fact. Compared by
 		// conductOn, not by mode string: the lobby may answer a "conducting"
@@ -1518,6 +1542,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.summary == (Summary{}) {
 			m.summaryRetry = true
 		}
+
+	case claudeRestartMsg:
+		m.claudeRestartNote = msg.note
+		m.claudeRestartNoteAt = time.Now()
 
 	case teardownSentMsg:
 		if m.teardown != teardownSent && m.teardown != teardownExiting {
@@ -1889,6 +1917,9 @@ const (
 func (m model) statusChip(now time.Time) string {
 	if td := m.teardownChipText(now); td != "" {
 		return td
+	}
+	if rc := claudeRestartChip(m.claudeRestartArmed, m.sessionID != "", m.claudeRestartNote, m.claudeRestartNoteAt, now); rc != "" {
+		return rc
 	}
 	if m.summarizing {
 		return summarizingChip
@@ -2618,6 +2649,54 @@ func (m model) teardownDirectKey() (model, tea.Cmd) {
 		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
 	}
 	return m, nil
+}
+
+// claudeRestartKey handles `c` with nothing armed: it arms the restart
+// ladder. Only inside tmux (there is no pane to respawn otherwise) and only
+// from a quiet head — the two ladders never cross, the same way `x` and `X`
+// never do, so a restart can never be armed under a teardown mid-sequence.
+func (m model) claudeRestartKey() (model, tea.Cmd) {
+	if m.selfPane == "" || m.teardown != teardownIdle {
+		return m, nil
+	}
+	m.claudeRestartArmed = true
+	m.claudeRestartNote = ""
+	return m, nil
+}
+
+// claudeRestartArmedKey handles every key while the restart ladder is armed.
+// `c` resumes the followed session, `n` starts a new one, esc cancels. `q`
+// and `R` keep their meaning — quitting and the head's own re-exec both
+// disarm by ending the process, and a fleet restart typed in by the lobby
+// must not be swallowed. Everything else is swallowed on purpose: `x` and
+// `X` in particular, so the key that arms a kill cannot land while the chip
+// is asking a different question.
+func (m model) claudeRestartArmedKey(key string) (model, tea.Cmd) {
+	switch key {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "R":
+		m.restart = true
+		return m, tea.Quit
+	case "esc":
+		m.claudeRestartArmed = false
+		return m, nil
+	case "c":
+		if m.sessionID == "" {
+			return m, nil // waiting mode: nothing to resume, and the chip doesn't offer it
+		}
+		return m.fireClaudeRestart(m.sessionID)
+	case "n":
+		return m.fireClaudeRestart("")
+	}
+	return m, nil
+}
+
+// fireClaudeRestart disarms and respawns the claude pane, resuming resumeID
+// when it is non-empty.
+func (m model) fireClaudeRestart(resumeID string) (model, tea.Cmd) {
+	m.claudeRestartArmed = false
+	return m, restartClaudeCmd(m.selfPane, m.paneDir, m.claudePane, resumeID)
 }
 
 // autoArmTeardown arms the teardown watch when the user ran the wrap-up
