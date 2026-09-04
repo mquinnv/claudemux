@@ -1014,3 +1014,77 @@ func TestBgTrackerFollowsMovedTranscript(t *testing.T) {
 		t.Errorf("state = %v, want StateBackground: a live agent must keep counting after the transcript moves", m.state.Kind)
 	}
 }
+
+// An expiry is a guess, not a fact: the tracker stops counting the task but
+// remembers that it gave up, so the head can publish doubt instead of a
+// confident Idle. This is the case that sent the conductor into ag-admin on
+// 2026-09-04 — a hung ssh past the 30-minute shell cap.
+func TestBgTrackerRemembersExpiry(t *testing.T) {
+	b := newBgTracker()
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
+	late := time.Date(2026, 8, 11, 10, 31, 0, 0, time.UTC)
+	if n, _ := b.outstanding(late); n != 0 {
+		t.Fatalf("outstanding = %d, want 0", n)
+	}
+	if got := b.unsure(); got != 1 {
+		t.Errorf("unsure = %d, want 1: an expiry must be remembered", got)
+	}
+	// Still remembered on the next poll — outstanding is called every tick.
+	if n, _ := b.outstanding(late.Add(time.Second)); n != 0 {
+		t.Fatalf("outstanding = %d, want 0", n)
+	}
+	if got := b.unsure(); got != 1 {
+		t.Errorf("unsure = %d after second poll, want 1", got)
+	}
+}
+
+// A completion is a fact: retiring a task through its notification leaves
+// no doubt behind.
+func TestBgTrackerCompletionLeavesNoDoubt(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), now)
+	b.observe([]Event{{Type: "user", Timestamp: "2026-08-11T10:05:00Z",
+		UserText: "<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>\n</task-notification>"}}, now)
+	if n, _ := b.outstanding(now.Add(6 * time.Minute)); n != 0 {
+		t.Fatalf("outstanding = %d, want 0", n)
+	}
+	if got := b.unsure(); got != 0 {
+		t.Errorf("unsure = %d, want 0: a completion is not a guess", got)
+	}
+}
+
+// Doubt clears the moment the conversation moves on: a user or assistant
+// event newer than the expiry proves the human (or Claude) engaged, and a
+// later Stop is then a real one. Bookkeeping events do not count — the
+// harness writes attachments and snapshots without anyone present.
+func TestBgTrackerDoubtClearsOnNewTurn(t *testing.T) {
+	b := newBgTracker()
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
+	late := time.Date(2026, 8, 11, 10, 31, 0, 0, time.UTC)
+	b.outstanding(late)
+	if got := b.unsure(); got != 1 {
+		t.Fatalf("unsure = %d, want 1", got)
+	}
+	b.observe([]Event{{Type: "attachment", Timestamp: "2026-08-11T10:32:00Z"}}, late.Add(time.Minute))
+	if got := b.unsure(); got != 1 {
+		t.Errorf("unsure = %d after bookkeeping event, want 1", got)
+	}
+	b.observe([]Event{{Type: "user", Timestamp: "2026-08-11T10:33:00Z", UserText: "how's it going?"}}, late.Add(2*time.Minute))
+	if got := b.unsure(); got != 0 {
+		t.Errorf("unsure = %d after a new user turn, want 0", got)
+	}
+}
+
+// An event OLDER than the expiry cannot clear it — a reseed replays history
+// that predates the drop.
+func TestBgTrackerDoubtIgnoresOlderTurns(t *testing.T) {
+	b := newBgTracker()
+	b.observe(bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"), time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC))
+	late := time.Date(2026, 8, 11, 10, 31, 0, 0, time.UTC)
+	b.outstanding(late)
+	b.observe([]Event{{Type: "assistant", Timestamp: "2026-08-11T10:01:00Z", UserText: "old text"}}, late.Add(time.Second))
+	if got := b.unsure(); got != 1 {
+		t.Errorf("unsure = %d, want 1: an older turn does not resolve a later expiry", got)
+	}
+}
