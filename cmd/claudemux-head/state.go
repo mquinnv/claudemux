@@ -98,7 +98,11 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, bgUnsure int
 	// user/assistant turns; only the latter describe conversational state.
 	last, ok := lastConversationEvent(events)
 	if !ok {
-		return State{Kind: StateIdle, Since: now}
+		// No user/assistant event at all — e.g. a fork stub holding only
+		// bookkeeping records ("ai-title", "agent-name"). Still route
+		// through bgOverride: the tracker may know about work this session
+		// launched even though its transcript has no conversation turn yet.
+		return bgOverride(State{Kind: StateIdle, Since: now}, bgCount, bgOldest, bgUnsure)
 	}
 	switch last.Type {
 	case "assistant":

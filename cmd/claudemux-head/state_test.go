@@ -192,3 +192,19 @@ func TestUnsureLabel(t *testing.T) {
 		t.Errorf("Label = %q, want %q", got, "Unsure 2")
 	}
 }
+
+// A transcript that carries no user/assistant event at all — e.g. a fork
+// stub holding only bookkeeping records like "ai-title" or "agent-name" —
+// must still route through bgOverride. Before the fix, this branch returned
+// a bare Idle directly, so a session whose only visible activity was such a
+// bookkeeping record could never publish Background (or Unsure) no matter
+// what the tracker knew.
+func TestClassifyNoConversationEventRoutesThroughBgOverride(t *testing.T) {
+	events := []Event{{Type: "ai-title", Timestamp: "2026-08-11T10:00:00Z"}}
+	oldest := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 8, 11, 10, 5, 0, 0, time.UTC)
+	got := classifyState(events, 1, oldest, 0, now)
+	if got.Kind != StateBackground {
+		t.Errorf("kind = %v, want StateBackground: bookkeeping-only events must not bypass bgOverride", got.Kind)
+	}
+}
