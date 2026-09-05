@@ -72,10 +72,61 @@ func runStatusline(stdin io.Reader) int {
 	if path == "" {
 		return 0
 	}
-	if err := writeJSONAtomic(path, out); err != nil {
+	var prev *rawRateLimitsFile
+	if data, err := os.ReadFile(path); err == nil {
+		var p rawRateLimitsFile
+		if json.Unmarshal(data, &p) == nil {
+			prev = &p
+		}
+	}
+	merged, write := mergeRateLimitWrite(prev, out, time.Now())
+	if !write {
+		return 0
+	}
+	if err := writeJSONAtomic(path, merged); err != nil {
 		return 0
 	}
 	return 0
+}
+
+// statuslineLagWindow is how long a higher percentage outranks a lower one
+// for the same reset. Every running Claude Code renders its statusline with
+// the utilization IT last saw, so the cache is written by N processes that
+// are each a few seconds to a minute behind the others, and the file
+// flip-flopped between adjacent points (21, 22, 21, 22...) as they took
+// turns. A genuine drop — a rescaled limit — persists past this window and
+// lands; a lag never lasts this long.
+const statuslineLagWindow = 60 * time.Second
+
+// mergeRateLimitWrite decides what the cache should hold given what it holds
+// now (prev, nil when absent) and what this render reports (in). Usage cannot
+// fall inside a window, so for each window whose reset time is unchanged, a
+// lower percentage arriving within statuslineLagWindow of prev's write is a
+// lagging process and prev's value is kept. The second return is false when
+// the result is prev exactly, so a lagging write does not touch the file —
+// in particular does not refresh updated_at, which would let a run of lagging
+// writes hold a real drop off indefinitely.
+func mergeRateLimitWrite(prev *rawRateLimitsFile, in rawRateLimitsFile, now time.Time) (rawRateLimitsFile, bool) {
+	if prev == nil {
+		return in, true
+	}
+	out := in
+	age := now.Sub(time.Unix(prev.UpdatedAt, 0))
+	if age < 0 {
+		age = -age
+	}
+	if age < statuslineLagWindow {
+		if in.FiveHour.ResetsAt == prev.FiveHour.ResetsAt && in.FiveHour.UsedPercentage < prev.FiveHour.UsedPercentage {
+			out.FiveHour = prev.FiveHour
+		}
+		if in.SevenDay.ResetsAt == prev.SevenDay.ResetsAt && in.SevenDay.UsedPercentage < prev.SevenDay.UsedPercentage {
+			out.SevenDay = prev.SevenDay
+		}
+	}
+	if out.FiveHour == prev.FiveHour && out.SevenDay == prev.SevenDay {
+		return *prev, false
+	}
+	return out, true
 }
 
 // writeJSONAtomic marshals v and installs it at path via a temp file and

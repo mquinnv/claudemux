@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runStatuslineInto runs the subcommand against a payload and returns the
@@ -121,5 +122,94 @@ func TestStatuslineGarbageExitsZero(t *testing.T) {
 	}
 	if data != nil {
 		t.Fatalf("wrote %q, want no file", data)
+	}
+}
+
+// Every running Claude Code writes its own last-seen percentage into the one
+// cache, so a process that is a few seconds behind overwrites a fresher value
+// with a lower one and the file flip-flops (21, 22, 21, 22...). Usage cannot
+// fall inside a window, so a lower value for the SAME reset, arriving within
+// the lag window of a higher one, is staleness and is held off.
+func TestStatuslineMergeHoldsBriefDipInSameWindow(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	prev := rawRateLimitsFile{Source: statuslineSource, UpdatedAt: now.Add(-5 * time.Second).Unix()}
+	prev.FiveHour.UsedPercentage, prev.FiveHour.ResetsAt = 22, 1788577200
+	prev.SevenDay.UsedPercentage, prev.SevenDay.ResetsAt = 4, 1788814800
+	in := prev
+	in.UpdatedAt = now.Unix()
+	in.FiveHour.UsedPercentage = 21
+
+	out, write := mergeRateLimitWrite(&prev, in, now)
+	if write {
+		t.Fatalf("a lagging write changed nothing, want no write; got %+v", out)
+	}
+	if out.FiveHour.UsedPercentage != 22 {
+		t.Errorf("five_hour = %v, want the fresher 22 held", out.FiveHour.UsedPercentage)
+	}
+}
+
+// A drop that persists past the lag window is real — the limit was rescaled —
+// and lands.
+func TestStatuslineMergeLetsPersistentDropLand(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	prev := rawRateLimitsFile{Source: statuslineSource, UpdatedAt: now.Add(-(statuslineLagWindow + time.Second)).Unix()}
+	prev.FiveHour.UsedPercentage, prev.FiveHour.ResetsAt = 22, 1788577200
+	in := prev
+	in.UpdatedAt = now.Unix()
+	in.FiveHour.UsedPercentage = 21
+
+	out, write := mergeRateLimitWrite(&prev, in, now)
+	if !write || out.FiveHour.UsedPercentage != 21 {
+		t.Errorf("write=%v five_hour=%v, want the drop written as 21", write, out.FiveHour.UsedPercentage)
+	}
+}
+
+// A different reset time is a new window; its lower value is the truth even
+// a second after the old window's high one.
+func TestStatuslineMergeNewWindowAlwaysLands(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	prev := rawRateLimitsFile{Source: statuslineSource, UpdatedAt: now.Add(-time.Second).Unix()}
+	prev.FiveHour.UsedPercentage, prev.FiveHour.ResetsAt = 97, 1788577200
+	in := prev
+	in.UpdatedAt = now.Unix()
+	in.FiveHour.UsedPercentage, in.FiveHour.ResetsAt = 1, 1788595200
+
+	out, write := mergeRateLimitWrite(&prev, in, now)
+	if !write || out.FiveHour.UsedPercentage != 1 {
+		t.Errorf("write=%v five_hour=%v, want the new window's 1 written", write, out.FiveHour.UsedPercentage)
+	}
+}
+
+// End to end: a cache written moments ago at 22 is not lowered to 21 by the
+// next statusline render for the same window.
+func TestStatuslineLaggingWriterDoesNotLowerCache(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "rate-limits.json")
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", cache)
+	seed := rawRateLimitsFile{Source: statuslineSource, UpdatedAt: time.Now().Unix()}
+	seed.FiveHour.UsedPercentage, seed.FiveHour.ResetsAt = 22, 1788577200
+	seed.SevenDay.UsedPercentage, seed.SevenDay.ResetsAt = 4, 1788814800
+	blob, _ := json.Marshal(seed)
+	if err := os.WriteFile(cache, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code := runStatusline(strings.NewReader(`{"rate_limits": {
+		"five_hour": {"used_percentage": 21, "resets_at": 1788577200},
+		"seven_day": {"used_percentage": 4, "resets_at": 1788814800}
+	}}`))
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	data, err := os.ReadFile(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got rawRateLimitsFile
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("cache does not parse: %v", err)
+	}
+	if got.FiveHour.UsedPercentage != 22 {
+		t.Errorf("five_hour = %v, want 22 held against the lagging 21", got.FiveHour.UsedPercentage)
 	}
 }
