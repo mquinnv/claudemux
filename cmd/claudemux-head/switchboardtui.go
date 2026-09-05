@@ -589,21 +589,15 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Rate limits first, before the tmux-error early return: the meters
 		// track the account and stay fresh even when tmux is misbehaving.
 		// Sample bookkeeping mirrors the head's dataMsg handling — record a
-		// sample only when the percentage moves, trim to the last hour.
+		// sample only when the percentage moves, trim to the last hour plus
+		// the baseline (trimSamples).
 		if msg.rlErr == nil {
 			m.rateLimits = msg.rl
 			m.rateOK = true
 			if used := msg.rl.FiveHour.usedExact(); len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != used {
 				m.pctSamples = append(m.pctSamples, pctSample{at: msg.at, pct: used})
 			}
-			cutoff := msg.at.Add(-1 * time.Hour)
-			trimmed := m.pctSamples[:0]
-			for _, s := range m.pctSamples {
-				if s.at.After(cutoff) {
-					trimmed = append(trimmed, s)
-				}
-			}
-			m.pctSamples = trimmed
+			m.pctSamples = trimSamples(m.pctSamples, msg.at.Add(-1*time.Hour))
 		} else {
 			m.rateOK = false
 		}

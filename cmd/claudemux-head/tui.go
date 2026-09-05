@@ -1449,14 +1449,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if used := msg.rateLimits.FiveHour.usedExact(); len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != used {
 				m.pctSamples = append(m.pctSamples, pctSample{at: msg.time, pct: used})
 			}
-			cutoff := msg.time.Add(-1 * time.Hour)
-			trimmed := m.pctSamples[:0]
-			for _, s := range m.pctSamples {
-				if s.at.After(cutoff) {
-					trimmed = append(trimmed, s)
-				}
-			}
-			m.pctSamples = trimmed
+			m.pctSamples = trimSamples(m.pctSamples, msg.time.Add(-1*time.Hour))
 		} else {
 			m.rateOK = false
 		}

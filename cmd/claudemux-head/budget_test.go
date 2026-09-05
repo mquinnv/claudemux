@@ -90,7 +90,7 @@ func TestBurnRatePctInsufficientData(t *testing.T) {
 	samples := []pctSample{{at: now.Add(-30 * time.Second), pct: 5}}
 	rate := burnRatePctPerMin(samples, now)
 	if rate != 0 {
-		t.Errorf("burnRatePctPerMin with <2min data = %v, want 0 (sentinel)", rate)
+		t.Errorf("burnRatePctPerMin with <5min data = %v, want 0 (sentinel)", rate)
 	}
 }
 
@@ -332,5 +332,67 @@ func TestReadRateLimitsKeepsExactPercent(t *testing.T) {
 	// samples from its rounded percent rather than reading as zero.
 	if got := (Window{UsedPercent: 42}).usedExact(); got != 42 {
 		t.Errorf("usedExact fallback = %v, want 42", got)
+	}
+}
+
+// Since 2026-09-04 the cache carries whole-point percentages, so a step of one
+// or two points is quantization, not pace. Seventy seconds of history with a
+// two-point rise used to read 103%/h and peg the spike gauge red; it now reads
+// nothing until three minutes have elapsed, where one point is 20%/h.
+func TestBurnSpikeNeedsThreeMinutesOfIntegerHistory(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-70 * time.Second), pct: 20},
+		{at: now, pct: 22},
+	}
+	if got := burnPctPerHour(samples, now); got != 0 {
+		t.Errorf("burnPctPerHour over 70s of integer samples = %v, want 0", got)
+	}
+}
+
+// The rate is measured from the value the window HELD at the cutoff, not from
+// the earliest step inside it. Samples only record changes, so the sample
+// before the cutoff is the value at the cutoff; a lone step twenty seconds ago
+// is one point over the whole five minutes (12%/h), not one point over twenty
+// seconds (180%/h) and not "no data".
+func TestBurnMeasuresFromValueAtCutoff(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-8 * time.Minute), pct: 20},
+		{at: now.Add(-20 * time.Second), pct: 21},
+	}
+	if got := burnPctPerHour(samples, now); got < 11.9 || got > 12.1 {
+		t.Errorf("burnPctPerHour = %v, want ~12 (1 point over the 5-minute window)", got)
+	}
+}
+
+// The ETA's rate needs five minutes of history for the same reason: one point
+// in three minutes projected over the remaining 79 lands the "empty in" text
+// on a number that is mostly rounding.
+func TestBurnRateETANeedsFiveMinutes(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-3 * time.Minute), pct: 20},
+		{at: now, pct: 21},
+	}
+	if got := burnRatePctPerMin(samples, now); got != 0 {
+		t.Errorf("burnRatePctPerMin over 3 minutes of integer samples = %v, want 0", got)
+	}
+}
+
+// Trimming keeps the newest sample at or before the cutoff: it is the value
+// the window held AT the cutoff, which burnRate needs as its baseline. Without
+// it, the first step after a long flat stretch has nothing to measure against.
+func TestTrimSamplesKeepsBaseline(t *testing.T) {
+	now := time.Date(2026, 9, 4, 20, 0, 0, 0, time.UTC)
+	samples := []pctSample{
+		{at: now.Add(-3 * time.Hour), pct: 5},
+		{at: now.Add(-2 * time.Hour), pct: 10},
+		{at: now.Add(-90 * time.Minute), pct: 12},
+		{at: now.Add(-30 * time.Minute), pct: 15},
+	}
+	got := trimSamples(samples, now.Add(-1*time.Hour))
+	if len(got) != 2 || got[0].pct != 12 || got[1].pct != 15 {
+		t.Fatalf("trimSamples = %+v, want the -90m baseline and the -30m sample", got)
 	}
 }

@@ -5135,14 +5135,15 @@ func TestRateGaugesSpikeMeterFollowsFiveHour(t *testing.T) {
 		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
 		SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(72 * time.Hour)},
 	}
-	// 2 points in 3 minutes: 40% of the window per hour.
-	samples := []pctSample{{at: now.Add(-3 * time.Minute), pct: 18}, {at: now, pct: 20}}
+	// 4 points over six minutes: the spike gauge sees 4 over its 5-minute
+	// window (48%/h), and six minutes is enough history for the eta.
+	samples := []pctSample{{at: now.Add(-6 * time.Minute), pct: 16}, {at: now, pct: 20}}
 	gs := rateGauges(rl, nil, samples, now, defaultBarW)
 	if len(gs.parts) != 4 {
 		t.Fatalf("parts = %q, want 5h, burn, wk, eta", gs.parts)
 	}
-	if !strings.Contains(gs.parts[1], "burn") || !strings.Contains(gs.parts[1], "40%/h") {
-		t.Errorf("parts[1] = %q, want the burn gauge at 40%%/h", gs.parts[1])
+	if !strings.Contains(gs.parts[1], "burn") || !strings.Contains(gs.parts[1], "48%/h") {
+		t.Errorf("parts[1] = %q, want the burn gauge at 48%%/h", gs.parts[1])
 	}
 	if !strings.Contains(gs.parts[2], "wk") {
 		t.Errorf("parts[2] = %q, want wk after burn", gs.parts[2])

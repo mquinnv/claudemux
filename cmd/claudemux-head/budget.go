@@ -104,8 +104,14 @@ func readRateLimits(path string) (RateLimits, error) {
 	}, nil
 }
 
-// pctSample is a snapshot of five_hour.used_percentage (unrounded) at a point
-// in time.
+// pctSample is a snapshot of five_hour.used_percentage at the moment it
+// changed. Samples are recorded only on change, so the percentage between two
+// samples is the earlier one's: the series is piecewise constant, and the
+// value at any instant is the newest sample at or before it.
+//
+// The percentage is whole points. It was fractional until 2026-09-04, when the
+// utilization Claude Code copies into the payload became an integer; the
+// float is kept so a fraction is used if one ever comes back.
 type pctSample struct {
 	at  time.Time
 	pct float64
@@ -113,10 +119,10 @@ type pctSample struct {
 
 // burnRatePctPerMin returns percentage-points per minute over the last
 // ~15 minutes — the smooth signal the "empty in X" projection wants. Returns
-// 0 sentinel for "not enough data" (<2min span) or "rate is zero or negative"
-// (idle / window resetting).
+// 0 sentinel for "not enough data" (<5min of history) or "rate is zero or
+// negative" (idle / window resetting).
 func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
-	return burnRate(samples, now, 15*time.Minute, 2*time.Minute)
+	return burnRate(samples, now, 15*time.Minute, 5*time.Minute)
 }
 
 // burnPctPerHour is the spike-o-meter's reading: the last five minutes' burn
@@ -128,45 +134,87 @@ func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
 //
 // The lookback is short because a spike meter is for seeing a burst while it
 // happens; the ETA's fifteen minutes would report it ten minutes late and
-// average it away. A one-minute span is enough only because samples carry
-// the unrounded percentage. 0 for idle, a window that just reset, or not
-// enough data.
+// average it away. The percentage is whole points, so the reading's
+// resolution is one point per span: three minutes is where one point is the
+// 20%/h warn line, and less than that made a two-point wobble read as a
+// hundred. 0 for idle, a window that just reset, or not enough data.
 func burnPctPerHour(samples []pctSample, now time.Time) float64 {
-	return burnRate(samples, now, 5*time.Minute, time.Minute) * 60
+	return burnRate(samples, now, 5*time.Minute, 3*time.Minute) * 60
 }
 
-// burnRate is percentage-points per minute between the earliest and latest
-// samples inside lookback, or 0 when they span less than minSpan or the
+// burnRate is percentage-points per minute over the lookback: the rise from
+// the value the window held at the cutoff to the value it holds now, divided
+// by the lookback. The baseline is the newest sample at or before the cutoff
+// (see pctSample), so a step that happened twenty seconds ago is one point
+// over the whole window rather than one point over twenty seconds.
+//
+// With no sample that old — a head that just started — the earliest sample
+// stands in as the baseline and the span runs from it to now; that span must
+// reach minSpan, because a short one turns quantization into pace. 0 when the
 // percentage did not rise.
 func burnRate(samples []pctSample, now time.Time, lookback, minSpan time.Duration) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
 	cutoff := now.Add(-lookback)
-	var earliest pctSample
-	var latest pctSample
-	earliestSet := false
+	var base, earliest, latest pctSample
+	baseSet, earliestSet := false, false
 	for _, s := range samples {
 		if !s.at.After(cutoff) {
+			if !baseSet || s.at.After(base.at) {
+				base = s
+				baseSet = true
+			}
 			continue
 		}
 		if !earliestSet || s.at.Before(earliest.at) {
 			earliest = s
 			earliestSet = true
 		}
+	}
+	for _, s := range samples {
 		if s.at.After(latest.at) {
 			latest = s
 		}
 	}
-	if !earliestSet {
+	// With a baseline, the window held base.pct at the cutoff and the span
+	// is the whole lookback; without one, measure from the earliest sample.
+	start := cutoff
+	switch {
+	case baseSet:
+	case earliestSet:
+		base, start = earliest, earliest.at
+	default:
 		return 0
 	}
-	span := latest.at.Sub(earliest.at)
+	span := now.Sub(start)
 	if span < minSpan {
 		return 0
 	}
-	delta := latest.pct - earliest.pct
+	delta := latest.pct - base.pct
 	if delta <= 0 {
 		return 0
 	}
 	return delta / span.Minutes()
+}
+
+// trimSamples drops samples older than cutoff, keeping the newest of them:
+// that one is the value the window held AT the cutoff, and burnRate needs it
+// as the baseline for the first step after a long flat stretch.
+func trimSamples(samples []pctSample, cutoff time.Time) []pctSample {
+	baseIdx := -1
+	for i, s := range samples {
+		if !s.at.After(cutoff) && (baseIdx < 0 || s.at.After(samples[baseIdx].at)) {
+			baseIdx = i
+		}
+	}
+	trimmed := samples[:0]
+	for i, s := range samples {
+		if i == baseIdx || s.at.After(cutoff) {
+			trimmed = append(trimmed, s)
+		}
+	}
+	return trimmed
 }
 
 // Spike gauge calibration, in percent of the window per hour. The bar is full
