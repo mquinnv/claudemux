@@ -144,9 +144,18 @@ func main() {
 
 	encodedPath := encodeProjectPath(cwd)
 
-	sessionID, err := resolveSession(claudeProjectsDir, cwd, *sessionFlag)
-	var jsonlPath string
-	if err != nil {
+	// Follow the most-recently-active session unless the user pinned one with
+	// --session. Without this, a long-lived monitor stays frozen on whatever
+	// file was newest at launch and goes stale when the session rotates.
+	followActive := *sessionFlag == ""
+
+	var sessionID, jsonlPath string
+	if launchWaits(followActive, os.Getenv("TMUX_PANE")) {
+		// Inside tmux the sibling claude pane is a fresh session, and the
+		// project dir's newest transcript is the previous one — see
+		// launchWaits. Wait for the pane map to bind us instead.
+		jsonlPath = waitingTranscript(filepath.Join(claudeProjectsDir, encodedPath))
+	} else if sessionID, err = resolveSession(claudeProjectsDir, cwd, *sessionFlag); err != nil {
 		// No transcript yet. On a brand-new project this is a startup race,
 		// not an error: claudemux launches this head and the claude pane in
 		// the same second, and Claude Code creates its .jsonl only after it
@@ -161,11 +170,6 @@ func main() {
 	} else {
 		jsonlPath = filepath.Join(claudeProjectsDir, encodedPath, sessionID+".jsonl")
 	}
-
-	// Follow the most-recently-active session unless the user pinned one with
-	// --session. Without this, a long-lived monitor stays frozen on whatever
-	// file was newest at launch and goes stale when the session rotates.
-	followActive := *sessionFlag == ""
 
 	cfg, err := loadConfig()
 	if err != nil {

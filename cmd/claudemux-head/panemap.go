@@ -198,19 +198,29 @@ func readPaneMap(dir, paneID string) (string, string, bool) {
 // valid key for locating the session's current transcript. ok is false when the
 // map file is absent, unparseable, or carries no session id.
 func readPaneSession(dir, paneID string) (string, bool) {
+	m, ok := readPaneRecord(dir, paneID)
+	return m.SessionID, ok
+}
+
+// readPaneRecord is readPaneSession's whole record: the session id plus the
+// transcript path the hook recorded for it. The path is not required to
+// exist — it may dangle after a worktree move, or not exist YET for a session
+// that has not written its first line — but its directory still says which
+// project the session was started in, which is where a head waits for it.
+func readPaneRecord(dir, paneID string) (paneMap, bool) {
 	if dir == "" || paneID == "" {
-		return "", false
+		return paneMap{}, false
 	}
 	name := strings.TrimPrefix(paneID, "%") + ".json"
 	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
-		return "", false
+		return paneMap{}, false
 	}
 	var m paneMap
 	if err := json.Unmarshal(data, &m); err != nil || m.SessionID == "" {
-		return "", false
+		return paneMap{}, false
 	}
-	return m.SessionID, true
+	return m, true
 }
 
 // mappedTranscript resolves the sibling claude pane's live cwd and current
@@ -225,9 +235,10 @@ func readPaneSession(dir, paneID string) (string, bool) {
 //   - ok is false only when no claude/node candidate pane exists at all.
 //   - cwd is the pane's live path and drives the worktree chip; it is
 //     authoritative even when no session id or transcript is known.
-//   - transcript is "" when no candidate has a recorded session id yet, or the
-//     session's transcript can't be found on disk — the caller keeps its
-//     current binding in that case.
+//   - transcript is "" when no candidate has a recorded session id yet — the
+//     caller keeps its current binding in that case. When the recorded
+//     session has no transcript on disk yet it is the waiting placeholder for
+//     that session's project dir (see bindCandidates).
 //   - pane is the tmux pane id of the claude pane selected, or "" when ok is
 //     false. Teardown types into this pane, so it must be the same one whose
 //     transcript is followed.
@@ -240,17 +251,38 @@ func mappedTranscript(selfPane, dir string) (string, string, string, bool) {
 	if len(candidates) == 0 {
 		return "", "", "", false
 	}
-	paths := panePaths(listing)
+	transcript, cwd, pane := bindCandidates(candidates, panePaths(listing), dir, claudeProjectsPath())
+	return transcript, cwd, pane, true
+}
+
+// bindCandidates walks candidate panes in preference order and binds to the
+// first with a recorded session id. It is mappedTranscript without the tmux
+// listing, so the binding rules can be exercised on a pane-map dir alone.
+//
+// A recorded session whose transcript is nowhere under projectsDir is a
+// claude that has started but not yet written its first line: SessionStart
+// writes the map at boot, Claude Code creates the .jsonl at the first prompt.
+// That is a session to WAIT for, so the result is the waiting placeholder in
+// the recorded transcript's project dir. Returning "" here instead — "keep
+// the current binding" — left the head describing whatever it followed
+// before, which after `c`/`n`, or a recycled pane id at launch, is the
+// previous session.
+func bindCandidates(candidates []string, paths map[string]string, dir, projectsDir string) (string, string, string) {
 	for _, pane := range candidates {
-		if sid, ok := readPaneSession(dir, pane); ok {
-			transcript, _ := transcriptForSession(claudeProjectsPath(), sid)
-			return transcript, paths[pane], pane, true
+		rec, ok := readPaneRecord(dir, pane)
+		if !ok {
+			continue
 		}
+		transcript, found := transcriptForSession(projectsDir, rec.SessionID)
+		if !found {
+			transcript = waitingTranscript(filepath.Dir(rec.TranscriptPath))
+		}
+		return transcript, paths[pane], pane
 	}
 	// No candidate has a recorded session id yet. Still report the preferred
 	// pane's live cwd so the worktree chip tracks reality; there's no
 	// transcript to follow until the hook writes a map for it. The pane id is
 	// reported regardless — a teardown can type into a pane whose transcript
 	// is not yet known.
-	return "", paths[candidates[0]], candidates[0], true
+	return "", paths[candidates[0]], candidates[0]
 }
