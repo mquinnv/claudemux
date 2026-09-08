@@ -657,7 +657,16 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 		*m = m.abortTeardown("session rotated", now)
 	}
 
+	// Rotation can land on the waiting placeholder: the sibling pane's map
+	// names a session that has not written its transcript yet (see
+	// bindCandidates). That is waiting mode entered mid-life — same marker as
+	// newModel's, sessionID "" and an anchored waitingSince — so the pane says
+	// Starting instead of carrying the session just left.
+	waiting := isWaitingTranscript(jsonlPath)
 	sessionID := transcriptSessionID(jsonlPath)
+	if waiting {
+		sessionID = ""
+	}
 	r := newEventReader(jsonlPath)
 	r.SeedFromEnd(500)
 	seeded, _ := r.Seeded()
@@ -666,8 +675,11 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	m.sessionID = sessionID
 	m.superseded = noteContinuations(m.superseded, sessionID, seeded)
 	// Adopting a real session ends waiting mode (recomputeFromEvents keys on
-	// sessionID, but a stale anchor must not linger into a later rebind).
+	// the anchor, so a stale one must not linger into a later rebind).
 	m.waitingSince = time.Time{}
+	if waiting {
+		m.waitingSince = now
+	}
 	m.reader = r
 	m.allEvents = seeded
 	m.firstPrompt = r.FirstPrompt()
@@ -721,8 +733,10 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// Seed the new session's status lines now — mirroring what Init does at
 	// startup — rather than leaving the pane on the raw-prompt fallback until the
 	// next busy→idle edge. Still interval-guarded, and the flag is held here
-	// because the pointer receiver can (unlike Init's value receiver).
-	if !m.canSummarize(now) {
+	// because the pointer receiver can (unlike Init's value receiver). Not in
+	// waiting mode: the placeholder has nothing to summarize, and the seed
+	// fires when the real transcript is adopted — same rule as Init.
+	if waiting || !m.canSummarize(now) {
 		return nil
 	}
 	return m.issueSummarize()
@@ -940,6 +954,7 @@ func (m model) pollData() tea.Cmd {
 	jsonlPath := m.jsonlPath
 	rlPath := m.rateLimitsPath
 	follow := m.followActive
+	waitingSince := m.waitingSince
 	selfPane := m.selfPane
 	paneDir := m.paneDir
 	superseded := make(map[string]string, len(m.superseded))
@@ -954,33 +969,11 @@ func (m model) pollData() tea.Cmd {
 		activeJSONL := ""
 		claudePane := ""
 		if follow {
-			if mapped, cwd, pane, ok := mappedTranscript(selfPane, paneDir); ok {
-				claudePane = pane
-				// mapped is "" when the pane's live cwd is known but its
-				// transcript isn't yet — keep the current binding then rather
-				// than adopting an empty path. A mapped file that the harness
-				// has since continued elsewhere resolves to its successor:
-				// the pane map is not rewritten by a park.
-				if next := resolveActiveTranscript(mapped, jsonlPath, superseded, projectsDir); next != "" {
-					teardownLogf("rotate via=mapped pane=%s cwd=%s from=%s to=%s", pane, cwd, jsonlPath, next)
-					activeJSONL = next
-				}
-			} else if mra, ok := mostRecentlyActiveSession(filepath.Dir(jsonlPath)); ok && mra != jsonlPath {
-				// mappedTranscript said "no claude pane at all" — a wedged or
-				// slow tmux (listPanes has a 2s deadline) looks identical to a
-				// genuinely absent pane here, and this fallback then adopts
-				// whichever transcript in the dir was touched last.
-				teardownLogf("rotate via=mru-fallback from=%s to=%s", jsonlPath, mra)
-				activeJSONL = mra
-			}
-			// The current binding itself may have been continued elsewhere
-			// with no pane map to say so (no claude pane found, or the map
-			// still naming this very file).
-			if activeJSONL == "" {
-				if next := resolveActiveTranscript("", jsonlPath, superseded, projectsDir); next != "" {
-					teardownLogf("rotate via=continued-in from=%s to=%s", jsonlPath, next)
-					activeJSONL = next
-				}
+			mapped, cwd, pane, ok := mappedTranscript(selfPane, paneDir)
+			claudePane = pane
+			if next, via := followTarget(mapped, ok, jsonlPath, waitingSince, superseded, projectsDir); next != "" {
+				teardownLogf("rotate via=%s pane=%s cwd=%s from=%s to=%s", via, pane, cwd, jsonlPath, next)
+				activeJSONL = next
 			}
 		}
 		newEvents, _ := reader.Tail()

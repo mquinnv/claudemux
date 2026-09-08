@@ -314,7 +314,10 @@ backup is taken before any change.
 
 Without the hook, `claudemux-head` falls back to picking whichever transcript in the
 project directory changed most recently. That is wrong as soon as you have two Claude
-Code sessions open on the same project.
+Code sessions open on the same project. At launch the head does not guess at all: it
+shows **Starting** until the hook binds it to the `claude` pane next to it, and only
+ever falls back to a transcript written *after* it started — the previous session's
+transcript in a project you have used before is never the one it is looking for.
 
 A second hook, `hooks/claudemux-worktree.sh`, ships and is registered the same way —
 see `launch.auto_worktree` below for what it does.
