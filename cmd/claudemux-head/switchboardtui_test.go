@@ -1392,3 +1392,32 @@ func TestSwDeferTargetUsesHeadPane(t *testing.T) {
 		t.Fatalf("fallback target = %q, want %q", got, "claudemux:")
 	}
 }
+
+// A standby lobby still has to know which client it is driving: the user's
+// terminal can be restarted (new tmux client, new tty) while standby is on,
+// and enter/esc must move the client that exists now, not the one that went
+// away. The conductor's step() — which normally re-resolves the client —
+// never runs in standby, so the poll has to keep the client current itself.
+func TestSwModelStandbyReadoptsReplacedClient(t *testing.T) {
+	m := swTestModel()
+	m.standby = true
+	m.cond.phase = swPaused
+	// The old client (/dev/ttys001) is gone; a new one sits on the lobby.
+	snap := swSnapshot{
+		Sessions: m.snap.Sessions,
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys018": "switchboard"},
+	}
+	next, _ := m.Update(swSnapshotMsg{snap: snap})
+	m = next.(swModel)
+	if m.cond.client != "/dev/ttys018" {
+		t.Fatalf("standby poll must adopt the replacement client, got %q", m.cond.client)
+	}
+	if !m.standby {
+		t.Error("re-adopting the client must not leave standby")
+	}
+	m.sel = 1
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
+		t.Error("enter after the client was replaced must produce a switch cmd")
+	}
+}

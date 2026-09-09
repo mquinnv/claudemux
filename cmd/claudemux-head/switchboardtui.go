@@ -644,6 +644,18 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(swNextTick(),
 					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub)
 			}
+		} else if m.standby {
+			// step() is what keeps the driven client current, and in standby
+			// it never runs. The client can still be replaced meanwhile — the
+			// user restarts their terminal while the lobby sits in standby —
+			// and enter/esc hand tmux whatever name the conductor last saw,
+			// so a stale one makes them silent no-ops. Re-resolve here.
+			// Consuming the change signal is harmless: toggleStandby already
+			// reset the phase and dropped the escortee, which is all step()
+			// would have done with it. The create prompt is left alone — the
+			// conductor may be mid-escort there, and its own resolve on the
+			// next step is what tells a replaced client from a walk-away.
+			m.cond.resolveClient(m.snap)
 		}
 		return m, tea.Batch(swNextTick(), pv, pub)
 	case usageTickMsg:
