@@ -73,13 +73,23 @@ panes in the session running `claude` (or `node`), and `mappedTranscript` picks 
 discards the id. `mappedTranscript` grows a fourth return value carrying the pane it
 chose, so the teardown targets exactly the pane whose transcript the head is following.
 
-The command is sent as two tmux calls, not one:
+The command is sent as three tmux calls, not one:
 
 ```
+tmux send-keys -t <claudePane> C-u
 tmux send-keys -t <claudePane> -l -- "<command>"
 … short delay …
 tmux send-keys -t <claudePane> Enter
 ```
+
+The `C-u` empties the prompt line first. The head assumes the line is empty when it
+types, and it is not always: the flow is "click the status pane and press `x`", and a
+press that lands before focus moves goes into the `claude` pane. Without the clear the
+literal is appended to it — `x/exit`, submitted to the model as a prompt. `C-u` is
+Claude Code's "delete from cursor to line start" and a no-op on an empty line. `ctrl+c`
+and double-`esc` were rejected: the first interrupts a running turn (a teardown can be
+armed mid-turn), the second opens the rewind menu when the input is already empty. It is
+sent as a key name, not under `-l`, which would type the characters `C-u`.
 
 `--` ends tmux's option parsing: `teardown.command` is user config, and a value beginning
 with `-` would otherwise be read as a flag to `send-keys` instead of typed. Each call gets
@@ -186,9 +196,10 @@ filesystem.
 
 On the second `x` press:
 
-1. `send-keys -l "/exit"` then `Enter`, split the same way and for the same reason —
-   the same send helper the wrap-up command uses, with different text, rather than a
-   second near-identical one.
+1. `C-u`, then `send-keys -l "/exit"`, then `Enter` — the same send helper the wrap-up
+   command uses, with different text, rather than a second near-identical one. The
+   clear matters most here: this is the press most often reached by clicking across
+   from the `claude` pane, so it is the one a stray keystroke most often precedes.
 2. Poll until `claudePaneCandidates` returns no candidates for this session — i.e. no
    pane in it is running `claude` or `node` any more. This reuses the primitive the head
    already runs every second; no new detection mechanism.

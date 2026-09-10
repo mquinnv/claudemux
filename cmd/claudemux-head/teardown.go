@@ -378,6 +378,30 @@ func sendLiteralArgs(pane, text string) ([]string, bool) {
 	return []string{"send-keys", "-t", pane, "-l", "--", text}, true
 }
 
+// sendClearArgs builds the tmux call that empties pane's input line before
+// anything is typed into it.
+//
+// The head assumes the prompt is empty when it types, and that assumption is
+// not always true: the teardown flow is "click the status pane and press x",
+// and a press that lands a beat before focus moves goes into the claude pane
+// instead. Typing "/exit" after it produces "x/exit", which claude sends to the
+// model as a prompt rather than running as a command. The same goes for any
+// draft the user left half-typed before reaching for the key.
+//
+// C-u is what claude's input binds to "delete from cursor to line start", and
+// it is a no-op on an empty prompt — so this costs nothing in the common case
+// and repairs the stray-keystroke one. It is chosen over the alternatives on
+// purpose: ctrl+c interrupts a running turn (a teardown may be armed mid-turn,
+// see teardownArmedBusy), and a double esc opens the rewind menu when the
+// input is already empty. It is sent as a key NAME, not with -l: -l would type
+// the three characters "C-u".
+func sendClearArgs(pane string) ([]string, bool) {
+	if pane == "" {
+		return nil, false
+	}
+	return []string{"send-keys", "-t", pane, "C-u"}, true
+}
+
 // sendEnterArgs builds the tmux call that submits whatever is in pane's input.
 func sendEnterArgs(pane string) ([]string, bool) {
 	if pane == "" {
@@ -451,18 +475,34 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 		if !ok || pane == "" {
 			return teardownSentMsg{note: "no claude pane"}
 		}
+		// Each tmux call gets its OWN deadline, per teardownTmuxTimeout's
+		// contract. A single shared context would have to cover all three
+		// subprocesses plus the teardownKeyDelay sleep, leaving the Enter
+		// with whatever fraction of the 2s the earlier sends did not consume
+		// — so a slow-but-successful first call could cancel a later one and
+		// report a failure to submit that never happened.
+		//
+		// The clear goes first so the line holds exactly text and nothing
+		// that was already sitting in it — see sendClearArgs. No delay
+		// between it and the literal: both are plain keystrokes claude
+		// consumes in order, and there is no completion popup to outrun.
+		clear, ok := sendClearArgs(pane)
+		if !ok {
+			return teardownSentMsg{note: "wrap-up didn't submit"}
+		}
+		clearCtx, cancelClear := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		err := exec.CommandContext(clearCtx, "tmux", clear...).Run()
+		cancelClear()
+		if err != nil {
+			return teardownSentMsg{note: "wrap-up didn't submit"}
+		}
+
 		literal, ok := sendLiteralArgs(pane, text)
 		if !ok {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
-		// Each tmux call gets its OWN deadline, per teardownTmuxTimeout's
-		// contract. A single shared context would have to cover both
-		// subprocesses plus the teardownKeyDelay sleep between them, leaving
-		// the Enter with whatever fraction of the 2s the literal send did not
-		// consume — so a slow-but-successful first call could cancel the
-		// second one and report a failure to submit that never happened.
 		literalCtx, cancelLiteral := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-		err := exec.CommandContext(literalCtx, "tmux", literal...).Run()
+		err = exec.CommandContext(literalCtx, "tmux", literal...).Run()
 		cancelLiteral()
 		if err != nil {
 			return teardownSentMsg{note: "wrap-up didn't submit"}

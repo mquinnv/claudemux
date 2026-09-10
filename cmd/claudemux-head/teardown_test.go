@@ -275,6 +275,23 @@ func TestSendEnterArgs(t *testing.T) {
 	}
 }
 
+// The clear is a key name, not literal text: C-u must reach claude as the
+// control byte that deletes the line, and it must never carry -l, which would
+// type the three characters "C-u" into the prompt instead.
+func TestSendClearArgs(t *testing.T) {
+	args, ok := sendClearArgs("%3")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := []string{"send-keys", "-t", "%3", "C-u"}
+	if !slices.Equal(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+	if _, ok := sendClearArgs(""); ok {
+		t.Error("empty pane accepted")
+	}
+}
+
 func TestKillSessionArgs(t *testing.T) {
 	args, ok := killSessionArgs("claudemux")
 	if !ok {

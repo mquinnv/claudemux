@@ -771,6 +771,12 @@ wrap-up in order:
    `⏻ exiting claude…` while it waits for `claude` to actually be gone, and then kills
    the tmux session.
 
+Whatever the status pane types — the wrap-up command in step 1, `/exit` in step 3 — it
+clears the `claude` prompt first (a `ctrl+u`, which is a no-op on an empty line). A
+keypress that lands a beat before focus reaches the status pane goes into the `claude`
+input instead, and without the clear it would have been submitted as `x/exit` — a prompt
+to the model, not a command. The same goes for a half-typed draft left in the prompt.
+
 The worktree the gate watches is the one **the session's working directory is in** — the
 cwd from its transcript. `claudemux -w` (or `launch.auto_worktree`, or `worktree: true`
 in `.claudemux.yml`) only marks the session as wanting one; it's the model, prompted by
