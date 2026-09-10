@@ -521,16 +521,24 @@ teardown:
   worktree rather than creating one at launch: `claudemux` prefixes both the `claude`
   command and the head pane's command with `env CLAUDEMUX_WORKTREE_PENDING=1`. The
   worktree itself doesn't exist yet at that point — `hooks/claudemux-worktree.sh` (a
-  `UserPromptSubmit` hook) asks the model, on the session's first prompt, to call
-  `EnterWorktree` with a name derived from the task: 2-5 words, lowercase,
-  dash-separated. That's why worktrees are now named things like
-  `rename-worktrees-on-topic` instead of `lovely-wandering-lovelace` — the model, not
-  claudemux, is naming them, and it has the task in front of it. The worktree therefore
-  appears during the session's first response, not at launch: a session that's opened
-  and never prompted gets none. If the model skips the call, the status pane shows
-  `⚠ no worktree` once the first turn ends, and the hook asks again on the next prompt —
-  but **at most twice per session**, so declining it (or a `EnterWorktree` that refuses on
-  a dirty tree) doesn't nag you for the rest of the session. Feature branches, detached HEADs, existing
+  `UserPromptSubmit` hook) tells the model to call `EnterWorktree` **immediately before
+  its first change to the repo's git state** — an edit, a new file, a commit — and not
+  before, with a name derived from the task: 2-5 words, lowercase, dash-separated.
+  That's why worktrees are now named things like `rename-worktrees-on-topic` instead of
+  `lovely-wandering-lovelace` — the model, not claudemux, is naming them, and it has the
+  task in front of it. And it's why a session that only reads, investigates, or answers
+  a question never gets one at all: investigation happens in the main checkout, and the
+  worktree appears the moment the first edit is due, not at launch and not on the first
+  prompt. (An earlier version asked for the worktree "before any other tool call", which
+  produced a worktree for every session including the ones that changed nothing.) The
+  hook states the rule on the first two prompts and then stops — it stays in the
+  transcript, so a long investigation still carries it when the first edit comes — and
+  **at most twice per session** also means declining it (or an `EnterWorktree` that refuses
+  on a dirty tree) doesn't nag you for the rest of the session. The status pane's
+  `⚠ no worktree` warning matches: it appears only when the **main checkout gets dirtier**
+  than it was when the head started while the session is still outside a worktree — the
+  one outcome the marker exists to prevent — not merely because a turn ended without one.
+  Feature branches, detached HEADs, existing
   worktrees, and non-repos are left alone. Override per launch with `claudemux -w`
   (mark the session regardless of config or repo state) / `-W` (never mark), or per
   project with `worktree: true|false` in `.claudemux.yml`. Default `false`. `-w`/`-W`

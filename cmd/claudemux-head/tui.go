@@ -409,11 +409,23 @@ type model struct {
 
 	// worktreePending records that bin/claudemux marked this session as wanting
 	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
-	// one; hooks/claudemux-worktree.sh asks the model to. When the model skips
-	// that call the session works on the default branch in the SHARED checkout,
-	// which is exactly what the marking existed to prevent — so a marked
-	// session whose first turn ended outside a worktree says so in the chip.
+	// one; hooks/claudemux-worktree.sh asks the model to — right before its
+	// first change, not before. A marked session is therefore EXPECTED to run
+	// turn after turn outside a worktree while it reads and investigates. The
+	// failure the marking exists to prevent is work landing in the SHARED
+	// checkout, so that is what the chip warns about: the main checkout's
+	// `git status` growing past the baseline snapshotted at startup while the
+	// session is still outside a worktree. See worktreedirty.go.
 	worktreePending bool
+	// mainStatusBaseline is `git status --porcelain` of mainCheckout as it was
+	// when this head started; mainStatusBaselineOK says the snapshot was
+	// actually taken (no baseline means no warning, never "assume clean").
+	// mainDirtied latches once a probe sees a line the baseline lacked.
+	mainStatusBaseline   string
+	mainStatusBaselineOK bool
+	mainDirtied          bool
+	mainDirtyProbing     bool
+	mainDirtyProbeAt     time.Time
 
 	summarizing   bool
 	lastSummaryAt time.Time
@@ -505,6 +517,17 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.mainCheckout = mainCheckoutFor(wd)
 	}
 	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
+	if m.worktreePending {
+		// The baseline the dirty-main warning compares against. Taken only for
+		// marked sessions (nobody else gets the warning) and only here, while
+		// the directory still exists — the same reasoning as workDir above. A
+		// head restarted mid-session re-baselines to whatever main looks like
+		// then; that loses a warning that was already showing, which is the
+		// same graceful degradation the worktree tab label accepts.
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		m.mainStatusBaseline, m.mainStatusBaselineOK = mainStatusSnapshot(ctx, m.mainCheckout)
+		cancel()
+	}
 	// The tracker starts from what the transcript already shows: heads
 	// restart and rotate while background work is out, and an unseeded
 	// tracker would call such a session Idle — the conductor then escorts
@@ -1347,6 +1370,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restart = true
 			return m, tea.Quit
 		}
+		if m.mainDirtyProbeDue(now) {
+			m.mainDirtyProbing = true
+			m.mainDirtyProbeAt = now
+			cmds = append(cmds, mainDirtyProbeCmd(m.mainCheckout, m.mainStatusBaseline))
+		}
 		switch m.teardown {
 		case teardownSent:
 			// Evidence the keystrokes landed: claude went busy, or a new
@@ -1574,6 +1602,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.abortTeardown(note, time.Now()), nil
 		}
+
+	case mainDirtyMsg:
+		m.mainDirtyProbing = false
+		if msg.dirtied {
+			// One-way: the main checkout was dirtied on this session's watch.
+			// Later probes are pointless (mainDirtyProbeDue stops them), and
+			// a cleanup that makes the tree match the baseline again does not
+			// un-happen the edit that was made there.
+			m.mainDirtied = true
+		}
+		return m, nil
 
 	case teardownProbeMsg:
 		m.teardownProbing = false
@@ -2531,34 +2570,35 @@ func (m model) observedWorktree() string {
 	return worktreeName(m.jsonlPath)
 }
 
-// noWorktreeWarning is the exact text the spec requires the chip slot to
-// show when a marked session's first turn ends without a worktree. It carries
+// noWorktreeWarning is the exact text the chip slot shows when a marked
+// session has dirtied the main checkout without entering a worktree. It carries
 // its own "⚠" and takes no chip glyph — it is not a worktree name, so "⌂ "
 // would be a lie. The branch chip is unaffected and still renders beside it:
 // which branch a worktree-less session sits on is exactly what you need to
 // act. renderStatusbar/renderStateLine give the warning priority over clipping —
 // unlike a worktree name, it is not "merely descriptive": it is the entire
 // user-visible mitigation for the risk this design accepts.
+//
+// It no longer fires merely because a turn ended outside a worktree: since the
+// hook defers the worktree to the first change, that is the normal shape of an
+// investigation, not a skipped call. See worktreedirty.go.
 const noWorktreeWarning = "⚠ no worktree"
 
 // worktreeChipText decides what the worktree chip slot shows. A real worktree
-// always wins: the warning is only for a marked session that has not got one.
-//
-// sawPrompt gates the warning so a session sitting at an empty input is not
-// accused of skipping anything — nothing has been asked of it yet.
-func worktreeChipText(chip string, pending, turnEnded, sawPrompt bool) string {
+// always wins: the warning is only for a marked session that has not got one
+// AND has already dirtied the main checkout (mainDirtied).
+func worktreeChipText(chip string, pending, mainDirtied bool) string {
 	if chip != "" {
 		return chip
 	}
-	if pending && turnEnded && sawPrompt {
+	if pending && mainDirtied {
 		return noWorktreeWarning
 	}
 	return ""
 }
 
 func (m model) worktreeChip() string {
-	return worktreeChipText(m.observedWorktree(), m.worktreePending,
-		teardownTurnEnded(m.state.Kind), m.firstPrompt != "")
+	return worktreeChipText(m.observedWorktree(), m.worktreePending, m.mainDirtied)
 }
 
 func allDigits(s string) bool {

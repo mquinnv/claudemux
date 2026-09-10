@@ -443,6 +443,7 @@ func TestWarningChipHasNoBranchGlyphAndSurvivesNarrowWidth(t *testing.T) {
 			state:           State{Kind: StateIdle, Since: time.Now()},
 			modelName:       "claude-opus-4-7",
 			worktreePending: true,
+			mainDirtied:     true, // the session edited the shared checkout
 			firstPrompt:     "do the thing",
 			sessionBranch:   "main",
 			// jsonlPath deliberately NOT a worktree path, and sessionCwd unset:
@@ -3678,30 +3679,31 @@ func TestHaikuWinsOnlyOnTopicChange(t *testing.T) {
 
 func TestWorktreeChipTextWarnsWhenNoneAppeared(t *testing.T) {
 	tests := []struct {
-		name                      string
-		chip                      string
-		pending, ended, sawPrompt bool
-		want                      string
+		name             string
+		chip             string
+		pending, dirtied bool
+		want             string
 	}{
-		{"warns once the first turn ends with no worktree",
-			"", true, true, true, "⚠ no worktree"},
-		{"silent before a prompt",
-			"", true, true, false, ""},
-		{"silent mid-turn",
-			"", true, false, true, ""},
+		{"warns once the main checkout was dirtied with no worktree",
+			"", true, true, "⚠ no worktree"},
+		// The hook asks for the worktree right before the first CHANGE, so a
+		// marked session that has only been reading is doing exactly what it
+		// was told — however many turns have ended.
+		{"silent while nothing has been changed",
+			"", true, false, ""},
 		{"silent when the session was never marked",
-			"", false, true, true, ""},
+			"", false, true, ""},
 		{"a worktree that appeared wins over the warning",
-			"rename-worktrees-on-topic", true, true, true, "rename-worktrees-on-topic"},
+			"rename-worktrees-on-topic", true, true, "rename-worktrees-on-topic"},
 		{"unmarked session with a worktree still shows it",
-			"some-worktree", false, true, true, "some-worktree"},
+			"some-worktree", false, false, "some-worktree"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := worktreeChipText(tt.chip, tt.pending, tt.ended, tt.sawPrompt)
+			got := worktreeChipText(tt.chip, tt.pending, tt.dirtied)
 			if got != tt.want {
-				t.Errorf("worktreeChipText(%q, %v, %v, %v) = %q, want %q",
-					tt.chip, tt.pending, tt.ended, tt.sawPrompt, got, tt.want)
+				t.Errorf("worktreeChipText(%q, %v, %v) = %q, want %q",
+					tt.chip, tt.pending, tt.dirtied, got, tt.want)
 			}
 		})
 	}
@@ -3709,12 +3711,12 @@ func TestWorktreeChipTextWarnsWhenNoneAppeared(t *testing.T) {
 
 // worktreeChipText (above) is well tested as a pure function, but the wiring
 // that feeds it — m.worktreePending reading CLAUDEMUX_WORKTREE_PENDING off
-// the real environment in newModel, composed with teardownTurnEnded and
-// m.firstPrompt in worktreeChip — is the entire mitigation for the risk this
-// design accepts: a session marked for a worktree whose first turn ends
-// outside one. Exercise it through newModel, not a hand-built &model{}, so a
-// regression in the env lookup itself (not just in worktreeChipText's logic)
-// would be caught.
+// the real environment in newModel, and the startup baseline that the
+// dirty-main probe compares against — is the entire mitigation for the risk
+// this design accepts: a session marked for a worktree that edits the shared
+// checkout instead. Exercise it through newModel, not a hand-built &model{},
+// so a regression in the env lookup itself (not just in worktreeChipText's
+// logic) would be caught.
 func TestWorktreeChipWiredThroughEnv(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sess.jsonl")
@@ -3736,14 +3738,25 @@ func TestWorktreeChipWiredThroughEnv(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("CLAUDEMUX_ENV", filepath.Join(t.TempDir(), "absent"))
 
-	t.Run("marked session whose first turn ended outside a worktree warns", func(t *testing.T) {
+	t.Run("marked session is baselined, stays quiet until main is dirtied, then warns", func(t *testing.T) {
 		t.Setenv("CLAUDEMUX_WORKTREE_PENDING", "1")
 		m := newModel(defaultConfig(), path, "sess", false)
 		if !m.worktreePending {
 			t.Fatal("worktreePending = false, want true with CLAUDEMUX_WORKTREE_PENDING set")
 		}
+		// The test binary runs inside this repo's checkout, so a baseline is
+		// obtainable; without one the probe could never fire.
+		if !m.mainStatusBaselineOK {
+			t.Fatal("mainStatusBaselineOK = false, want a startup baseline for a marked session")
+		}
+		// A finished turn outside a worktree is no longer an accusation: the
+		// model was told to enter one right before its first change.
+		if got := m.worktreeChip(); got != "" {
+			t.Errorf("worktreeChip() = %q before any change, want empty", got)
+		}
+		m.mainDirtied = true
 		if got, want := m.worktreeChip(), "⚠ no worktree"; got != want {
-			t.Errorf("worktreeChip() = %q, want %q", got, want)
+			t.Errorf("worktreeChip() after main was dirtied = %q, want %q", got, want)
 		}
 	})
 
@@ -4191,7 +4204,7 @@ func TestStateLineNeverRendersNamelessChip(t *testing.T) {
 		"no worktree warning": {
 			state:     State{Kind: StateIdle, Since: now.Add(-30 * time.Second)},
 			modelName: "claude-opus-5", sessionBranch: "lobby-preview",
-			worktreePending: true, firstPrompt: "do the thing",
+			worktreePending: true, mainDirtied: true, firstPrompt: "do the thing",
 			jsonlPath: "/proj/abc.jsonl",
 		},
 		"wide-rune names": {
@@ -4221,10 +4234,11 @@ func TestStateLineNeverRendersNamelessChip(t *testing.T) {
 }
 
 // The warning and the branch occupy different slots, so a marked session that
-// never got its worktree still says which branch it is sitting on.
+// dirtied the main checkout without a worktree still says which branch it is
+// sitting on.
 func TestStateLineWarningKeepsBranch(t *testing.T) {
 	m := model{ready: true, width: 120, height: 2, state: State{Kind: StateIdle},
-		sessionBranch: "main", worktreePending: true, firstPrompt: "do a thing"}
+		sessionBranch: "main", worktreePending: true, mainDirtied: true, firstPrompt: "do a thing"}
 	line := ansi.Strip(renderStateLine(m, time.Now()))
 	if !strings.Contains(line, noWorktreeWarning) {
 		t.Errorf("warning missing: %q", line)
