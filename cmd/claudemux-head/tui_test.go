@@ -951,6 +951,10 @@ func TestShouldSummarize(t *testing.T) {
 				summarizing:        tt.summarizing,
 				lastSummaryAt:      tt.lastAt,
 				minSummaryInterval: 20 * time.Second,
+				// An edge is only reachable on a ring that holds a
+				// conversation; an empty ring never summarizes (see
+				// TestCanSummarizeRequiresContent).
+				allEvents: []Event{{Type: "user", UserText: "hi"}},
 			}
 			if got := m.shouldSummarize(tt.prevKind, tt.now); got != tt.want {
 				t.Errorf("shouldSummarize() = %v, want %v", got, tt.want)
@@ -2035,7 +2039,9 @@ func TestTickAcquisitionGuards(t *testing.T) {
 // the status lines, mirroring what Init does when the key was there at startup.
 func TestSummarizerMsgInstallsAndSeeds(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	m := model{acquiringKey: true, lastSummaryAt: now.Add(-time.Hour)}
+	m := model{acquiringKey: true, lastSummaryAt: now.Add(-time.Hour),
+		// The late seed, like Init's, needs something to describe.
+		allEvents: []Event{{Type: "user", UserText: "hi"}}}
 
 	got, cmd := m.Update(summarizerMsg{s: &Summarizer{}, at: now})
 	next := got.(model)
