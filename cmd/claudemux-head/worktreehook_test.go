@@ -76,10 +76,35 @@ func TestWorktreeHookAsksForWorktree(t *testing.T) {
 	}
 }
 
-// The cwd check only ends the nagging when EnterWorktree SUCCEEDS. On every
-// failure path — the user says "no, just work here", the tool refuses on a
-// dirty tree, the model declines — the cwd never moves, so without a cap the
-// hook would re-inject on every prompt for the rest of the session.
+// The instruction must defer the worktree to the first change, not demand it
+// up front. The first wording said "Before any other tool call" and the model
+// did exactly that: every session — including the ones that only read code
+// or answered a question — got a worktree on its first response.
+func TestWorktreeHookDefersUntilFirstChange(t *testing.T) {
+	got := runWorktreeHook(t,
+		`{"cwd":"/tmp/repo"}`,
+		"CLAUDEMUX_WORKTREE_PENDING=1")
+	if strings.Contains(got, "Before any other tool call") {
+		t.Errorf("instruction still demands the worktree up front: %q", got)
+	}
+	if !strings.Contains(got, "Do not enter one now") {
+		t.Errorf("instruction does not forbid entering immediately: %q", got)
+	}
+	if !strings.Contains(got, "immediately before your first action") {
+		t.Errorf("instruction does not name the moment (right before the first change): %q", got)
+	}
+	// A read-only task must be told it gets no worktree at all, or the model
+	// will still make one "just in case" at the end.
+	if !strings.Contains(got, "never call it") {
+		t.Errorf("instruction does not exempt tasks that change nothing: %q", got)
+	}
+}
+
+// The cwd check only ends the injection when EnterWorktree SUCCEEDS. On every
+// other path — the session is still reading, the user says "no, just work
+// here", the tool refuses on a dirty tree, the model declines — the cwd never
+// moves, so without a cap the hook would re-inject on every prompt for the
+// rest of the session.
 func TestWorktreeHookStopsAskingAfterCap(t *testing.T) {
 	home := t.TempDir()
 	payload := `{"cwd":"/tmp/repo","session_id":"sess-cap"}`
