@@ -464,7 +464,10 @@ teardown:
   A negative value is rejected at startup (it would remove the limit, not set one).
   A summarize call that fails outright (API error, no reply) is retried on its
   own fixed 30s floor while the pane has no summary yet, independent of this
-  setting.
+  setting. No call goes out at all while the transcript holds no prompt or
+  assistant turn — a brand-new session, or a continuation's not-yet-written
+  successor — since the model would only invent a label for it; the first
+  real turn's events fire the first call.
 - `summary.tab_title` — rename each session's tmux window (and thus the terminal
   tab) to the short Haiku `tab` label, so a row of tabs reads like a list of what
   each session is doing. Default `true`. Set `false` to keep the status-pane
