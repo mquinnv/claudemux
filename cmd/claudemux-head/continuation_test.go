@@ -37,7 +37,7 @@ func TestFollowContinuation(t *testing.T) {
 	old := filepath.Join(proj, "old-id.jsonl")
 	next := filepath.Join(proj, "new-id.jsonl")
 	for _, p := range []string{old, next} {
-		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+		if err := os.WriteFile(p, []byte(conversationLine+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -66,7 +66,7 @@ func TestFollowContinuationChainsAndTerminates(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"a", "b", "c"} {
-		if err := os.WriteFile(filepath.Join(proj, id+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(proj, id+".jsonl"), []byte(conversationLine+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -93,7 +93,7 @@ func TestResolveActiveTranscriptFollowsPark(t *testing.T) {
 	parked := filepath.Join(proj, "ebe355f0.jsonl")
 	fork := filepath.Join(proj, "6de04257.jsonl")
 	for _, p := range []string{parked, fork} {
-		if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+		if err := os.WriteFile(p, []byte(conversationLine+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

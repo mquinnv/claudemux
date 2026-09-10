@@ -476,8 +476,10 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		// second concurrent call against the seed call. In waiting mode
 		// (sessionID "") Init does NOT fire — there is nothing to summarize —
 		// so the flag must not be held either, or it would never clear and
-		// block every future call.
-		summarizing: summarizer != nil && sessionID != "",
+		// block every future call. Same for a bound transcript that has no
+		// content event yet — see canSummarize for why a call on nothing is
+		// worse than no call.
+		summarizing: summarizer != nil && sessionID != "" && hasContentEvent(seeded),
 	}
 	m.superseded = noteContinuations(m.superseded, sessionID, seeded)
 	m.launchBin, m.launchBinOK = launchBinStamp()
@@ -840,10 +842,12 @@ func (m model) Init() tea.Cmd {
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
 		cmds = append(cmds, c)
 	}
-	// No seed call in waiting mode: the transcript is empty, and
-	// switchSession fires the seed when a real session is adopted. Must
-	// stay in lockstep with newModel's `summarizing` initializer above.
-	if m.summarizer != nil && m.waitingSince.IsZero() {
+	// The seed call goes out exactly when newModel held the in-flight flag
+	// for it: a summarizer exists, a real session is bound (not waiting
+	// mode), and its transcript has something to describe. Keying on the
+	// flag itself is what keeps the two in lockstep — Init has a value
+	// receiver and cannot set the flag, so it must not decide on its own.
+	if m.summarizing {
 		cmds = append(cmds, m.summarize())
 	}
 	return tea.Batch(cmds...)
@@ -1107,7 +1111,37 @@ func (m model) canSummarize(now time.Time) bool {
 	if m.summarizer == nil || m.summarizing {
 		return false
 	}
-	return now.Sub(m.lastSummaryAt) >= m.minSummaryInterval
+	if now.Sub(m.lastSummaryAt) < m.minSummaryInterval {
+		return false
+	}
+	// Nothing to describe, no call. The tool call is forced and the prompt
+	// forbids placeholders, so a transcript with no content event does not
+	// fail cleanly — the model invents a label ("session setup", remix-2 on
+	// 2026-09-10, seeded from a continuation stub that held only bookkeeping
+	// records) and the head keeps it as a real summary. From there only a
+	// busy→idle edge can replace it: shouldSummarizeFromGrowth declines while
+	// a summary exists, and a long first turn has no edge for hours. Skipping
+	// the call leaves the pane on the raw-prompt fallback with the growth rule
+	// armed, which fires as soon as the first few content events land.
+	//
+	// Checked last: the walk stops at the first content event, which in any
+	// live ring is near the front, but the cheap guards above still bound it.
+	return hasContentEvent(m.allEvents)
+}
+
+// hasContentEvent reports whether the ring holds at least one record the
+// summarizer would read — the same test contentEvents applies, stopped at the
+// first hit rather than collecting them all.
+func hasContentEvent(events []Event) bool {
+	for _, e := range events {
+		if genuinePrompt(e) {
+			return true
+		}
+		if e.Type == "assistant" && (e.UserText != "" || len(e.ToolUses) > 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // tabLabel picks the window label: the name the session gave its own worktree
