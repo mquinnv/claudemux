@@ -251,6 +251,14 @@ type swModel struct {
 	previewOut      string
 	previewErr      bool
 	previewInFlight bool
+	// previewHidden is the p toggle: no box and no captures, so the whole
+	// pane below the chrome goes to the fleet list.
+	previewHidden bool
+	// scroll is the index of the first session the list renders. It only
+	// moves when the selection would otherwise leave the visible window (see
+	// swListWindow), so j/k inside the window never shifts the rows under the
+	// cursor.
+	scroll int
 	// New-session input mode (`n`): creating means the status line is a text
 	// prompt and every printable key is a literal character of createInput.
 	// createBusy marks a launch in flight (one at a time); createErr keeps the
@@ -365,6 +373,9 @@ func (m swModel) selectedPane() string {
 // screen under another's title while the new capture is in flight.
 func (m *swModel) previewCmd() tea.Cmd {
 	pane := m.selectedPane()
+	if m.previewHidden {
+		pane = ""
+	}
 	if pane != m.previewPane {
 		m.previewOut, m.previewPane, m.previewErr = "", "", false
 	}
@@ -580,6 +591,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.followSelection()
 	case swTickMsg:
 		// Re-resolved every tick while the lobby is still on abtop's file, for
 		// the reason the head does it — see refreshedRateLimitsPath.
@@ -628,6 +640,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sel < 0 {
 			m.sel = 0
 		}
+		m.followSelection()
 		if m.shouldAutoRestart(time.Now()) {
 			m.restart = true
 			return m, tea.Quit
@@ -800,9 +813,18 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sess := m.snap.Sessions[m.sel]
 				return m, setDeferCmd(swDeferTarget(sess), !sess.Deferred)
 			}
+		case "p":
+			// Hide or restore the preview box. Showing it again requests a
+			// capture straight away rather than leaving the box blank until
+			// the next poll.
+			m.previewHidden = !m.previewHidden
+			m.followSelection()
+			cmd := m.previewCmd()
+			return m, cmd
 		case "j", "down":
 			if m.sel < len(m.snap.Sessions)-1 {
 				m.sel++
+				m.followSelection()
 				// Two-line form, not `return m, m.previewCmd()`: Go orders
 				// function calls relative to each other, not relative to a
 				// plain operand, so a single-expression return would rely on
@@ -814,6 +836,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if m.sel > 0 {
 				m.sel--
+				m.followSelection()
 				cmd := m.previewCmd()
 				return m, cmd
 			}
@@ -913,29 +936,13 @@ func (m swModel) View() string {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
 
-	// Rows each session wants on screen. The layout needs this up front so the
-	// preview can grow into rows a small fleet would otherwise leave blank.
-	want := 0
 	anyDeferred := false
 	for _, sess := range m.snap.Sessions {
-		want += swSessionRows(sess)
 		if sess.Deferred {
 			anyDeferred = true
 		}
 	}
-	lay := computePreviewLayout(m.height, m.lastErr != "", m.rateOK, want)
-
-	// Only when the fleet's total need EXCEEDS the cap is anything dropped —
-	// and then one row is held back so the "+N more" line announcing the
-	// truncation doesn't itself push the preview box off the bottom.
-	budget := lay.ListRows
-	if budget > 0 {
-		if want <= budget {
-			budget = 0 // everything fits; no cap needed
-		} else {
-			budget--
-		}
-	}
+	lay, start, end := m.listWindow()
 
 	// One width for the whole render, so the topic column is a column. The
 	// badge's width is reserved whenever ANY session in the fleet is
@@ -948,14 +955,8 @@ func (m swModel) View() string {
 	}
 	topicW := swTopicW(m.width, reserve)
 
-	used, shown := 0, 0
-	for i, sess := range m.snap.Sessions {
-		// budget == 0 means uncapped (no preview drawn, or the fleet already
-		// fits) — the loop then runs to completion exactly as it did before
-		// this task.
-		if budget > 0 && used+swSessionRows(sess) > budget {
-			break
-		}
+	for i := start; i < end; i++ {
+		sess := m.snap.Sessions[i]
 		marker := "  "
 		switch {
 		case sess.Deferred:
@@ -1036,14 +1037,11 @@ func (m swModel) View() string {
 			}
 			b.WriteString(line2 + "\n")
 		}
-		used += swSessionRows(sess)
-		shown++
 	}
-	if shown < len(m.snap.Sessions) {
+	if more := swMoreText(start, len(m.snap.Sessions)-end); more != "" {
 		// Same width guard as every other line here: this text is short, but
 		// consistency is cheaper to maintain than a special case.
-		moreLine := fmt.Sprintf("    %s", swStatusStyle.Render(
-			fmt.Sprintf("… +%d more", len(m.snap.Sessions)-shown)))
+		moreLine := fmt.Sprintf("    %s", swStatusStyle.Render(more))
 		if m.width > 0 {
 			moreLine = clipLine(moreLine, m.width)
 		}
@@ -1126,7 +1124,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · esc back · n new · d defer · R restart · ^R restart all · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}
@@ -1136,6 +1134,118 @@ func (m swModel) View() string {
 	}
 	b.WriteString(footer)
 	return b.String()
+}
+
+// listWindow is the one place a render's list geometry is decided: the preview
+// layout, and the [start, end) slice of sessions the list shows. View and
+// followSelection both call it, so the scroll offset Update stores and the
+// rows View draws cannot disagree.
+//
+// The list is capped whenever the pane has a known height — not only when the
+// box is drawn. Before, a hidden or crowded-out box left the list uncapped, and
+// a large fleet simply ran off the bottom of the pane with the status and
+// footer lines, where no key could reach it.
+func (m swModel) listWindow() (lay swLayout, start, end int) {
+	want := 0
+	rows := make([]int, len(m.snap.Sessions))
+	for i, sess := range m.snap.Sessions {
+		rows[i] = swSessionRows(sess)
+		want += rows[i]
+	}
+	if !m.previewHidden {
+		lay = computePreviewLayout(m.height, m.lastErr != "", m.rateOK, want)
+	}
+	limit := lay.ListRows
+	if !lay.Show {
+		lay = swLayout{}
+		limit = 0
+		if m.height > 0 {
+			// No box: the blank row above it is not spent either.
+			limit = m.height - (swChromeRows - 1)
+			if m.lastErr != "" {
+				limit--
+			}
+			if m.rateOK {
+				limit--
+			}
+			if limit < 1 {
+				limit = 1
+			}
+		}
+	}
+	if limit <= 0 || want <= limit {
+		return lay, 0, len(rows)
+	}
+	// One row is held back for the "↑/↓ more" line announcing what is off
+	// screen, so that line does not itself push the box off the bottom.
+	start, end = swListWindow(rows, limit-1, m.sel, m.scroll)
+	return lay, start, end
+}
+
+// followSelection re-derives the scroll offset after anything that can move
+// the selection or change the list's room: a key, a poll, a resize, a toggle.
+func (m *swModel) followSelection() {
+	_, m.scroll, _ = m.listWindow()
+}
+
+// swListWindow picks the [start, end) run of sessions to show in budget rows,
+// given each session's row count. It keeps sel visible while moving start as
+// little as possible from prev, so the list scrolls only when the selection
+// reaches an edge. When the window reaches the end of the fleet, start is
+// pulled back to use any room left over — a shrinking fleet or a growing pane
+// fills in from above rather than leaving blank rows under the last session.
+// A single selected session taller than budget is still shown: the cursor is
+// never scrolled out of sight.
+func swListWindow(rows []int, budget, sel, prev int) (start, end int) {
+	n := len(rows)
+	if n == 0 {
+		return 0, 0
+	}
+	sel = min(max(sel, 0), n-1)
+	start = min(max(prev, 0), sel)
+	sum := func(a, b int) int {
+		t := 0
+		for _, r := range rows[a:b] {
+			t += r
+		}
+		return t
+	}
+	for start < sel && sum(start, sel+1) > budget {
+		start++
+	}
+	used := 0
+	end = start
+	for end < n && used+rows[end] <= budget {
+		used += rows[end]
+		end++
+	}
+	if end <= sel {
+		end = sel + 1
+		return start, end
+	}
+	if end == n {
+		for start > 0 && used+rows[start-1] <= budget {
+			start--
+			used += rows[start]
+		}
+	}
+	return start, end
+}
+
+// swMoreText is the list's overflow line — how many sessions sit above and
+// below the visible window — or "" when the whole fleet is on screen.
+func swMoreText(above, below int) string {
+	var parts []string
+	if above > 0 {
+		parts = append(parts, fmt.Sprintf("↑ %d more", above))
+	}
+	if below > 0 {
+		parts = append(parts, fmt.Sprintf("↓ %d more", below))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "… " + strings.Join(parts, " · ")
 }
 
 // runSwitchboard is the `claudemux-head switchboard` entry point.

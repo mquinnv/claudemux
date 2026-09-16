@@ -238,8 +238,12 @@ below — so you can stop the conductor without coming back here first.
 
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `d` toggles defer on the selected
-row, `Esc` returns to the session you came from (tmux's per-client last
-session), `n` starts a new session, `q` quits.
+row, `p` hides or shows the preview box, `Esc` returns to the session you came
+from (tmux's per-client last session), `n` starts a new session, `q` quits.
+
+A fleet longer than the pane scrolls: the list follows the selection, and a
+`↑ N more · ↓ N more` line says how many sessions are off screen in each
+direction. Hiding the preview with `p` gives its rows to the list.
 
 ## Install
 
