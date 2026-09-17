@@ -135,9 +135,8 @@ up with the secrets in its environment rather than without them.
 Run `claudemux` with no arguments to open a **switchboard** (`claudemux switch` does the
 same thing, explicitly): a full-screen lobby session that watches
 every claudemux session and automatically carries your tmux client to whichever one
-is waiting on input — Claude's turn ended, or it asked you a question — oldest first
-among the non-deferred, then oldest first among any deferred sessions (see **Deferring
-a session** below).
+is waiting on input — Claude's turn ended, or it asked you a question — oldest first,
+skipping any session you've deferred (see **Deferring a session** below).
 Answer, and it moves you to the next waiting session; when nothing waits, you're
 returned to the lobby — unless the session you're in is the only one there is, in
 which case you stay put. A lobby whose entire fleet is the session you were just
@@ -147,6 +146,12 @@ a second session starts waiting, it collects you as usual.
 It never fights you for the client: switch away manually and it pauses until you
 come back to the lobby. A session you deliberately walk away from isn't re-queued
 until it starts waiting again for a new reason.
+
+Sending a prompt is what hands a session back and frees the conductor to carry you
+on. Commands Claude Code answers by itself — `/clear`, `/model`, `/context`,
+`/status` and the like — are not that: they leave the session waiting on you, so
+you stay where you are. Clearing a session to start fresh in it doesn't eject you
+from it.
 
 Every escorted arrival is announced: a small popup pulls in a locomotive and
 introduces the session you just landed in — what it's working on, its name, and
@@ -180,15 +185,15 @@ To **skip** a session you don't want to answer right now, jump back to the lobby
 snoozed and the conductor carries you to the next waiting one.
 
 **Deferring a session** is different from a snooze: it says this session is waiting on
-something outside claudemux — a review, a build, another person — and should sit at the
-back of the queue until nothing else needs you. Press `d` on the selected row in the
+something outside claudemux — a review, a build, another person — and the conductor
+should never carry you into it. Press `d` on the selected row in the
 lobby, or `d` from inside the session's own status pane, to toggle it. Deferring
 first asks what the session is blocked on: type the blocker and press `Enter` (an
 empty one still defers), or `Esc` to back out without deferring. Pressing `d` on a
-deferred session clears it, blocker and all, with no prompt. A deferred
-session still shows up when it's genuinely the only thing waiting — with a small fleet
-it may be the only session in the queue at all — but any non-deferred session that
-starts waiting jumps ahead of it, and a busy session never blocks it either way. A
+deferred session clears it, blocker and all, with no prompt. A deferred session is
+out of the queue entirely — if it's the only thing waiting, you stay on the lobby
+rather than being dispatched to it — but it stays a keystroke away: `Enter` on its
+row goes there whenever you want, and it never stops being visible. A
 deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
 leading the row's second line, and the session's own status pane shows a
 `◆ defer: <blocker>` chip on its top line. Unlike a snooze, defer never clears itself — the
