@@ -1441,6 +1441,29 @@ func TestSwDeferTargetUsesHeadPane(t *testing.T) {
 	}
 }
 
+// A session name that prefixes the lobby's window name ("claudemux-head")
+// must not be handed to tmux bare — see swDeferTarget's comment and
+// docs/superpowers/specs/2026-09-17-tmux-target-resolution-and-lobby-restart.md.
+func TestSwSwitchTargetIsSessionScoped(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"claudemux", "claudemux:"},
+		{"gh-hud", "gh-hud:"},
+		{"switchboard", "switchboard:"},
+	} {
+		if got := swSwitchTarget(tc.in); got != tc.want {
+			t.Errorf("swSwitchTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// An empty session is not a target at all; passing ":" to tmux would resolve to
+// the caller's own current session, which is exactly the bug being fixed.
+func TestSwSwitchTargetEmpty(t *testing.T) {
+	if got := swSwitchTarget(""); got != "" {
+		t.Errorf("swSwitchTarget(\"\") = %q, want \"\"", got)
+	}
+}
+
 // A standby lobby still has to know which client it is driving: the user's
 // terminal can be restarted (new tmux client, new tty) while standby is on,
 // and enter/esc must move the client that exists now, not the one that went

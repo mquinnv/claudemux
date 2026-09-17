@@ -496,7 +496,7 @@ func swSwitchCmd(client, target string, card *bannerCard) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run(); err != nil || card == nil {
+		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", swSwitchTarget(target)).Run(); err != nil || card == nil {
 			return nil
 		}
 		self, err := os.Executable()
@@ -1343,4 +1343,18 @@ func swDeferTarget(sess swSession) string {
 		return sess.HeadPane
 	}
 	return sess.Name + ":"
+}
+
+// swSwitchTarget is the tmux target the lobby switches a client to. The
+// trailing colon is required for the same reason swDeferTarget takes a pane id:
+// tmux resolves a bare name by window-name PREFIX in the caller's session
+// before session names, and the lobby's window is "claudemux-head" — so a
+// session named "claudemux" can resolve to the lobby's own window. Empty in,
+// empty out: ":" alone means "the current session", which would be a silent
+// no-op escort rather than a visible failure.
+func swSwitchTarget(session string) string {
+	if session == "" {
+		return ""
+	}
+	return session + ":"
 }
