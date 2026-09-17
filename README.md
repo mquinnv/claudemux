@@ -195,7 +195,9 @@ out of the queue entirely — if it's the only thing waiting, you stay on the lo
 rather than being dispatched to it — but it stays a keystroke away: `Enter` on its
 row goes there whenever you want, and it never stops being visible. A
 deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
-leading the row's second line, and the session's own status pane shows a
+leading the row's second line; deferred rows sort to the bottom of the fleet list
+under a `─ deferred ─` rule, so the sessions you can still be carried into stay
+together at the top. The session's own status pane shows a
 `◆ defer: <blocker>` chip on its top line. Unlike a snooze, defer never clears itself — the
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.

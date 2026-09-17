@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +55,8 @@ type swSession struct {
 type swSnapshot struct {
 	// Sessions holds live claudemux sessions — those with a claudemux-head
 	// pane — excluding the lobby itself (whose own pane also runs this
-	// binary), in list-sessions order.
+	// binary), in list-sessions order with the deferred ones parked at the
+	// end (see swSortSessions).
 	Sessions []swSession
 	Lobby    string            // session owning selfPane; "" if not found
 	Clients  map[string]string // client name -> session it is attached to
@@ -159,6 +161,9 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		snap.Sessions = append(snap.Sessions, sess)
 	}
 
+	// Deferred sessions sink to the bottom of the fleet — see swSortSessions.
+	swSortSessions(snap.Sessions)
+
 	for _, line := range strings.Split(clientOut, "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) != 2 || f[0] == "" {
@@ -167,4 +172,20 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		snap.Clients[f[0]] = f[1]
 	}
 	return snap
+}
+
+// swSortSessions parks the deferred sessions below the rest, in place. The
+// sort is stable: within each group the fleet keeps tmux's list-sessions
+// order, which is the order the lobby has always shown, so setting a defer
+// moves that one row and leaves every other row where the user last saw it.
+//
+// Sorting here rather than in the TUI keeps one order for the whole lobby:
+// every index the model holds — the selection, the scroll window, the row
+// the keys act on — means the same session as the row on screen. The
+// conductor is indifferent to it (waitingQueue sorts its own queue by Since
+// and drops deferred sessions entirely), so this is a display order only.
+func swSortSessions(sessions []swSession) {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return !sessions[i].Deferred && sessions[j].Deferred
+	})
 }
