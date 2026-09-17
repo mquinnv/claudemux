@@ -182,12 +182,16 @@ snoozed and the conductor carries you to the next waiting one.
 **Deferring a session** is different from a snooze: it says this session is waiting on
 something outside claudemux — a review, a build, another person — and should sit at the
 back of the queue until nothing else needs you. Press `d` on the selected row in the
-lobby, or `d` from inside the session's own status pane, to toggle it. A deferred
+lobby, or `d` from inside the session's own status pane, to toggle it. Deferring
+first asks what the session is blocked on: type the blocker and press `Enter` (an
+empty one still defers), or `Esc` to back out without deferring. Pressing `d` on a
+deferred session clears it, blocker and all, with no prompt. A deferred
 session still shows up when it's genuinely the only thing waiting — with a small fleet
 it may be the only session in the queue at all — but any non-deferred session that
 starts waiting jumps ahead of it, and a busy session never blocks it either way. A
-deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, and the session's own
-status pane shows a `◆ defer` chip. Unlike a snooze, defer never clears itself — the
+deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
+leading the row's second line, and the session's own status pane shows a
+`◆ defer: <blocker>` chip on its top line. Unlike a snooze, defer never clears itself — the
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.
 
@@ -694,7 +698,8 @@ so the chip is absent and `Space` does nothing.
 
 **Deferring from the status pane.** Press `d` to toggle defer on this session —
 the same mark the lobby's `d` sets on the selected row (see **Deferring a
-session** above). The pane shows a `◆ defer` chip while it's set, and the mark
+session** above). Setting it prompts for the blocker in the chip's place on the
+top line; the pane then shows a `◆ defer: <blocker>` chip while it's set, and the mark
 persists on the tmux session itself, so it survives a head restart and is
 visible to the lobby with no head running at all.
 

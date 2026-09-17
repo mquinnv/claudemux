@@ -45,6 +45,10 @@ type swSession struct {
 	// every other waiter rather than collect the conductor's client next. See
 	// swconductor.go's waitingQueue for the ordering this drives.
 	Deferred bool
+	// DeferReason mirrors @claudemux_defer_reason: the blocker typed when the
+	// session was deferred, "" when none was given. Shown on the row's detail
+	// line only while Deferred is set.
+	DeferReason string
 }
 
 type swSnapshot struct {
@@ -132,13 +136,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 9 || f[0] == "" {
+		if len(f) != 10 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
 			continue
 		}
-		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1"}
+		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1", DeferReason: f[9]}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {
 			sess.Context = ctx

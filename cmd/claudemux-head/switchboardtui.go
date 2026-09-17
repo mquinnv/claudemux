@@ -267,6 +267,14 @@ type swModel struct {
 	createInput string
 	createBusy  bool
 	createErr   string
+	// Defer input mode (`d` on a row that isn't deferred): the status line
+	// collects the blocker, like creating does a query. The target and name
+	// are captured at the keypress, not re-read from the selection on enter —
+	// a poll can reorder the list while the user types.
+	deferring   bool
+	deferInput  string
+	deferTarget string
+	deferName   string
 	// restart records that the user (R) or the binary watcher asked for a
 	// re-exec rather than a quit; runSwitchboard checks it after Run
 	// returns, mirroring the session head's flow in main().
@@ -318,7 +326,7 @@ func newSwModel(selfPane string) swModel {
 // is usually exactly what prompted the user to press ctrl+r in the first
 // place, so this case is not rare.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
-	return !m.standby && !m.creating && !m.createBusy && !m.fleetRestarting &&
+	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting &&
 		m.cond.phase == swParked && len(m.cond.snoozed) == 0 &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
@@ -399,7 +407,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}\t#{"+infoColorOption+"}\t#{"+deferOption+"}")
+			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}\t#{"+infoColorOption+"}\t#{"+deferOption+"}\t#{"+deferReasonOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -647,12 +655,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh the preview on the same beat as the fleet. tea.Batch drops
 		// nil commands, so this is a no-op when there is nothing to capture.
-		// The conductor also sits out the create flow: dispatching the client
-		// away mid-typing would yank the user off the prompt, and dispatching
-		// while a launch is in flight would race the switch the launch is
-		// about to issue itself.
+		// The conductor also sits out the create and defer prompts:
+		// dispatching the client away mid-typing would yank the user off the
+		// prompt, and dispatching while a launch is in flight would race the
+		// switch the launch is about to issue itself.
 		pv := m.previewCmd()
-		if !m.standby && !m.creating && !m.createBusy {
+		if !m.standby && !m.creating && !m.createBusy && !m.deferring {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
 					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub)
@@ -776,6 +784,23 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.deferring {
+			switch msg.String() {
+			case "esc", "ctrl+c":
+				m.deferring = false
+				m.deferInput = ""
+			case "enter":
+				// An empty blocker still defers: the reason is a note, not a
+				// gate.
+				target, reason := m.deferTarget, m.deferInput
+				m.deferring = false
+				m.deferInput = ""
+				return m, setDeferCmd(target, true, reason)
+			default:
+				m.deferInput = deferInputKey(m.deferInput, msg)
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -809,9 +834,16 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
 		case "d":
 			// Guard like the other row keys: a no-op when the list is empty.
+			// Clearing is immediate; deferring first asks for the blocker.
 			if m.sel < len(m.snap.Sessions) {
 				sess := m.snap.Sessions[m.sel]
-				return m, setDeferCmd(swDeferTarget(sess), !sess.Deferred)
+				if sess.Deferred {
+					return m, setDeferCmd(swDeferTarget(sess), false, "")
+				}
+				m.deferring = true
+				m.deferInput = ""
+				m.deferTarget = swDeferTarget(sess)
+				m.deferName = sess.Name
 			}
 		case "p":
 			// Hide or restore the preview box. Showing it again requests a
@@ -860,14 +892,34 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // swSessionRows is how many lines a session's row occupies: two when it has a
-// summary or prompt to show under it, one when it has neither. Kept next to
-// View's own detail-line logic, which must agree with it — if they disagree,
-// the list cap below is wrong by one row per session.
+// detail line (see swDetailLine) to show under it, one when it has none.
+// Derived from the same function View renders, so the two cannot disagree —
+// if they did, the list cap below would be wrong by one row per session.
 func swSessionRows(sess swSession) int {
-	if sess.Summary != "" || sess.Prompt != "" {
+	if swDetailLine(sess) != "" {
 		return 2
 	}
 	return 1
+}
+
+// swDetailLine is a row's styled second line, unclipped: the defer blocker
+// first, then the summary, then the prompt, joined by " · " and omitting
+// whichever are empty; "" when all three are. The blocker leads because
+// clipLine truncates from the right — on a narrow lobby it is the summary
+// that gives way, not the one thing saying why the session is parked.
+func swDetailLine(sess swSession) string {
+	var parts []string
+	if sess.Deferred {
+		if reason := sanitizeDeferReason(sess.DeferReason); reason != "" {
+			parts = append(parts, swDeferStyle.Render("◆ "+reason))
+		}
+	}
+	for _, s := range []string{sess.Summary, sess.Prompt} {
+		if s != "" {
+			parts = append(parts, swStatusStyle.Render(s))
+		}
+	}
+	return strings.Join(parts, swStatusStyle.Render(" · "))
 }
 
 // swMetersLine renders the account budget gauges as a full-width line — the
@@ -1019,19 +1071,13 @@ func (m swModel) View() string {
 		}
 		b.WriteString(line + "\n")
 
-		// Line 2: summary falls back to prompt, both falls back to
-		// "summary · prompt"; omitted entirely when both are empty.
-		detail := sess.Summary
-		if detail == "" {
-			detail = sess.Prompt
-		} else if sess.Prompt != "" {
-			detail = detail + " · " + sess.Prompt
-		}
-		if detail != "" {
+		// Line 2: defer blocker · summary · prompt, whichever are set;
+		// omitted entirely when none are (see swDetailLine).
+		if detail := swDetailLine(sess); detail != "" {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
-			line2 := fmt.Sprintf("    %s", swStatusStyle.Render(detail))
+			line2 := "    " + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}
@@ -1100,6 +1146,9 @@ func (m swModel) View() string {
 	case m.creating:
 		status = "new session: " + m.createInput + "▌"
 		statusStyled = false // unstyled so the typed query stands out
+	case m.deferring:
+		status = swDeferStyle.Render("defer "+m.deferName+" ") + deferPromptText(m.deferInput)
+		statusStyled = false
 	case m.createBusy:
 		status = "creating session…"
 		statusStyle = swStatusStyle
@@ -1127,6 +1176,9 @@ func (m swModel) View() string {
 	footerText := "space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
+	}
+	if m.deferring {
+		footerText = "enter defer · esc cancel"
 	}
 	footer := swStatusStyle.Render(footerText)
 	if m.width > 0 {

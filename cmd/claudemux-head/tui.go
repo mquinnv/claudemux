@@ -265,6 +265,14 @@ type model struct {
 	// conductRaw there is no pending/optimistic layer for it — see the
 	// defer-toggle brief: a one-poll lag on the chip is fine.
 	deferRaw string
+	// deferReason is the last-read @claudemux_defer_reason: the blocker typed
+	// when the session was deferred, shown in the defer chip.
+	deferReason string
+	// deferPrompting means `d` is collecting a blocker: the defer chip slot
+	// shows deferInput with a cursor, and every key is routed to the prompt
+	// until enter (defer with it) or esc (don't defer at all).
+	deferPrompting bool
+	deferInput     string
 	// conductPendingMode holds the mode this head's space key just asked the
 	// lobby for, shown in place of conductRaw until a poll confirms it or
 	// conductPendingUntil passes. Without it the chip would answer a keypress
@@ -1009,11 +1017,11 @@ func (m model) pollData() tea.Cmd {
 		// everything else. Only inside tmux (selfPane set); a failed or absent
 		// read is "" and the chip simply stays off.
 		conductRaw := ""
-		deferRaw := ""
+		deferRaw, deferReason := "", ""
 		if selfPane != "" {
 			cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
 			conductRaw = readConductOption(cctx)
-			deferRaw = readDeferOption(cctx, selfPane)
+			deferRaw, deferReason = readDeferOption(cctx, selfPane)
 			ccancel()
 		}
 		return dataMsg{
@@ -1024,6 +1032,7 @@ func (m model) pollData() tea.Cmd {
 			rateLimitErr: rlErr,
 			conductRaw:   conductRaw,
 			deferRaw:     deferRaw,
+			deferReason:  deferReason,
 			claudePane:   claudePane,
 		}
 	}
@@ -1037,6 +1046,7 @@ type dataMsg struct {
 	rateLimitErr error
 	conductRaw   string // raw @claudemux_conducting value, "" when unset/unreadable
 	deferRaw     string // raw @claudemux_defer value, "" when unset/unreadable
+	deferReason  string // raw @claudemux_defer_reason value, "" when unset/unreadable
 	claudePane   string // the claude pane this poll bound to, "" when none was seen
 }
 
@@ -1268,6 +1278,9 @@ func (m model) acquireSummarizer() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.deferPrompting {
+			return m.deferPromptKey(msg)
+		}
 		if m.claudeRestartArmed {
 			return m.claudeRestartArmedKey(msg.String())
 		}
@@ -1340,14 +1353,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conductPendingUntil = now.Add(conductPendingWindow)
 			return m, requestConductToggleCmd(now)
 		case "d":
-			// Toggle this session's own defer mark. Unlike space there is no
-			// pending/optimistic layer here — deferRaw simply lags one poll
-			// behind a keypress, which the brief accepts. No-op outside tmux:
-			// there is no owning session to mark.
+			// Toggle this session's own defer mark. Clearing is immediate;
+			// setting first asks for the blocker (see deferPromptKey). Unlike
+			// space there is no pending/optimistic layer here — deferRaw
+			// simply lags one poll behind the change, which the brief
+			// accepts. No-op outside tmux: there is no owning session to mark.
 			if m.selfPane == "" {
 				return m, nil
 			}
-			return m, setDeferCmd(m.selfPane, m.deferRaw != "1")
+			if m.deferRaw == "1" {
+				return m, setDeferCmd(m.selfPane, false, "")
+			}
+			m.deferPrompting = true
+			m.deferInput = ""
+			return m, nil
 		case "x":
 			return m.teardownKey()
 		case "X":
@@ -1450,6 +1469,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// track the lobby regardless of which transcript this head is bound to.
 		m.conductRaw = msg.conductRaw
 		m.deferRaw = msg.deferRaw
+		m.deferReason = msg.deferReason
 		if msg.claudePane != "" {
 			m.claudePane = msg.claudePane
 		}
@@ -2063,7 +2083,7 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if c := conductChip(m.conductRawFor(now), now); c != "" {
 		leftParts = append(leftParts, c)
 	}
-	if c := deferChip(m.deferRaw); c != "" {
+	if c := m.deferChipText(); c != "" {
 		leftParts = append(leftParts, c)
 	}
 	if chip == noWorktreeWarning {
@@ -2397,7 +2417,7 @@ func renderStateLine(m model, now time.Time) string {
 	if c := conductChip(m.conductRawFor(now), now); c != "" {
 		parts = append(parts, c)
 	}
-	if c := deferChip(m.deferRaw); c != "" {
+	if c := m.deferChipText(); c != "" {
 		parts = append(parts, c)
 	}
 
@@ -2662,6 +2682,36 @@ func formatDuration(d time.Duration) string {
 	h := int(d.Hours())
 	mins := int(d.Minutes()) - h*60
 	return fmt.Sprintf("%dh%dm", h, mins)
+}
+
+// deferPromptKey handles a key while `d` is collecting a blocker. enter
+// defers with whatever was typed (an empty blocker still defers — the reason
+// is a note, not a gate); esc and ctrl+c back out without deferring. Every
+// other key edits the text, so q or esc can't quit the pane mid-sentence.
+func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.deferPrompting = false
+		m.deferInput = ""
+		return m, nil
+	case "enter":
+		reason := m.deferInput
+		m.deferPrompting = false
+		m.deferInput = ""
+		return m, setDeferCmd(m.selfPane, true, reason)
+	}
+	m.deferInput = deferInputKey(m.deferInput, msg)
+	return m, nil
+}
+
+// deferChipText is the defer chip slot for both statusbar layouts: the
+// blocker prompt while one is being typed, else the chip for the published
+// mark.
+func (m model) deferChipText() string {
+	if m.deferPrompting {
+		return swDeferStyle.Render(deferPromptText(m.deferInput))
+	}
+	return deferChip(m.deferRaw, m.deferReason)
 }
 
 // teardownKey advances the teardown state machine one press of `x`.

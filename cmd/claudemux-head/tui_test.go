@@ -5233,13 +5233,55 @@ func TestDataMsgCopiesDeferRaw(t *testing.T) {
 	}
 }
 
-// The d key toggles the mark on this head's own session when running inside
-// tmux (selfPane set), same as space toggles conduct mode.
-func TestKeyDTogglesDeferInsideTmux(t *testing.T) {
-	m := model{ready: true, selfPane: "%1", deferRaw: ""}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+// On an undeferred session inside tmux, d opens the blocker prompt rather
+// than setting the mark straight away; typed keys (q included) land in the
+// prompt, and enter issues the set.
+func TestKeyDPromptsForBlockerThenDefers(t *testing.T) {
+	var m tea.Model = model{ready: true, width: 500, height: 4, selfPane: "%1", deferRaw: ""}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatal("d must open the prompt, not issue a cmd yet")
+	}
+	if !m.(model).deferPrompting {
+		t.Fatal("d must enter the blocker prompt")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("qa")})
+	if got := m.(model).deferInput; got != "qa" {
+		t.Errorf("deferInput = %q, want typed text (q must not quit)", got)
+	}
+	if line := renderStateLine(m.(model), time.Now()); !strings.Contains(line, "blocker: qa") {
+		t.Errorf("renderStateLine = %q, want the prompt in the chip slot", line)
+	}
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("d must issue a toggle cmd inside tmux")
+		t.Fatal("enter must issue the defer cmd")
+	}
+	if m.(model).deferPrompting {
+		t.Error("enter must close the prompt")
+	}
+}
+
+// esc backs out of the prompt without deferring (and without quitting).
+func TestKeyDPromptEscCancels(t *testing.T) {
+	m := model{ready: true, selfPane: "%1", deferPrompting: true, deferInput: "x"}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("esc in the prompt must issue no cmd")
+	}
+	if next.(model).deferPrompting {
+		t.Error("esc must close the prompt")
+	}
+}
+
+// On a deferred session d clears the mark immediately — no prompt.
+func TestKeyDClearsDeferImmediately(t *testing.T) {
+	m := model{ready: true, selfPane: "%1", deferRaw: "1", deferReason: "CI"}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd == nil {
+		t.Fatal("d on a deferred session must issue the clear cmd")
+	}
+	if next.(model).deferPrompting {
+		t.Error("clearing must not open the prompt")
 	}
 }
 
@@ -5270,6 +5312,27 @@ func TestRenderStateLineShowsDeferChip(t *testing.T) {
 	line := renderStateLine(m, now)
 	if !strings.Contains(line, "defer") {
 		t.Errorf("renderStateLine = %q, want it to contain the defer chip", line)
+	}
+}
+
+// The recorded blocker shows with the defer chip in both layouts.
+func TestRenderLinesShowDeferReason(t *testing.T) {
+	now := time.Now()
+	m := model{ready: true, width: 500, height: 4, deferRaw: "1", deferReason: "waiting on Ana's review"}
+	if line := renderStatusbar(m, now, ""); !strings.Contains(line, "defer: waiting on Ana's review") {
+		t.Errorf("renderStatusbar = %q, want the blocker", line)
+	}
+	if line := renderStateLine(m, now); !strings.Contains(line, "defer: waiting on Ana's review") {
+		t.Errorf("renderStateLine = %q, want the blocker", line)
+	}
+}
+
+// dataMsg.deferReason must land on the model like deferRaw does.
+func TestDataMsgCopiesDeferReason(t *testing.T) {
+	m := model{}
+	next, _ := m.Update(dataMsg{time: time.Now(), deferRaw: "1", deferReason: "CI"})
+	if got := next.(model).deferReason; got != "CI" {
+		t.Errorf("deferReason = %q, want %q", got, "CI")
 	}
 }
 

@@ -1240,15 +1240,63 @@ func TestSwTopicStyleHasNoHardcodedColor(t *testing.T) {
 	}
 }
 
-// TestSwModelDeferKeyTogglesSelected: d on a populated list must fire a
-// tmux toggle for the selected row. Guarded like every other row key —
-// TestSwModelDeferKeyEmptyListNoop covers the empty-list side.
-func TestSwModelDeferKeyTogglesSelected(t *testing.T) {
+// TestSwModelDeferKeyPromptsThenDefers: d on an undeferred row opens the
+// blocker prompt against that row, and enter fires the tmux set. Guarded like
+// every other row key — TestSwModelDeferKeyEmptyListNoop covers the
+// empty-list side.
+func TestSwModelDeferKeyPromptsThenDefers(t *testing.T) {
 	m := swTestModel()
 	m.sel = 1
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatal("d must open the prompt, not fire yet")
+	}
+	m = next.(swModel)
+	if !m.deferring || m.deferName != "web" {
+		t.Fatalf("deferring = %v name = %q, want prompt for web", m.deferring, m.deferName)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("CI")})
+	m = next.(swModel)
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "defer web ◆ blocker: CI") {
+		t.Errorf("status line missing the prompt:\n%s", view)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("d with a selected row must produce a cmd")
+		t.Fatal("enter must fire the defer cmd")
+	}
+	if next.(swModel).deferring {
+		t.Error("enter must close the prompt")
+	}
+}
+
+// d on an already-deferred row clears it immediately, no prompt.
+func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1
+	m.snap.Sessions[1].Deferred = true
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd == nil {
+		t.Fatal("d on a deferred row must fire the clear cmd")
+	}
+	if next.(swModel).deferring {
+		t.Error("clearing must not open the prompt")
+	}
+}
+
+// The blocker leads a deferred row's detail line; a deferred row with no
+// summary or prompt still gets a detail line for it, and the row count agrees.
+func TestSwDetailLineShowsDeferReason(t *testing.T) {
+	sess := swSession{Name: "api", Deferred: true, DeferReason: "Ana's review", Summary: "fixing"}
+	if got := ansi.Strip(swDetailLine(sess)); got != "◆ Ana's review · fixing" {
+		t.Errorf("swDetailLine = %q", got)
+	}
+	bare := swSession{Name: "web", Deferred: true, DeferReason: "CI"}
+	if swSessionRows(bare) != 2 {
+		t.Error("a deferred row with a blocker needs its detail line counted")
+	}
+	stale := swSession{Name: "web", DeferReason: "CI"}
+	if swDetailLine(stale) != "" || swSessionRows(stale) != 1 {
+		t.Error("a reason without the defer mark must not render")
 	}
 }
 
