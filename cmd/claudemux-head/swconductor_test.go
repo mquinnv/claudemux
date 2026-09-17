@@ -526,3 +526,120 @@ func TestPausedLobbyReturnClearsHandBack(t *testing.T) {
 		t.Fatal("stale hand-back from a previous pause must not dispatch")
 	}
 }
+
+// Deferring the session you are sitting in is the user saying "I am blocked
+// here, take me on" — the escort ends on that same tick, exactly as a
+// hand-back does, and the queue head collects them.
+func TestConductorEscortDeferDispatchesToNextWaiter(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100), waiting("b", 200)), now)
+	act, ok := c.step(snapAt("a", deferredWaiting("a", 100), waiting("b", 200)), now.Add(time.Second))
+	if !ok || act.Target != "b" {
+		t.Fatalf("act = %+v ok=%v, want a dispatch to b", act, ok)
+	}
+	if c.phase != swEscorting || c.escortee != "b" {
+		t.Errorf("phase=%v escortee=%q, want escorting/b", c.phase, c.escortee)
+	}
+}
+
+// Nothing else waiting: the lobby is where a defer leaves you.
+func TestConductorEscortDeferReturnsToLobbyWhenQueueEmpty(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100), busy("b")), now)
+	act, ok := c.step(snapAt("a", deferredWaiting("a", 100), busy("b")), now.Add(time.Second))
+	if !ok || act.Target != "switchboard" {
+		t.Fatalf("act = %+v ok=%v, want a return to the lobby", act, ok)
+	}
+	if c.phase != swParked || c.escortee != "" {
+		t.Errorf("phase=%v escortee=%q, want parked/empty", c.phase, c.escortee)
+	}
+	// Parked with the mark still set: the deferred session must not collect
+	// them straight back (it is not in the queue at all).
+	if act, ok := c.step(snapAt("switchboard", deferredWaiting("a", 100), busy("b")), now.Add(2*time.Second)); ok {
+		t.Errorf("deferred session pulled the client back: %+v", act)
+	}
+}
+
+// The sole-session hold yields to a defer: a one-row lobby is a poor
+// destination, but being pinned to the session you just marked blocked is a
+// worse one, and the lobby is what the user asked for.
+func TestConductorSoleSessionDeferReturnsToLobby(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	act, ok := c.step(snapAt("a", deferredWaiting("a", 100)), now.Add(time.Second))
+	if !ok || act.Target != "switchboard" {
+		t.Fatalf("act = %+v ok=%v, want a return to the lobby", act, ok)
+	}
+	if c.phase != swParked || c.escortee != "" {
+		t.Errorf("phase=%v escortee=%q, want parked/empty", c.phase, c.escortee)
+	}
+}
+
+// Same key, same meaning when the user walked in themselves rather than
+// being escorted: a defer pressed while paused hands them on.
+func TestPausedDeferDispatchesToWaiting(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	c.step(snapAt("b", waiting("b", 50), waiting("a", 100)), now) // first look
+	act, ok := c.step(snapAt("b", deferredWaiting("b", 50), waiting("a", 100)), now.Add(time.Second))
+	if !ok || act.Target != "a" {
+		t.Fatalf("act = %+v ok=%v, want a dispatch to a", act, ok)
+	}
+	if c.phase != swEscorting || c.escortee != "a" {
+		t.Errorf("phase=%v escortee=%q, want escorting/a", c.phase, c.escortee)
+	}
+}
+
+func TestPausedDeferReturnsToLobbyWhenQueueEmpty(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50), busy("c2"))
+	c.step(snapAt("b", waiting("b", 50), busy("c2")), now) // first look
+	act, ok := c.step(snapAt("b", deferredWaiting("b", 50), busy("c2")), now.Add(time.Second))
+	if !ok || act.Target != "switchboard" {
+		t.Fatalf("act = %+v ok=%v, want a return to the lobby", act, ok)
+	}
+	if c.phase != swParked {
+		t.Errorf("phase = %v, want parked", c.phase)
+	}
+}
+
+// Walking into a session that was ALREADY deferred is deliberate — going
+// there to unblock it, say. Only a defer pressed under the client counts, so
+// the conductor leaves them be.
+func TestPausedPreexistingDeferDoesNotYank(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", deferredWaiting("b", 50), waiting("a", 100))
+	for i := 0; i < 3; i++ {
+		s := snapAt("b", deferredWaiting("b", 50), waiting("a", 100))
+		if act, ok := c.step(s, now.Add(time.Duration(i)*time.Second)); ok {
+			t.Fatalf("tick %d: a session deferred before the user arrived must not move them: %+v", i, act)
+		}
+	}
+	if c.phase != swPaused {
+		t.Errorf("phase = %v, want paused", c.phase)
+	}
+}
+
+// Clearing and re-setting the mark is two separate "take me on" presses.
+func TestPausedDeferClearedThenSetFiresAgain(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50), busy("c2"))
+	c.step(snapAt("b", waiting("b", 50), busy("c2")), now) // first look
+	if _, ok := c.step(snapAt("b", deferredWaiting("b", 50), busy("c2")), now.Add(time.Second)); !ok {
+		t.Fatal("first defer must move the client")
+	}
+	// The user comes back and un-defers, then defers again later.
+	c.step(snapAt("b", waiting("b", 50), busy("c2")), now.Add(2*time.Second)) // paused, first look
+	c.step(snapAt("b", waiting("b", 50), busy("c2")), now.Add(3*time.Second))
+	act, ok := c.step(snapAt("b", deferredWaiting("b", 50), busy("c2")), now.Add(4*time.Second))
+	if !ok || act.Target != "switchboard" {
+		t.Fatalf("act = %+v ok=%v, want a second return to the lobby", act, ok)
+	}
+}
