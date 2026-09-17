@@ -1269,6 +1269,71 @@ func TestSwModelDeferKeyPromptsThenDefers(t *testing.T) {
 	}
 }
 
+// D on a deferred row re-opens the blocker prompt pre-filled with the
+// recorded reason instead of clearing the defer, and the status line and
+// footer say "blocker"/"save" rather than "defer".
+func TestSwModelShiftDEditsBlocker(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1
+	m.snap.Sessions[1].Deferred = true
+	m.snap.Sessions[1].DeferReason = "Ana's review"
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatal("D must open the prompt, not fire yet")
+	}
+	m = next.(swModel)
+	if !m.deferring || !m.deferEditing || m.deferName != "web" {
+		t.Fatalf("deferring = %v editing = %v name = %q, want an edit prompt for web", m.deferring, m.deferEditing, m.deferName)
+	}
+	if m.deferInput != "Ana's review" {
+		t.Errorf("deferInput = %q, want the recorded blocker pre-filled", m.deferInput)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "blocker web ◆ blocker: Ana's review") {
+		t.Errorf("status line missing the edit prompt:\n%s", view)
+	}
+	if !strings.Contains(view, "enter save · esc cancel") {
+		t.Errorf("footer missing the edit wording:\n%s", view)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter must fire the defer cmd")
+	}
+	if got := next.(swModel); got.deferring || got.deferEditing {
+		t.Error("enter must close the prompt and clear the edit flag")
+	}
+}
+
+// D on a row that isn't deferred has no blocker to edit: d's prompt, empty,
+// and worded as a fresh defer.
+func TestSwModelShiftDOnUndeferredIsAnEmptyPrompt(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1
+	m.snap.Sessions[1].DeferReason = "stale"
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	m = next.(swModel)
+	if !m.deferring || m.deferEditing || m.deferInput != "" {
+		t.Fatalf("deferring = %v editing = %v input = %q, want an empty defer prompt", m.deferring, m.deferEditing, m.deferInput)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "enter defer · esc cancel") {
+		t.Errorf("footer must keep the defer wording:\n%s", view)
+	}
+}
+
+// D on an empty list is a no-op, guarded like every other row key.
+func TestSwModelShiftDEmptyListNoop(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions = nil
+	m.sel = 0
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Error("D on an empty list must issue no cmd")
+	}
+	if next.(swModel).deferring {
+		t.Error("D on an empty list must not open the prompt")
+	}
+}
+
 // d on an already-deferred row clears it immediately, no prompt.
 func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
 	m := swTestModel()

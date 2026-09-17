@@ -267,14 +267,18 @@ type swModel struct {
 	createInput string
 	createBusy  bool
 	createErr   string
-	// Defer input mode (`d` on a row that isn't deferred): the status line
-	// collects the blocker, like creating does a query. The target and name
-	// are captured at the keypress, not re-read from the selection on enter —
-	// a poll can reorder the list while the user types.
-	deferring   bool
-	deferInput  string
-	deferTarget string
-	deferName   string
+	// Defer input mode (`d` on a row that isn't deferred, or `D` on any row):
+	// the status line collects the blocker, like creating does a query. The
+	// target and name are captured at the keypress, not re-read from the
+	// selection on enter — a poll can reorder the list while the user types.
+	// deferEditing marks the `D`-on-a-deferred-row case, where the prompt
+	// starts pre-filled and is wording-wise an edit rather than a new defer;
+	// the tmux write is identical either way.
+	deferring    bool
+	deferInput   string
+	deferTarget  string
+	deferName    string
+	deferEditing bool
 	// restart records that the user (R) or the binary watcher asked for a
 	// re-exec rather than a quit; runSwitchboard checks it after Run
 	// returns, mirroring the session head's flow in main().
@@ -807,12 +811,15 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "ctrl+c":
 				m.deferring = false
 				m.deferInput = ""
+				m.deferEditing = false
 			case "enter":
 				// An empty blocker still defers: the reason is a note, not a
-				// gate.
+				// gate. Clearing an edited blocker back to empty is therefore
+				// a real outcome, not a cancel — esc is the way to keep it.
 				target, reason := m.deferTarget, m.deferInput
 				m.deferring = false
 				m.deferInput = ""
+				m.deferEditing = false
 				return m, setDeferCmd(target, true, reason)
 			default:
 				m.deferInput = deferInputKey(m.deferInput, msg)
@@ -860,6 +867,25 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.deferring = true
 				m.deferInput = ""
+				m.deferEditing = false
+				m.deferTarget = swDeferTarget(sess)
+				m.deferName = sess.Name
+			}
+		case "D":
+			// Edit the selected row's blocker without clearing its defer:
+			// the same prompt `d` opens, pre-filled with what is recorded
+			// now, so a blocker that moved on ("waiting on Ana" → "waiting
+			// on CI") can be corrected in place instead of cleared and
+			// re-typed. On a row that isn't deferred there is nothing to
+			// edit, so this is `d`'s prompt with an empty line.
+			if m.sel < len(m.snap.Sessions) {
+				sess := m.snap.Sessions[m.sel]
+				m.deferring = true
+				m.deferInput = ""
+				m.deferEditing = sess.Deferred
+				if sess.Deferred {
+					m.deferInput = sanitizeDeferReason(sess.DeferReason)
+				}
 				m.deferTarget = swDeferTarget(sess)
 				m.deferName = sess.Name
 			}
@@ -1212,7 +1238,11 @@ func (m swModel) View() string {
 		status = "new session: " + m.createInput + "▌"
 		statusStyled = false // unstyled so the typed query stands out
 	case m.deferring:
-		status = swDeferStyle.Render("defer "+m.deferName+" ") + deferPromptText(m.deferInput)
+		verb := "defer "
+		if m.deferEditing {
+			verb = "blocker "
+		}
+		status = swDeferStyle.Render(verb+m.deferName+" ") + deferPromptText(m.deferInput)
 		statusStyled = false
 	case m.createBusy:
 		status = "creating session…"
@@ -1238,12 +1268,15 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · R restart · ^R restart all · q quit"
+	footerText := "space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}
 	if m.deferring {
 		footerText = "enter defer · esc cancel"
+		if m.deferEditing {
+			footerText = "enter save · esc cancel"
+		}
 	}
 	footer := swStatusStyle.Render(footerText)
 	if m.width > 0 {
