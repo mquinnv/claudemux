@@ -641,7 +641,25 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(swNextTick(), pub)
 		}
 		m.lastErr = ""
+		// The selection follows the session, not the index it used to sit at:
+		// deferring a row sinks it below the others (swSortSessions), and an
+		// index kept through that reshuffle would silently leave the cursor —
+		// and the preview, and the next keystroke — on a different session
+		// than the one the user was looking at. A session that left the fleet
+		// has no row to follow, so its index stays and is clamped below.
+		selName := ""
+		if m.sel >= 0 && m.sel < len(m.snap.Sessions) {
+			selName = m.snap.Sessions[m.sel].Name
+		}
 		m.snap = msg.snap
+		if selName != "" {
+			for i, sess := range m.snap.Sessions {
+				if sess.Name == selName {
+					m.sel = i
+					break
+				}
+			}
+		}
 		if m.sel >= len(m.snap.Sessions) {
 			m.sel = len(m.snap.Sessions) - 1
 		}
@@ -902,6 +920,42 @@ func swSessionRows(sess swSession) int {
 	return 1
 }
 
+// swDividerLabel is the divider's own text, rule segment included. The rule
+// character is part of it deliberately: the status line already ends in
+// "· N deferred", and the word alone would not tell the two apart.
+const swDividerLabel = "─ deferred "
+
+// swDividerIndex is the index of the row the deferred divider is drawn above
+// — the first deferred session — or -1 when there is none to draw. A fleet
+// with nothing deferred has no boundary; a fleet with nothing but deferred
+// sessions has one at the very top, where a rule would separate them from
+// nothing at all, so both cases return -1.
+//
+// Derived from the list rather than assumed: the divider marks wherever the
+// deferred run actually starts, so a snapshot that somehow arrived unsorted
+// still draws the rule in a place that means something.
+func swDividerIndex(sessions []swSession) int {
+	for i, sess := range sessions {
+		if sess.Deferred {
+			if i == 0 {
+				return -1
+			}
+			return i
+		}
+	}
+	return -1
+}
+
+// swDividerLine renders that boundary: a labelled rule spanning the pane, in
+// the defer hue the badge and marker already use.
+func swDividerLine(width int) string {
+	body := " " + swDividerLabel
+	if pad := width - lipgloss.Width(body); pad > 0 {
+		body += strings.Repeat("─", pad)
+	}
+	return swDeferStyle.Render(body)
+}
+
 // swDetailLine is a row's styled second line, unclipped: the defer blocker
 // first, then the summary, then the prompt, joined by " · " and omitting
 // whichever are empty; "" when all three are. The blocker leads because
@@ -1007,8 +1061,19 @@ func (m swModel) View() string {
 	}
 	topicW := swTopicW(m.width, reserve)
 
+	divider := swDividerIndex(m.snap.Sessions)
 	for i := start; i < end; i++ {
 		sess := m.snap.Sessions[i]
+		// The rule goes above the first deferred row even when the window
+		// opens on it — scrolled to the bottom of a long fleet, that is the
+		// one place the boundary still needs saying.
+		if i == divider {
+			rule := swDividerLine(m.width)
+			if m.width > 0 {
+				rule = clipLine(rule, m.width)
+			}
+			b.WriteString(rule + "\n")
+		}
 		marker := "  "
 		switch {
 		case sess.Deferred:
@@ -1199,9 +1264,16 @@ func (m swModel) View() string {
 // footer lines, where no key could reach it.
 func (m swModel) listWindow() (lay swLayout, start, end int) {
 	want := 0
+	divider := swDividerIndex(m.snap.Sessions)
 	rows := make([]int, len(m.snap.Sessions))
 	for i, sess := range m.snap.Sessions {
 		rows[i] = swSessionRows(sess)
+		// The divider rides on the row it sits above, so it is budgeted
+		// wherever that row is: View draws it whenever that row is drawn, and
+		// an unbudgeted line here would push the bottom of the pane off.
+		if i == divider {
+			rows[i]++
+		}
 		want += rows[i]
 	}
 	if !m.previewHidden {

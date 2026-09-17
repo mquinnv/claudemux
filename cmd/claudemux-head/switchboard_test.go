@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -192,6 +193,31 @@ func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
 	shim, _ := s.session("shim")
 	if shim.ClaudePane != "%5" {
 		t.Errorf("shim.ClaudePane = %q, want %%5: node is the fallback", shim.ClaudePane)
+	}
+}
+
+// Deferred sessions sort to the bottom of the fleet, so the rows the
+// conductor can actually drive to stay together at the top. The order is
+// stable within each group: tmux's list-sessions order is what the lobby has
+// always shown, and deferring one session must move that row alone rather
+// than reshuffle the fleet around it.
+func TestBuildSwSnapshotSortsDeferredLast(t *testing.T) {
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t1\t\n" +
+		"web\tIdle\t1754700000\t37\t\t\t\t\t0\t\n" +
+		"scratch\tIdle\t1754700000\t37\t\t\t\t\t1\t\n" +
+		"zeta\tIdle\t1754700000\t37\t\t\t\t\t\t\n"
+	paneOut := "api\t%1\tclaudemux-head\tt\n" +
+		"web\t%2\tclaudemux-head\tt\n" +
+		"scratch\t%3\tclaudemux-head\tt\n" +
+		"zeta\t%4\tclaudemux-head\tt\n"
+	s := buildSwSnapshot(sessOut, paneOut, "", "")
+	var got []string
+	for _, sess := range s.Sessions {
+		got = append(got, sess.Name)
+	}
+	want := []string{"web", "zeta", "api", "scratch"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Sessions = %v, want %v", got, want)
 	}
 }
 

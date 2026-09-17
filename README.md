@@ -205,7 +205,9 @@ session to unblock it never gets you carried straight back out. (In standby, or
 with no lobby running, nothing moves you — there's no conductor to do it.)
 
 A deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
-leading the row's second line, and the session's own status pane shows a
+leading the row's second line; deferred rows sort to the bottom of the fleet list under
+a `─ deferred ─` rule, so the sessions you can still be carried into stay together at
+the top. The session's own status pane shows a
 `◆ defer: <blocker>` chip on its top line. Unlike a snooze, defer never clears itself — the
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.
