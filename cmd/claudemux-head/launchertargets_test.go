@@ -21,10 +21,16 @@ import (
 // docs/superpowers/specs/2026-09-17-tmux-target-resolution-and-lobby-restart.md.
 const launcherPath = "../../bin/claudemux"
 
-// bareSessionTarget matches `-t "$session_name"` and `-t "${session_name}"`
-// without the disambiguating colon. $session_name is never a pane id in this
-// script, so any bare use of it is a bug.
-var bareSessionTarget = regexp.MustCompile(`-t "\$\{?session_name\}?"`)
+// bareSessionTarget matches `-t "$session_name"`/`-t "${session_name}"` and
+// `-t "$session"`/`-t "${session}"` without the disambiguating colon — every
+// variable name this script uses to hold a SESSION name (session_name is the
+// name create_session and its callees use; inject_op_env, called with a
+// session name as $1, assigns it to the local `session`). The list is by
+// variable name, not a blanket ban on `-t "$var"`: pane-id variables
+// (claude_pane, shell_pane, head_pane, and the bare $1 in pane-only
+// functions) hold tmux pane ids, which are globally unique and unambiguous
+// with no colon needed, and must stay allowed.
+var bareSessionTarget = regexp.MustCompile(`-t "\$\{?(session_name|session)\}?"`)
 
 func TestLauncherSessionNameTargetsAreUnambiguous(t *testing.T) {
 	src, err := os.ReadFile(launcherPath)
@@ -33,7 +39,7 @@ func TestLauncherSessionNameTargetsAreUnambiguous(t *testing.T) {
 	}
 	for i, line := range strings.Split(string(src), "\n") {
 		if bareSessionTarget.MatchString(line) {
-			t.Errorf("%s:%d: bare session target, use \"$session_name:\": %s",
+			t.Errorf("%s:%d: bare session target, append the disambiguating \":\": %s",
 				launcherPath, i+1, strings.TrimSpace(line))
 		}
 	}
