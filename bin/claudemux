@@ -214,9 +214,9 @@ apply_status_color() {
   [ -n "$style" ] || return 0
   hex="${style%% *}"
   fg="${style##* }"
-  tmux set -t "$1" status-style "bg=#${hex},fg=${fg}"
+  tmux set -t "$1:" status-style "bg=#${hex},fg=${fg}"
   # pane-active-border-style is a window option; sessions here are single-window
-  tmux set -w -t "$1" pane-active-border-style "fg=#${hex}"
+  tmux set -w -t "$1:" pane-active-border-style "fg=#${hex}"
 }
 
 # apply_tab_color DIR — set the iTerm2 tab color from the nearest project color
@@ -245,7 +245,7 @@ attach() {
   # longer than 8 columns ("[claudemu"). Session names here are directory
   # basenames, so give them room. Set on every attach, not just creation, so
   # sessions that predate this fix pick it up too.
-  tmux set -t "$1" status-left-length 32
+  tmux set -t "$1:" status-left-length 32
   apply_status_color "$1" "$2"
   if [ "$DETACHED" = true ]; then
     # The caller wants the name, not the client. Tab color is skipped too:
@@ -263,7 +263,7 @@ attach() {
   # that 0 to close the terminal tab once the session is gone. A failure that
   # exits *before* attach leaves a non-zero code, keeping the tab (and its
   # error) on screen.
-  tmux attach -t "$1"
+  tmux attach -t "$1:"
   exit 0
 }
 
@@ -949,7 +949,15 @@ create_session() {
   # The height is baked into the hook at creation, so a session already running
   # keeps the height it launched with when head.rows changes. That is the same
   # deal as launch.layout and shell_size: the arrangement is decided at launch.
-  tmux set-hook -t "$session_name" window-resized "resize-pane -t $head_pane -y $head_rows"
+  #
+  # The "$session_name:" form is required, not stylistic: tmux resolves a bare
+  # `-t NAME` by window-name PREFIX in the CALLER's session first, and the
+  # lobby — which runs this script for its `n` key — has a window called
+  # "claudemux-head". A project named "claudemux" therefore set this hook on
+  # the LOBBY, leaving the new session with no re-pin and a head pane scaled to
+  # whatever the attach did to it. Same reason for every other session target
+  # in this file.
+  tmux set-hook -t "$session_name:" window-resized "resize-pane -t $head_pane -y $head_rows"
 
   # Let the terminal tab track the tmux window name — claudemux-head renames the
   # window to the Haiku `tab` label as the session's focus settles. Set here so
@@ -961,8 +969,8 @@ create_session() {
   # prefix — the window name itself stays the bare label, so the tmux status
   # line does not spend width repeating a session name that already sits a
   # column to its left.
-  tmux set -t "$session_name" set-titles on
-  tmux set -t "$session_name" set-titles-string \
+  tmux set -t "$session_name:" set-titles on
+  tmux set -t "$session_name:" set-titles-string \
     "$(session_title_name "$proj_name" "$session_name" "$clone_suffix") · #W"
 
   attach "$session_name" "$work_dir"
