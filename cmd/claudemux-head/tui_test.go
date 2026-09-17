@@ -554,8 +554,23 @@ func TestRenderMetersLineDropsRightGroupKeepsCtx(t *testing.T) {
 
 // The meters line owns its whole line, so it widens its bars to consume the
 // leftover columns instead of leaving a fixed 10-cell bar adrift on a wide
-// pane. Slack splits across the three bar-carrying gauges only, so at most
+// pane. Slack splits across the bar-carrying gauges only, so at most
 // barCount-1 columns may go unspent.
+//
+// Bar growth is monotonic only BETWEEN the widths where the set of segments is
+// the same. The line spends new columns two ways: widening the bars it has,
+// and — once enough of them accumulate — showing a gauge or the "empty in" ETA
+// it could not fit before. A newly-fitting segment costs more than the columns
+// that bought it, so it is paid for out of the bars, and the total legitimately
+// drops at that width (with this fixture: 52 cells at 110, 40 at 115 where the
+// ETA arrives). Asserting a bare width-over-width increase therefore tests luck
+// — where the sampled widths happen to fall relative to those thresholds — and
+// it broke in d003667, which widened the burn label from "0%/h" to "120%/h" for
+// this fixture and so moved a threshold across a sampled width.
+//
+// So: sweep every width, require that a wider pane never shows FEWER segments,
+// that bars never shrink while the segments are unchanged, and that each band
+// of equal segments ends with more bar cells than it started.
 func TestRenderMetersLineWidensBarsToFillPane(t *testing.T) {
 	now := time.Now()
 	m := model{
@@ -580,23 +595,53 @@ func TestRenderMetersLineWidensBarsToFillPane(t *testing.T) {
 		}
 		return n
 	}
+	// Segments are " · "-joined, so the separator count is the count of
+	// gauges plus the ETA that the line chose to show at this width.
+	segments := func(s string) int { return strings.Count(s, " · ") + 1 }
 
-	var prevBars int
-	for _, w := range []int{80, 100, 120, 160, 200} {
+	type sample struct{ w, bars, segs int }
+	var got []sample
+	for w := 60; w <= 200; w++ {
 		m.width = w
 		line := renderMetersLine(m, now)
 
 		// The rendered line is background-filled to the pane width, so measure
 		// fill by the content before the trailing pad rather than by width.
-		content := len(" ") + lipgloss.Width(strings.TrimRight(ansi.Strip(line), " "))
-		if unspent := w - content; unspent > 3 {
+		plain := strings.TrimRight(ansi.Strip(line), " ")
+		if unspent := w - (len(" ") + lipgloss.Width(plain)); unspent > 3 {
 			t.Errorf("at width %d, %d columns left unspent (want <= 3): %q", w, unspent, line)
 		}
-		if bars := barCells(line); bars <= prevBars {
-			t.Errorf("at width %d, total bar cells = %d, want more than %d at the previous width", w, bars, prevBars)
-		} else {
-			prevBars = bars
+		got = append(got, sample{w: w, bars: barCells(plain), segs: segments(plain)})
+	}
+
+	bandStart, bands := 0, 0
+	closeBand := func(end int) {
+		bands++
+		if got[end].bars <= got[bandStart].bars {
+			t.Errorf("between widths %d and %d, both showing %d segments, total bar cells went %d → %d: the extra columns must go into the bars",
+				got[bandStart].w, got[end].w, got[end].segs, got[bandStart].bars, got[end].bars)
 		}
+	}
+	for i := 1; i < len(got); i++ {
+		prev, cur := got[i-1], got[i]
+		switch {
+		case cur.segs < prev.segs:
+			t.Fatalf("at width %d the line shows %d segments, fewer than the %d at width %d: a wider pane must never show less",
+				cur.w, cur.segs, prev.segs, prev.w)
+		case cur.segs > prev.segs:
+			closeBand(i - 1)
+			bandStart = i
+		case cur.bars < prev.bars:
+			t.Errorf("at width %d, total bar cells fell to %d from %d at width %d, with the same %d segments",
+				cur.w, cur.bars, prev.bars, prev.w, cur.segs)
+		}
+	}
+	closeBand(len(got) - 1)
+	// Guards the sweep itself: if the bounds ever stopped straddling the
+	// widths where segments appear, every assertion above would still pass
+	// while testing only one band.
+	if bands < 3 {
+		t.Errorf("swept %d segment bands; the range must cross the widths where gauges and the ETA appear", bands)
 	}
 }
 
