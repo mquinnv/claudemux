@@ -663,7 +663,27 @@ func TestConductHandoffMissing(t *testing.T) {
 		t.Error("missing handoff: ok=true, want false")
 	}
 }
+
+// writeConductHandoff and readConductHandoff enumerate conductor's fields by
+// hand, because they are unexported and encoding/json cannot see them. That
+// makes a field added to the struct later silently reset on every restart —
+// the exact class of bug (state quietly lost across a re-exec) this file exists
+// to remove. So pin the shape: when this fails, read the new field, decide
+// whether the handoff should carry it, and only then update the count.
+func TestConductorFieldsAreAccountedForInHandoff(t *testing.T) {
+	// carried: phase, escortee, snoozed, pausedCur, pausedCurWaiting,
+	// pausedHandedBack. Deliberately not carried: client — resolveClient
+	// re-adopts on the first tick, and a stale client name is worse than looking.
+	const accountedFor = 7
+	if got := reflect.TypeOf(conductor{}).NumField(); got != accountedFor {
+		t.Fatalf("conductor has %d fields, the handoff accounts for %d — decide whether the new field belongs in writeConductHandoff/readConductHandoff (and in this count) before changing this number", got, accountedFor)
+	}
+}
 ```
+
+The test file imports `reflect` alongside `os`, `path/filepath`, `testing` and `time`.
+
+Context for whoever implements this: a concurrent session was editing `cmd/claudemux-head/swconductor.go` in the main checkout while this plan was being executed, adding a `pausedCurDeferred` field to `conductor`. That work is not on this branch, so this test passes here and is *expected* to fail when the two are merged — that failure is the feature. Whoever merges reads the new field and decides whether a lobby restart should preserve it (it should: it is part of the paused-session observation the handoff already carries).
 
 - [ ] **Step 2: Run to verify they fail**
 
