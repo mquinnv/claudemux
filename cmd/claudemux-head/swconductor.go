@@ -73,17 +73,22 @@ func newConductor() conductor {
 	return conductor{snoozed: map[string]swSnooze{}}
 }
 
-// waitingQueue lists waiting, un-snoozed sessions with non-deferred waiters
-// first, deferred ones after — a deferred session waits behind everything
-// normal, not because it matters less, but because the user asked not to be
-// pulled to it while anything else needs them. Within each group, oldest
-// Since first (name as tiebreak so equal timestamps still order
-// deterministically). Snooze semantics are unchanged and apply identically
-// to deferred sessions.
+// waitingQueue lists the waiting sessions that may collect the human,
+// oldest Since first (name as tiebreak so equal timestamps still order
+// deterministically).
+//
+// Deferred sessions are not among them at all. "Last in line" turned out to
+// be no protection: the queue's other exclusion — snooze — is a filter, not
+// a demotion, so a fleet whose normal waiters had all been walked away from
+// left the deferred ones as the entire queue, and deferring a session became
+// a reason to be sent to it. A defer now means what the user means by it:
+// the conductor never drives them here. The session stays loud on the lobby
+// (badge, blocker, hue) and one keystroke away, so the mark still costs
+// visibility rather than buying it.
 func (s swSnapshot) waitingQueue(snoozed map[string]swSnooze, now time.Time) []swSession {
 	var q []swSession
 	for _, sess := range s.Sessions {
-		if !isWaiting(sess.State) {
+		if !isWaiting(sess.State) || sess.Deferred {
 			continue
 		}
 		if sn, ok := snoozed[sess.Name]; ok && sn.since.Equal(sess.Since) && now.Sub(sn.at) < swSnoozeTTL {
@@ -92,9 +97,6 @@ func (s swSnapshot) waitingQueue(snoozed map[string]swSnooze, now time.Time) []s
 		q = append(q, sess)
 	}
 	sort.SliceStable(q, func(i, j int) bool {
-		if q[i].Deferred != q[j].Deferred {
-			return !q[i].Deferred
-		}
 		if !q[i].Since.Equal(q[j].Since) {
 			return q[i].Since.Before(q[j].Since)
 		}

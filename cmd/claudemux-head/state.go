@@ -2,6 +2,7 @@ package main
 
 import (
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -124,9 +125,56 @@ func classifyState(events []Event, bgCount int, bgOldest time.Time, bgUnsure int
 		if !anchored {
 			since = now
 		}
+		if clientOnlyCommand(last.UserText) {
+			// …unless the turn is a command the harness answers by itself,
+			// which no assistant turn ever follows. Reading that as Thinking
+			// was wrong in both directions: the conductor saw the session
+			// hand itself back and escorted the human out of a session they
+			// had just cleared to keep working in, and the session then sat
+			// at not-waiting — invisible to the queue, mislabelled in the
+			// pane — until the next real prompt, which for `/clear` is
+			// however long it takes to decide what to type.
+			return bgOverride(State{Kind: StateIdle, Since: since, Anchored: anchored}, bgCount, bgOldest, bgUnsure)
+		}
 		return State{Kind: StateThinking, Since: since, Anchored: anchored}
 	}
 	return bgOverride(State{Kind: StateIdle, Since: now}, bgCount, bgOldest, bgUnsure)
+}
+
+// clientOnlyCommands are the slash commands Claude Code handles entirely in
+// the client: they print, open a picker, or reset the transcript, and no
+// assistant turn ever answers them. Membership means exactly one thing —
+// "this turn leaves the session waiting on the human" — so a command that
+// does real work must stay out, however cheap it looks: `/compact` and
+// `/init` drive the model, and every skill command (`/done`, `/loop`,
+// `/code-review`) is a prompt with a slash in front of it. Getting one
+// wrong in that direction is the expensive mistake: the pane would read
+// Idle and the conductor would escort a human into a session that is
+// actually working.
+//
+// Commands are matched on their name only, so the ones that take an
+// argument (`/model opus`, `/color purple`) are recognized as themselves.
+var clientOnlyCommands = map[string]bool{
+	"/clear": true, "/model": true, "/status": true, "/context": true,
+	"/cost": true, "/config": true, "/color": true, "/help": true,
+	"/doctor": true, "/release-notes": true, "/vim": true,
+	"/terminal-setup": true, "/login": true, "/exit": true,
+}
+
+// clientOnlyCommand reports whether text is an invocation of one. text is
+// the event's UserText, which parseEvent has already rewritten from Claude
+// Code's <command-name> expansion back to the friendly `/name args` form —
+// see cleanCommandText.
+func clientOnlyCommand(text string) bool {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return false
+	}
+	name := text
+	if i := strings.IndexAny(text, " \t"); i >= 0 {
+		name = text[:i]
+	}
+	return clientOnlyCommands[name]
 }
 
 // bgOverride upgrades an Idle verdict when the session has work outstanding

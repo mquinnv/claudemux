@@ -49,49 +49,38 @@ func TestWaitingQueueSnoozeAndTiebreak(t *testing.T) {
 	}
 }
 
-// A deferred waiter always waits behind every normal waiter, even one that
-// started waiting more recently — the mark trades position for being
-// remembered, not the other way around.
-func TestWaitingQueueDeferredWaitsBehindYoungerNormal(t *testing.T) {
+// A deferred session never enters the queue, even when it is the oldest
+// waiter in the fleet: the mark means "do not drive me here."
+func TestWaitingQueueDeferredExcluded(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	s := snapAt("switchboard", deferredWaiting("old-deferred", 50), waiting("young", 200))
 	q := s.waitingQueue(nil, now)
-	if len(q) != 2 || q[0].Name != "young" || q[1].Name != "old-deferred" {
-		t.Errorf("queue = %v, want young before old-deferred despite Since", q)
+	if len(q) != 1 || q[0].Name != "young" {
+		t.Errorf("queue = %v, want only the non-deferred waiter", q)
 	}
 }
 
-// With no competing normal waiter, a deferred session is still the one
-// dispatched — deferred means "wait your turn," not "never."
-func TestWaitingQueueDeferredAloneIsDispatched(t *testing.T) {
+// With nothing else waiting, a deferred session is still not dispatched —
+// the conductor parks rather than reaching for the one session the user
+// asked not to be pulled into. This is the case the old "last in line"
+// ordering got wrong.
+func TestWaitingQueueDeferredAloneIsNotDispatched(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	s := snapAt("switchboard", deferredWaiting("solo", 100))
-	q := s.waitingQueue(nil, now)
-	if len(q) != 1 || q[0].Name != "solo" {
-		t.Errorf("queue = %v, want the sole deferred waiter", q)
+	if q := s.waitingQueue(nil, now); len(q) != 0 {
+		t.Errorf("queue = %v, want empty: a deferred session is never dispatched", q)
 	}
 }
 
-// Snooze semantics apply identically to deferred sessions: a deferred
-// session's snoozed episode is excluded from the queue exactly like a
-// normal one's.
-func TestWaitingQueueSnoozedDeferredExcluded(t *testing.T) {
+// The end-to-end shape of the bug this replaced: every normal waiter
+// snoozed, one deferred session waiting. The client must stay on the lobby.
+func TestConductorParkedHoldsWhenOnlyDeferredWaits(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
-	s := snapAt("switchboard", deferredWaiting("a", 100), waiting("b", 200))
-	q := s.waitingQueue(map[string]swSnooze{"a": {since: time.Unix(100, 0), at: now}}, now)
-	if len(q) != 1 || q[0].Name != "b" {
-		t.Errorf("snoozed deferred session must be excluded, queue = %v", q)
-	}
-}
-
-// Two deferred waiters order oldest-first among themselves, the same rule
-// that governs normal waiters.
-func TestWaitingQueueTwoDeferredOrderedOldestFirst(t *testing.T) {
-	now := time.Unix(1_754_700_000, 0)
-	s := snapAt("switchboard", deferredWaiting("young", 200), deferredWaiting("old", 100))
-	q := s.waitingQueue(nil, now)
-	if len(q) != 2 || q[0].Name != "old" || q[1].Name != "young" {
-		t.Errorf("queue = %v, want old before young among deferred waiters", q)
+	c := newConductor()
+	c.snoozed["normal"] = swSnooze{since: time.Unix(100, 0), at: now}
+	s := snapAt("switchboard", waiting("normal", 100), deferredWaiting("blocked", 50))
+	if act, ok := c.step(s, now); ok {
+		t.Errorf("dispatched %+v, want no action", act)
 	}
 }
 
@@ -412,7 +401,7 @@ func TestStatusLineShowsDeferredCount(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	c := newConductor()
 	got := c.statusLine(snapAt("switchboard", waiting("a", 100), deferredWaiting("b", 200)), now)
-	if want := "conducting · 2 waiting · 1 deferred"; got != want {
+	if want := "conducting · 1 waiting · 1 deferred"; got != want {
 		t.Errorf("statusLine = %q, want %q", got, want)
 	}
 }
@@ -433,7 +422,7 @@ func TestStatusLineShowsSnoozedThenDeferred(t *testing.T) {
 	c := newConductor()
 	c.snoozed["a"] = swSnooze{since: time.Unix(100, 0), at: now}
 	got := c.statusLine(snapAt("switchboard", waiting("a", 100), deferredWaiting("b", 200)), now)
-	if want := "conducting · 1 waiting · 1 snoozed · 1 deferred"; got != want {
+	if want := "conducting · 0 waiting · 1 snoozed · 1 deferred"; got != want {
 		t.Errorf("statusLine = %q, want %q", got, want)
 	}
 }

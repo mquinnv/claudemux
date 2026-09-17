@@ -208,3 +208,66 @@ func TestClassifyNoConversationEventRoutesThroughBgOverride(t *testing.T) {
 		t.Errorf("kind = %v, want StateBackground: bookkeeping-only events must not bypass bgOverride", got.Kind)
 	}
 }
+
+// `/clear` is written into the fresh transcript as a plain user turn that
+// nothing ever answers, so reading the trailing user event as Thinking left
+// the session not-waiting until the human typed something real — long enough
+// for the conductor to treat the clear as a hand-back and escort them out.
+func TestClassifyClientOnlyCommandIsIdle(t *testing.T) {
+	ts := time.Unix(1_754_700_000, 0)
+	events := []Event{
+		{Type: "assistant", UserText: "all done", Timestamp: ts.Add(-time.Minute).Format(time.RFC3339)},
+		{Type: "user", UserText: "/clear", Timestamp: ts.Format(time.RFC3339)},
+	}
+	got := classifyState(events, 0, time.Time{}, 0, ts.Add(time.Minute))
+	if got.Kind != StateIdle {
+		t.Fatalf("got %v, want StateIdle", got.Kind)
+	}
+	if !got.Anchored || !got.Since.Equal(ts) {
+		t.Errorf("Since = %v (anchored %v), want the command's own timestamp %v", got.Since, got.Anchored, ts)
+	}
+}
+
+// The name is what matters, so a command that takes an argument still counts
+// as itself.
+func TestClassifyClientOnlyCommandWithArgs(t *testing.T) {
+	events := []Event{{Type: "user", UserText: "/model opus"}}
+	if got := classifyState(events, 0, time.Time{}, 0, time.Now()); got.Kind != StateIdle {
+		t.Errorf("got %v, want StateIdle", got.Kind)
+	}
+}
+
+// A command that drives the model is a real prompt: classifying one Idle
+// would escort a human into a session that is working.
+func TestClassifyWorkingCommandStaysThinking(t *testing.T) {
+	for _, text := range []string{"/compact", "/init", "/done", "/code-review high", "clear the cache"} {
+		events := []Event{{Type: "user", UserText: text}}
+		if got := classifyState(events, 0, time.Time{}, 0, time.Now()); got.Kind != StateThinking {
+			t.Errorf("%q: got %v, want StateThinking", text, got.Kind)
+		}
+	}
+}
+
+// Background work outranks the clear: the turn leaves the main thread with
+// nothing to do, but an agent launched earlier is still running, so the
+// session is not waiting on the human.
+func TestClassifyClientOnlyCommandRoutesThroughBgOverride(t *testing.T) {
+	ts := time.Unix(1_754_700_000, 0)
+	events := []Event{{Type: "user", UserText: "/clear", Timestamp: ts.Format(time.RFC3339)}}
+	got := classifyState(events, 2, ts.Add(-time.Minute), 0, ts.Add(time.Minute))
+	if got.Kind != StateBackground || got.BgCount != 2 {
+		t.Errorf("got %v/%d, want StateBackground/2", got.Kind, got.BgCount)
+	}
+}
+
+// A tool_result user turn carries no UserText and must not be mistaken for a
+// command — it is the middle of a working loop.
+func TestClassifyToolResultTurnIsNotACommand(t *testing.T) {
+	events := []Event{
+		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
+		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1"}}},
+	}
+	if got := classifyState(events, 0, time.Time{}, 0, time.Now()); got.Kind != StateThinking {
+		t.Errorf("got %v, want StateThinking", got.Kind)
+	}
+}

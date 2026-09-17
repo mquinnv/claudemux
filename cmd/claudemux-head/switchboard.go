@@ -41,9 +41,9 @@ type swSession struct {
 	// types `R` into it — and must never type into the claude pane, where
 	// a stray R would land in the user's prompt.
 	HeadPane string
-	// Deferred mirrors @claudemux_defer: the session is marked to wait behind
-	// every other waiter rather than collect the conductor's client next. See
-	// swconductor.go's waitingQueue for the ordering this drives.
+	// Deferred mirrors @claudemux_defer: the session is blocked on something
+	// outside claudemux, so the conductor must never drive the client here.
+	// See swconductor.go's waitingQueue for what this excludes.
 	Deferred bool
 	// DeferReason mirrors @claudemux_defer_reason: the blocker typed when the
 	// session was deferred, "" when none was given. Shown on the row's detail
