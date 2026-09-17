@@ -5273,6 +5273,73 @@ func TestKeyDPromptEscCancels(t *testing.T) {
 	}
 }
 
+// D on a deferred session re-opens the blocker prompt pre-filled with the
+// recorded reason, leaving the mark set: the point is to correct the blocker,
+// not to clear the defer. Enter writes the edited text back.
+func TestKeyShiftDEditsBlocker(t *testing.T) {
+	var m tea.Model = model{ready: true, width: 500, height: 4, selfPane: "%1", deferRaw: "1", deferReason: "Ana's review"}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatal("D must open the prompt, not issue a cmd yet")
+	}
+	if !m.(model).deferPrompting {
+		t.Fatal("D must enter the blocker prompt")
+	}
+	if got := m.(model).deferInput; got != "Ana's review" {
+		t.Errorf("deferInput = %q, want the recorded blocker pre-filled", got)
+	}
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter must issue the defer cmd")
+	}
+	if m.(model).deferPrompting {
+		t.Error("enter must close the prompt")
+	}
+}
+
+// esc out of a D edit changes nothing: the session stays deferred with the
+// blocker it had, since the prompt never issued a write.
+func TestKeyShiftDEscKeepsBlocker(t *testing.T) {
+	m := model{ready: true, selfPane: "%1", deferRaw: "1", deferReason: "CI"}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	next, cmd := next.(model).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("esc in the prompt must issue no cmd")
+	}
+	got := next.(model)
+	if got.deferPrompting {
+		t.Error("esc must close the prompt")
+	}
+	if got.deferRaw != "1" || got.deferReason != "CI" {
+		t.Errorf("esc changed the mark: deferRaw = %q reason = %q", got.deferRaw, got.deferReason)
+	}
+}
+
+// On a session that isn't deferred there is no blocker to edit, so D is d's
+// prompt with an empty line — enter defers.
+func TestKeyShiftDOnUndeferredIsAnEmptyPrompt(t *testing.T) {
+	var m tea.Model = model{ready: true, selfPane: "%1", deferRaw: "", deferReason: "stale"}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if !m.(model).deferPrompting {
+		t.Fatal("D must enter the blocker prompt")
+	}
+	if got := m.(model).deferInput; got != "" {
+		t.Errorf("deferInput = %q, want empty — an unset mark has no blocker to edit", got)
+	}
+}
+
+// Outside tmux D is a no-op for the same reason d is: no session to mark.
+func TestKeyShiftDNoopOutsideTmux(t *testing.T) {
+	m := model{ready: true, selfPane: ""}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Error("D outside tmux must issue no cmd")
+	}
+	if next.(model).deferPrompting {
+		t.Error("D outside tmux must not open the prompt")
+	}
+}
+
 // On a deferred session d clears the mark immediately — no prompt.
 func TestKeyDClearsDeferImmediately(t *testing.T) {
 	m := model{ready: true, selfPane: "%1", deferRaw: "1", deferReason: "CI"}
