@@ -131,8 +131,11 @@ func projectBadge(emoji, name string) string {
 func stateEmoji(kind StateKind) string {
 	switch kind {
 	case StateIdle:
-		// Blocked on the human — the "come look" green the idle dot carried.
-		return emojiCell("🟢")
+		// Claude's turn is over and the move is yours. Not a green circle: as a
+		// dot, green was just the "come look" color, but as an emoji it reads as
+		// a live light — something switched on and running, the opposite of
+		// idle. The bell says what this state actually wants: you.
+		return emojiCell("🔔")
 	case StateThinking:
 		return emojiCell("🧠")
 	case StateTool:
