@@ -356,7 +356,7 @@ func TestViewHeightFourOrdersStateMetersPrompts(t *testing.T) {
 		t.Fatalf("View() produced %d lines, want 4:\n%s", len(lines), out)
 	}
 	state, meters, first, last := lines[0], lines[1], lines[2], lines[3]
-	if !strings.Contains(state, "🟢") {
+	if !strings.Contains(state, "🔔") {
 		t.Errorf("state line (index 0) = %q, want the idle emoji", state)
 	}
 	if !strings.Contains(meters, "ctx") {
@@ -659,7 +659,7 @@ func TestViewHeightTwoStateAndMeters(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("View() produced %d lines, want 2:\n%s", len(lines), out)
 	}
-	if !strings.Contains(lines[0], "🟢") {
+	if !strings.Contains(lines[0], "🔔") {
 		t.Errorf("state line (index 0) = %q, want the idle emoji", lines[0])
 	}
 	if !strings.Contains(lines[1], "ctx") {
