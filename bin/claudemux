@@ -214,9 +214,9 @@ apply_status_color() {
   [ -n "$style" ] || return 0
   hex="${style%% *}"
   fg="${style##* }"
-  tmux set -t "$1" status-style "bg=#${hex},fg=${fg}"
+  tmux set -t "$1:" status-style "bg=#${hex},fg=${fg}"
   # pane-active-border-style is a window option; sessions here are single-window
-  tmux set -w -t "$1" pane-active-border-style "fg=#${hex}"
+  tmux set -w -t "$1:" pane-active-border-style "fg=#${hex}"
 }
 
 # apply_tab_color DIR — set the iTerm2 tab color from the nearest project color
@@ -245,7 +245,7 @@ attach() {
   # longer than 8 columns ("[claudemu"). Session names here are directory
   # basenames, so give them room. Set on every attach, not just creation, so
   # sessions that predate this fix pick it up too.
-  tmux set -t "$1" status-left-length 32
+  tmux set -t "$1:" status-left-length 32
   apply_status_color "$1" "$2"
   if [ "$DETACHED" = true ]; then
     # The caller wants the name, not the client. Tab color is skipped too:
@@ -263,7 +263,7 @@ attach() {
   # that 0 to close the terminal tab once the session is gone. A failure that
   # exits *before* attach leaves a non-zero code, keeping the tab (and its
   # error) on screen.
-  tmux attach -t "$1"
+  tmux attach -t "$1:"
   exit 0
 }
 
@@ -422,6 +422,45 @@ shell_size_for() {
   printf '%s' "${size:-$default}"
 }
 
+# session_size — echo "COLSxROWS" for a new session's initial size, or ""
+# when nothing can answer.
+#
+# `tput` was the only source here, and it is wrong in both of the ways this
+# launcher is actually run. With no controlling terminal — which is every
+# session the lobby's `n` key creates, since the launcher is a child of the
+# lobby pane with no tty — tput reports its terminfo DEFAULT, 80x24, so the
+# session was built at a quarter of its real size and every `split-window -l`
+# in create_session meant a quarter of what it said. Run from inside a tmux
+# pane with a tty, tput reports that PANE's size, not the client's.
+#
+# The size that matters is the client that will display the session, so ask
+# tmux for it first. Falls back to tput for a real terminal outside tmux, and
+# to nothing at all when there is no answer — never to a garbage value,
+# because a bad -x/-y fails new-session outright; the caller omits -x/-y
+# entirely in that case and lets tmux's own default-size apply.
+session_size() {
+  local size w h
+  if [ -n "${TMUX_PANE:-}" ]; then
+    size="$(tmux display-message -p -t "$TMUX_PANE" '#{client_width}x#{client_height}' 2>/dev/null || true)"
+    case "$size" in
+      [1-9]*x[1-9]*) printf '%s\n' "$size"; return ;;
+    esac
+  fi
+  # stdout is a pipe whenever this is called as $(session_size), so [ -t 1 ]
+  # is always false here and would leave this branch dead. ncurses tput
+  # queries the terminal through stderr when stdout is not a tty, so a real
+  # terminal outside tmux is still detectable via [ -t 2 ].
+  if [ -t 2 ]; then
+    w="$(tput cols 2>/dev/null || true)"
+    h="$(tput lines 2>/dev/null || true)"
+    case "$w" in
+      [1-9]*) case "$h" in
+        [1-9]*) printf '%sx%s\n' "$w" "$h"; return ;;
+      esac ;;
+    esac
+  fi
+}
+
 # shell_command_for DIR — echo the command line the shell pane should run at
 # launch, or "" for a plain shell. `shell_command` in DIR/.claudemux.yml wins
 # over launch.shell_command in config.yml, so a project can point the pane at
@@ -499,9 +538,9 @@ inject_op_env() {
   while IFS= read -r line; do
     [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
     key="${line%%=*}"
-    tmux set-environment -t "$session" "$key" "${line#*=}"
+    tmux set-environment -t "$session:" "$key" "${line#*=}"
   done <<< "$env_out"
-  tmux set-environment -t "$session" CLAUDEMUX_OP_ENV "$env_id"
+  tmux set-environment -t "$session:" CLAUDEMUX_OP_ENV "$env_id"
 }
 
 # pane_cmd PANE — PANE's current foreground command, "" if the pane is gone.
@@ -852,7 +891,7 @@ create_session() {
   # created with a command never draws a prompt at all, so there is nothing to
   # hide.
   local layout claude_pane head_pane shell_pane head_bin holder_cmd
-  local shell_size shell_cmd head_rows
+  local shell_size shell_cmd head_rows sess_size
   ch_config_get launch.layout
   layout="$CH_CONFIG_VALUE"
   case "$layout" in
@@ -875,7 +914,12 @@ create_session() {
   shell_cmd="$(shell_command_for "$work_dir")"
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
-  tmux new-session -d -s "$session_name" -c "$work_dir" -x "$(tput cols)" -y "$(tput lines)"
+  local -a size_args=()
+  sess_size="$(session_size)"
+  if [ -n "$sess_size" ]; then
+    size_args=(-x "${sess_size%x*}" -y "${sess_size#*x}")
+  fi
+  tmux new-session -d -s "$session_name" -c "$work_dir" "${size_args[@]+"${size_args[@]}"}"
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
   shell_pane=""
   case "$layout" in
@@ -941,15 +985,24 @@ create_session() {
 
   # Pin the head pane to exactly $head_rows rows. The `-l` at split time does
   # NOT survive attach: with window-size=latest, attaching a client whose size
-  # differs from the tput-derived new-session size makes tmux redistribute pane
-  # heights proportionally, shrinking the head pane (losing the bottom context
-  # rows and/or the statusbar). A window-resized hook re-pins it on every
-  # resize — the attach included — so every configured row always renders.
+  # differs from the size new-session was given (see session_size) makes tmux
+  # redistribute pane heights proportionally, shrinking the head pane (losing
+  # the bottom context rows and/or the statusbar). A window-resized hook
+  # re-pins it on every resize — the attach included — so every configured row
+  # always renders.
   #
   # The height is baked into the hook at creation, so a session already running
   # keeps the height it launched with when head.rows changes. That is the same
   # deal as launch.layout and shell_size: the arrangement is decided at launch.
-  tmux set-hook -t "$session_name" window-resized "resize-pane -t $head_pane -y $head_rows"
+  #
+  # The "$session_name:" form is required, not stylistic: tmux resolves a bare
+  # `-t NAME` by window-name PREFIX in the CALLER's session first, and the
+  # lobby — which runs this script for its `n` key — has a window called
+  # "claudemux-head". A project named "claudemux" therefore set this hook on
+  # the LOBBY, leaving the new session with no re-pin and a head pane scaled to
+  # whatever the attach did to it. Same reason for every other session target
+  # in this file.
+  tmux set-hook -t "$session_name:" window-resized "resize-pane -t $head_pane -y $head_rows"
 
   # Let the terminal tab track the tmux window name — claudemux-head renames the
   # window to the Haiku `tab` label as the session's focus settles. Set here so
@@ -961,8 +1014,8 @@ create_session() {
   # prefix — the window name itself stays the bare label, so the tmux status
   # line does not spend width repeating a session name that already sits a
   # column to its left.
-  tmux set -t "$session_name" set-titles on
-  tmux set -t "$session_name" set-titles-string \
+  tmux set -t "$session_name:" set-titles on
+  tmux set -t "$session_name:" set-titles-string \
     "$(session_title_name "$proj_name" "$session_name" "$clone_suffix") · #W"
 
   attach "$session_name" "$work_dir"

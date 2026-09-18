@@ -322,8 +322,8 @@ func TestTabResetTmuxArgs(t *testing.T) {
 	got := tabResetTmuxArgs("%3", "claudemux", "claudemux", "b34dff", "#ffffff")
 	want := [][]string{
 		{"rename-window", "-t", "%3", "claudemux"},
-		{"set", "-t", "claudemux", "status-style", "bg=#b34dff,fg=#ffffff"},
-		{"set", "-w", "-t", "claudemux", "pane-active-border-style", "fg=#b34dff"},
+		{"set", "-t", "claudemux:", "status-style", "bg=#b34dff,fg=#ffffff"},
+		{"set", "-w", "-t", "claudemux:", "pane-active-border-style", "fg=#b34dff"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d commands, want %d: %v", len(got), len(want), got)

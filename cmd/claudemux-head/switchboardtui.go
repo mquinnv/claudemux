@@ -338,27 +338,21 @@ func newSwModel(selfPane string) swModel {
 }
 
 // shouldAutoRestart reports whether this poll may re-exec into a rebuilt
-// binary. Only from a quiescent lobby: standby and the create prompt are
-// in-memory and would not survive the re-exec, and escorting/paused hold
-// snoozes and an escortee whose loss would un-skip sessions the user just
-// walked away from. swParked is usually the lobby's resting state, so
-// waiting for it delays the upgrade by seconds, not sessions — but a live
-// snooze can outlive the escort that created it: step() snoozes the
-// abandoned session and drops straight into swParked, so the lobby can sit
-// parked with conductor.snoozed still holding an entry. conductor.snoozed
-// is in-memory only, so a re-exec right then would discard it and the fresh
-// conductor would immediately re-escort the user to the session they just
-// walked away from — the exact bounce-back the snooze exists to prevent.
-// So the restart also waits for snoozed to drain, worst case the full
-// swSnoozeTTL. It also stays off for the duration of a fleet-restart sweep
-// (fleetRestarting): swRestartFleetCmd's sends run in a goroutine outside
-// this model, so a poll landing mid-sweep must not race it into quitting
-// early — the same changed-binary condition that made shouldAutoRestart true
-// is usually exactly what prompted the user to press ctrl+r in the first
-// place, so this case is not rare.
+// binary. The in-memory state that cannot survive a re-exec is the transient
+// UI: standby, the create prompt, an in-flight create, the defer prompt, and a
+// fleet-restart sweep whose sends run in a goroutine outside this model. Those
+// still hold the gate shut.
+//
+// The conductor's own state no longer does. It used to: this waited for
+// swParked with no live snoozes, because discarding conductor.snoozed would
+// re-escort the user to the session they had just walked away from. But a user
+// who works inside sessions leaves the conductor escorting or paused with
+// snoozes live indefinitely, so the gate never opened and the lobby ran a
+// binary eight days older than the fleet's heads. writeConductHandoff carries
+// phase, the driven client, escortee, snoozes and the paused observation
+// across the exec instead.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
 	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting &&
-		m.cond.phase == swParked && len(m.cond.snoozed) == 0 &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
@@ -527,7 +521,7 @@ func swSwitchCmd(client, target string, card *bannerCard) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", target).Run(); err != nil || card == nil {
+		if err := exec.CommandContext(ctx, "tmux", "switch-client", "-c", client, "-t", swSwitchTarget(target)).Run(); err != nil || card == nil {
 			return nil
 		}
 		self, err := os.Executable()
@@ -1426,7 +1420,15 @@ func runSwitchboard(stderr io.Writer) int {
 		fmt.Fprintln(stderr, "claudemux-head switchboard must run inside tmux (start it with `claudemux switch`)")
 		return 1
 	}
-	p := tea.NewProgram(newSwModel(selfPane), tea.WithAltScreen())
+	m := newSwModel(selfPane)
+	// A handoff file means the process this one is replacing wrote its
+	// conductor state on the way out, seconds ago. Adopt it so the snoozes and
+	// the escort survive an upgrade; anything stale is ignored and removed by
+	// readConductHandoff itself.
+	if c, ok := readConductHandoff(defaultConductHandoffPath(), time.Now()); ok {
+		m.cond = c
+	}
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
@@ -1436,6 +1438,7 @@ func runSwitchboard(stderr io.Writer) int {
 	// terminal is restored before the replacement starts, and a failed
 	// exec leaves the pane open with the reason visible.
 	if fm, ok := final.(swModel); ok && fm.restart {
+		_ = writeConductHandoff(defaultConductHandoffPath(), fm.cond, time.Now())
 		restartSelf(stderr)
 		return 1
 	}
@@ -1462,4 +1465,18 @@ func swDeferTarget(sess swSession) string {
 		return sess.HeadPane
 	}
 	return sess.Name + ":"
+}
+
+// swSwitchTarget is the tmux target the lobby switches a client to. The
+// trailing colon is required for the same reason swDeferTarget takes a pane id:
+// tmux resolves a bare name by window-name PREFIX in the caller's session
+// before session names, and the lobby's window is "claudemux-head" — so a
+// session named "claudemux" can resolve to the lobby's own window. Empty in,
+// empty out: ":" alone means "the current session", which would be a silent
+// no-op escort rather than a visible failure.
+func swSwitchTarget(session string) string {
+	if session == "" {
+		return ""
+	}
+	return session + ":"
 }

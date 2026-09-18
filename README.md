@@ -764,6 +764,11 @@ session, or back to the lobby.
 process re-execs the `claudemux-head` binary as it stands on disk right now, so
 this is how you pick up a rebuild or an edited `config.yml` without touching the
 session — the pane keeps its size and position, and `claude` is never disturbed.
+The lobby does the same thing on its own, with no key to press, whenever the
+binary on disk changes underneath it; the conductor's escort, snoozes, and
+paused-session state survive that restart via a short-lived handoff file at
+`~/.claude/claudemux/conductor-handoff.json`, read once on startup and ignored
+if it's older than 30s.
 
 `q`, `ctrl+c` and `esc` quit instead, and quitting **closes the pane**: the head
 is the pane's program, and a clean exit is not the failure that
