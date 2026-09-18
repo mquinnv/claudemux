@@ -58,9 +58,16 @@ Observed leftovers on the live lobby: `set-titles-string "claudemux · #W"`,
 The claudemux session was the only one of ten in the fleet missing all four.
 
 The Go side has the same shape at `swSwitchCmd` (`switch-client -c <client> -t
-<target>`), which is how the conductor escorts. Unverified whether `-c`
-re-bases resolution onto the client's session; the implementation must
-establish this with a harness before deciding the fix is cosmetic.
+<target>`), which is how the conductor escorts. Established with a harness
+(task-2-report.md, Step 1): `-c` does not re-base resolution onto the
+escorted client's session, and although `swSwitchCmd`'s `exec.CommandContext`
+never sets `cmd.Env` (so the subprocess does inherit the lobby head's own
+`TMUX`/`TMUX_PANE`, the same condition behind `swDeferTarget`'s hazard),
+`switch-client`'s `-t` is typed `target-session` in tmux(1), whose bare-name
+resolution never falls back to window-name matching the way
+`target-pane`/`target-window` resolution does for `set-option`. The fix is
+therefore defensive — it keeps this call site consistent with
+`swDeferTarget`'s precedent rather than closing a proven escort failure.
 
 ### Decision
 
