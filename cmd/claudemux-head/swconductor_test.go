@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -524,5 +525,160 @@ func TestPausedLobbyReturnClearsHandBack(t *testing.T) {
 	c.step(snapAt("b", busy("b")), now.Add(3*time.Second))
 	if _, ok := c.step(snapAt("b", busy("b"), waiting("a", 900)), now.Add(4*time.Second)); ok {
 		t.Fatal("stale hand-back from a previous pause must not dispatch")
+	}
+}
+
+// The four tests below drive a conductor restored via the conductor-handoff
+// round trip through step(), rather than exercising the handoff file alone.
+// They exist because the file-level round trip (TestConductHandoffRoundTrip)
+// cannot see what resolveClient does with the restored state on its first
+// live tick — which is exactly where the carried-client bug lived: the
+// handoff used to not carry `client`, so the first tick after a restore
+// looked identical to a client churn and dropped the escortee without
+// snoozing it.
+
+// TestConductHandoffRestoredEscortSurvivesFirstTick: the client is still
+// sitting on the escortee when the restored conductor takes its first live
+// tick. That must be a no-op — the client hasn't moved, so this cannot be
+// treated as a user walk-away or a client churn.
+func TestConductHandoffRestoredEscortSurvivesFirstTick(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := conductor{
+		phase:    swEscorting,
+		client:   "/dev/ttys001",
+		escortee: "x",
+		snoozed:  map[string]swSnooze{},
+	}
+	path := filepath.Join(t.TempDir(), "handoff.json")
+	if err := writeConductHandoff(path, c, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	restored, ok := readConductHandoff(path, now)
+	if !ok {
+		t.Fatal("handoff not readable")
+	}
+	if _, ok := restored.step(snapAt("x", waiting("x", 100)), now); ok {
+		t.Error("restored escort: first tick after restore must not dispatch")
+	}
+	if restored.phase != swEscorting || restored.escortee != "x" {
+		t.Errorf("phase=%v escortee=%q, want swEscorting/\"x\" preserved", restored.phase, restored.escortee)
+	}
+}
+
+// TestConductHandoffRestoredEscortWalkAwayStillSnoozes is the regression test
+// for the bounce-back bug: without the client in the handoff, the first tick
+// after a restore reads as a client churn, the swEscorting branch clears the
+// escortee WITHOUT snoozing it (churn is not a walk-away), and a later walk
+// to the lobby finds nothing snoozed — so the conductor escorts the user
+// straight back into the session they just left. Confirmed failing before
+// the fix (see task-4-report.md fix-report section for the RED output);
+// carrying `client` in the handoff makes the first tick a no-op (see
+// TestConductHandoffRestoredEscortSurvivesFirstTick above), so the walk-away
+// below is a genuine user-initiated move and gets snoozed like any other.
+func TestConductHandoffRestoredEscortWalkAwayStillSnoozes(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := conductor{
+		phase:    swEscorting,
+		client:   "/dev/ttys001",
+		escortee: "x",
+		snoozed:  map[string]swSnooze{},
+	}
+	path := filepath.Join(t.TempDir(), "handoff.json")
+	if err := writeConductHandoff(path, c, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	restored, ok := readConductHandoff(path, now)
+	if !ok {
+		t.Fatal("handoff not readable")
+	}
+	// First tick: client still on the escortee, still waiting — a no-op.
+	restored.step(snapAt("x", waiting("x", 100)), now)
+	// The user walks back to the lobby while "x" is still waiting.
+	if _, ok := restored.step(snapAt("switchboard", waiting("x", 100)), now); ok {
+		t.Fatal("walk-away tick must not dispatch")
+	}
+	if restored.phase != swParked {
+		t.Fatalf("phase = %v, want swParked after walk-away", restored.phase)
+	}
+	if _, snoozed := restored.snoozed["x"]; !snoozed {
+		t.Fatal("walking away from the restored escort must snooze it")
+	}
+	// A further tick with "x" still waiting must not escort back into it.
+	if act, ok := restored.step(snapAt("switchboard", waiting("x", 100)), now); ok {
+		t.Errorf("must not bounce back into the snoozed escortee, got %+v", act)
+	}
+}
+
+// TestConductHandoffRestoredPausedObservationSurvives: a restored swPaused
+// conductor's paused-session observation must continue rather than restart —
+// otherwise a hand-back the user made just before the restart could be
+// forgotten and the observation would begin over from a state that looks
+// like a fresh pause.
+func TestConductHandoffRestoredPausedObservationSurvives(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := conductor{
+		phase:            swPaused,
+		client:           "/dev/ttys001",
+		snoozed:          map[string]swSnooze{},
+		pausedCur:        "y",
+		pausedCurWaiting: true,
+	}
+	path := filepath.Join(t.TempDir(), "handoff.json")
+	if err := writeConductHandoff(path, c, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	restored, ok := readConductHandoff(path, now)
+	if !ok {
+		t.Fatal("handoff not readable")
+	}
+	if _, ok := restored.step(snapAt("y", waiting("y", 100)), now); ok {
+		t.Error("restored pause: first tick after restore must not dispatch")
+	}
+	if restored.pausedCur != "y" || !restored.pausedCurWaiting {
+		t.Errorf("paused observation reset: cur=%q waiting=%v, want \"y\"/true", restored.pausedCur, restored.pausedCurWaiting)
+	}
+}
+
+// TestConductHandoffRestoredStaleClientReadopts: a carried client that no
+// longer exists (the tmux client_name churned across the restart) must cost
+// exactly what a fresh conductor's first encounter with a vanished client
+// costs — one tick of churn, then a normal re-adopt and dispatch. It must
+// not wedge, and it must not invent a snooze.
+func TestConductHandoffRestoredStaleClientReadopts(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := conductor{
+		phase:    swEscorting,
+		client:   "/dev/ttys099", // not present in the snapshot below
+		escortee: "x",
+		snoozed:  map[string]swSnooze{},
+	}
+	path := filepath.Join(t.TempDir(), "handoff.json")
+	if err := writeConductHandoff(path, c, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	restored, ok := readConductHandoff(path, now)
+	if !ok {
+		t.Fatal("handoff not readable")
+	}
+	s := swSnapshot{
+		Sessions: []swSession{waiting("x", 100)},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys001": "switchboard"},
+	}
+	// Stale client: treated as churn, same as a fresh conductor facing a
+	// vanished client — no dispatch this tick, no bogus snooze.
+	if _, ok := restored.step(s, now); ok {
+		t.Fatal("stale-client tick: no dispatch yet")
+	}
+	if restored.client != "/dev/ttys001" {
+		t.Errorf("client = %q, want re-adopted /dev/ttys001", restored.client)
+	}
+	if len(restored.snoozed) != 0 {
+		t.Errorf("stale client churn must not snooze anything, got %v", restored.snoozed)
+	}
+	// Next tick: the re-adopted client at the lobby collects the waiting session.
+	act, ok := restored.step(s, now)
+	if !ok || act.Client != "/dev/ttys001" || act.Target != "x" {
+		t.Errorf("re-adopted client must dispatch, act=%+v ok=%v", act, ok)
 	}
 }

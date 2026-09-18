@@ -143,8 +143,15 @@ consumed once at startup:
 - `~/.claude/claudemux/conductor-handoff.json`, with a
   `CLAUDEMUX_CONDUCT_HANDOFF_PATH` override for tests (the established pattern:
   `defaultUsageCachePath`, `defaultStatuslineCachePath`).
-- Carries `phase`, `escortee`, the snooze map, and the paused-session
-  observation (`pausedCur`, `pausedCurWaiting`, `pausedHandedBack`).
+- Carries `phase`, the driven `client`, `escortee`, the snooze map, and the
+  paused-session observation (`pausedCur`, `pausedCurWaiting`,
+  `pausedHandedBack`). Carrying `client` is safe even though it goes stale
+  fast: `resolveClient` already validates a restored name against the live
+  snapshot and re-adopts if it is gone, exactly as it does for a fresh
+  conductor — so a stale name costs one tick of look-again, while omitting it
+  entirely made every restore look like a client churn on its first tick,
+  which silently dropped a live escortee without snoozing it and let the user
+  walk away into a bounce-back the handoff exists to prevent.
 - Stamped with `at`. A file older than **30s** is ignored and deleted: it means
   a crash or a stale leftover, not a handoff, and a conductor resuming a
   half-hour-old phase would fight the user.

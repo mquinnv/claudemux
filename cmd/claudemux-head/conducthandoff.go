@@ -32,6 +32,7 @@ type rawSnooze struct {
 type rawConductHandoff struct {
 	At               int64                `json:"at"`
 	Phase            int                  `json:"phase"`
+	Client           string               `json:"client"`
 	Escortee         string               `json:"escortee"`
 	Snoozed          map[string]rawSnooze `json:"snoozed"`
 	PausedCur        string               `json:"paused_cur"`
@@ -63,6 +64,7 @@ func writeConductHandoff(path string, c conductor, now time.Time) error {
 	raw := rawConductHandoff{
 		At:               now.Unix(),
 		Phase:            int(c.phase),
+		Client:           c.client,
 		Escortee:         c.escortee,
 		Snoozed:          make(map[string]rawSnooze, len(c.snoozed)),
 		PausedCur:        c.pausedCur,
@@ -88,9 +90,15 @@ func writeConductHandoff(path string, c conductor, now time.Time) error {
 // which is always safe — it is the behaviour every lobby had before this
 // existed.
 //
-// The conductor's client is deliberately NOT carried: resolveClient re-adopts
-// on the first tick, and a stale client name would be a worse answer than
-// looking.
+// The conductor's client IS carried, and doing so is safe even though it goes
+// stale fast: resolveClient validates the restored name against the live
+// snapshot's Clients on the very first tick and re-adopts if it is gone,
+// exactly as it does for a fresh conductor. Not carrying it was the original
+// design — but resolveClient's own "client changed" branch reads a restored,
+// not-yet-reconciled escort as a user walk-away and drops it without
+// snoozing, so the user could skip that session and be escorted straight
+// back into it. Carrying the client keeps resolveClient's first tick a no-op
+// when the client is still live, so the restored escort survives intact.
 func readConductHandoff(path string, now time.Time) (conductor, bool) {
 	if path == "" {
 		return conductor{}, false
@@ -109,6 +117,7 @@ func readConductHandoff(path string, now time.Time) (conductor, bool) {
 	}
 	c := newConductor()
 	c.phase = swPhase(raw.Phase)
+	c.client = raw.Client
 	c.escortee = raw.Escortee
 	c.pausedCur = raw.PausedCur
 	c.pausedCurWaiting = raw.PausedCurWaiting

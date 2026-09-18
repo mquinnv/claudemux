@@ -34,6 +34,9 @@ func TestConductHandoffRoundTrip(t *testing.T) {
 	if got.phase != want.phase || got.escortee != want.escortee {
 		t.Errorf("phase/escortee = %v/%q, want %v/%q", got.phase, got.escortee, want.phase, want.escortee)
 	}
+	if got.client != want.client {
+		t.Errorf("client = %q, want %q", got.client, want.client)
+	}
 	sn, hit := got.snoozed["ag-admin"]
 	if !hit {
 		t.Fatalf("snoozed lost: %#v", got.snoozed)
@@ -95,9 +98,8 @@ func TestConductHandoffMissing(t *testing.T) {
 // to remove. So pin the shape: when this fails, read the new field, decide
 // whether the handoff should carry it, and only then update the count.
 func TestConductorFieldsAreAccountedForInHandoff(t *testing.T) {
-	// carried: phase, escortee, snoozed, pausedCur, pausedCurWaiting,
-	// pausedHandedBack. Deliberately not carried: client — resolveClient
-	// re-adopts on the first tick, and a stale client name is worse than looking.
+	// carried: phase, client, escortee, snoozed, pausedCur, pausedCurWaiting,
+	// pausedHandedBack.
 	const accountedFor = 7
 	if got := reflect.TypeOf(conductor{}).NumField(); got != accountedFor {
 		t.Fatalf("conductor has %d fields, the handoff accounts for %d — decide whether the new field belongs in writeConductHandoff/readConductHandoff (and in this count) before changing this number", got, accountedFor)
