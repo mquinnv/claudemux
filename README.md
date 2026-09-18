@@ -190,12 +190,27 @@ should never carry you into it. Press `d` on the selected row in the
 lobby, or `d` from inside the session's own status pane, to toggle it. Deferring
 first asks what the session is blocked on: type the blocker and press `Enter` (an
 empty one still defers), or `Esc` to back out without deferring. Pressing `d` on a
-deferred session clears it, blocker and all, with no prompt. A deferred session is
-out of the queue entirely — if it's the only thing waiting, you stay on the lobby
-rather than being dispatched to it — but it stays a keystroke away: `Enter` on its
-row goes there whenever you want, and it never stops being visible. A
-deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
-leading the row's second line, and the session's own status pane shows a
+deferred session clears it, blocker and all, with no prompt. To change the blocker
+without clearing the defer, press `D` instead — the same prompt, pre-filled with
+what's recorded now, on the selected row or on your own session; `Enter` saves the
+edit and `Esc` leaves it as it was. A deferred session is out of the queue
+entirely — if it's the only thing waiting, you stay on the lobby rather than
+being dispatched to it — but it stays a keystroke away: `Enter` on its
+row goes there whenever you want, and it never stops being visible.
+
+Deferring the session you're *in* also ends your stay there. The conductor reads
+the mark the way it reads a hand-back: it carries you to the next waiting
+session on the spot, or back to the lobby when nothing else waits — including
+when the deferred session is the only one in the fleet, where it would normally
+leave you put. The same goes for a session you walked into yourself, as long as
+the defer is one you press while you're there; jumping into an already-deferred
+session to unblock it never gets you carried straight back out. (In standby, or
+with no lobby running, nothing moves you — there's no conductor to do it.)
+
+A deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
+leading the row's second line; deferred rows sort to the bottom of the fleet list under
+a `─ deferred ─` rule, so the sessions you can still be carried into stay together at
+the top. The session's own status pane shows a
 `◆ defer: <blocker>` chip on its top line. Unlike a snooze, defer never clears itself — the
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.
@@ -247,8 +262,9 @@ below — so you can stop the conductor without coming back here first.
 
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `d` toggles defer on the selected
-row, `p` hides or shows the preview box, `Esc` returns to the session you came
-from (tmux's per-client last session), `n` starts a new session, `q` quits.
+row, `D` edits that row's blocker, `p` hides or shows the preview box, `Esc`
+returns to the session you came from (tmux's per-client last session), `n`
+starts a new session, `q` quits.
 
 A fleet longer than the pane scrolls: the list follows the selection, and a
 `↑ N more · ↓ N more` line says how many sessions are off screen in each
@@ -704,9 +720,12 @@ so the chip is absent and `Space` does nothing.
 **Deferring from the status pane.** Press `d` to toggle defer on this session —
 the same mark the lobby's `d` sets on the selected row (see **Deferring a
 session** above). Setting it prompts for the blocker in the chip's place on the
-top line; the pane then shows a `◆ defer: <blocker>` chip while it's set, and the mark
-persists on the tmux session itself, so it survives a head restart and is
-visible to the lobby with no head running at all.
+top line, and `D` re-opens that prompt pre-filled to edit the blocker without
+clearing the defer; the pane then shows a `◆ defer: <blocker>` chip while it's
+set, and the mark persists on the tmux session itself, so it survives a head
+restart and is visible to the lobby with no head running at all. With a lobby
+conducting, the mark also carries you out of here — on to the next waiting
+session, or back to the lobby.
 
 **Restarting the status pane.** Press `R` (capital) to restart it in place. The
 process re-execs the `claudemux-head` binary as it stands on disk right now, so

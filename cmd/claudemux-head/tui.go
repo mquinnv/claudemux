@@ -268,9 +268,10 @@ type model struct {
 	// deferReason is the last-read @claudemux_defer_reason: the blocker typed
 	// when the session was deferred, shown in the defer chip.
 	deferReason string
-	// deferPrompting means `d` is collecting a blocker: the defer chip slot
-	// shows deferInput with a cursor, and every key is routed to the prompt
-	// until enter (defer with it) or esc (don't defer at all).
+	// deferPrompting means `d` or `D` is collecting a blocker: the defer chip
+	// slot shows deferInput with a cursor, and every key is routed to the
+	// prompt until enter (defer with it) or esc (leave the mark alone). `D`
+	// seeds deferInput with the recorded blocker; `d` always starts empty.
 	deferPrompting bool
 	deferInput     string
 	// conductPendingMode holds the mode this head's space key just asked the
@@ -1354,7 +1355,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, requestConductToggleCmd(now)
 		case "d":
 			// Toggle this session's own defer mark. Clearing is immediate;
-			// setting first asks for the blocker (see deferPromptKey). Unlike
+			// setting first asks for the blocker (see deferPromptKey), and
+			// `D` below re-opens that prompt on an already-deferred session
+			// to edit the blocker rather than clear it. Unlike
 			// space there is no pending/optimistic layer here — deferRaw
 			// simply lags one poll behind the change, which the brief
 			// accepts. No-op outside tmux: there is no owning session to mark.
@@ -1366,6 +1369,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.deferPrompting = true
 			m.deferInput = ""
+			return m, nil
+		case "D":
+			// Edit the blocker without clearing the defer: the same prompt
+			// `d` opens, pre-filled with what is recorded now, so a blocker
+			// that changed ("waiting on Ana" → "waiting on CI") can be
+			// corrected in place instead of cleared and re-typed. On a
+			// session that isn't deferred there is nothing to edit, so this
+			// is exactly `d`'s prompt with an empty line — enter defers.
+			if m.selfPane == "" {
+				return m, nil
+			}
+			m.deferPrompting = true
+			m.deferInput = ""
+			if m.deferRaw == "1" {
+				m.deferInput = sanitizeDeferReason(m.deferReason)
+			}
 			return m, nil
 		case "x":
 			return m.teardownKey()
@@ -2684,9 +2703,10 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", h, mins)
 }
 
-// deferPromptKey handles a key while `d` is collecting a blocker. enter
-// defers with whatever was typed (an empty blocker still defers — the reason
-// is a note, not a gate); esc and ctrl+c back out without deferring. Every
+// deferPromptKey handles a key while `d` or `D` is collecting a blocker.
+// enter defers with whatever was typed (an empty blocker still defers — the
+// reason is a note, not a gate); esc and ctrl+c back out without changing
+// anything, which for a `D` edit leaves the recorded blocker as it was. Every
 // other key edits the text, so q or esc can't quit the pane mid-sentence.
 func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {

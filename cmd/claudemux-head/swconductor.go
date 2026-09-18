@@ -67,6 +67,11 @@ type conductor struct {
 	pausedCur        string
 	pausedCurWaiting bool
 	pausedHandedBack bool
+	// pausedCurDeferred is pausedCur's defer mark as of the last tick, so a
+	// defer pressed WHILE paused here (false → true) is distinguishable from
+	// a session the user deliberately walked into knowing it was deferred.
+	// Only the first means "take me on".
+	pausedCurDeferred bool
 }
 
 func newConductor() conductor {
@@ -161,6 +166,7 @@ func (c *conductor) pruneSnoozes(s swSnapshot, now time.Time) {
 func (c *conductor) clearPaused() {
 	c.pausedCur = ""
 	c.pausedCurWaiting = false
+	c.pausedCurDeferred = false
 	c.pausedHandedBack = false
 }
 
@@ -233,7 +239,15 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 			}
 			return swAction{}, false
 		}
-		if sess, ok := s.session(c.escortee); !ok || !isWaiting(sess.State) {
+		// A deferred escortee is done with the human exactly as a resolved one
+		// is. The escort only ever starts on a non-deferred session (the queue
+		// excludes them), so the mark appearing here means the user pressed `d`
+		// while sitting in this very session — "I am blocked, take me on" — and
+		// leaving them parked in the session they just marked blocked is the
+		// one thing the key must not do.
+		sess, ok := s.session(c.escortee)
+		deferredHere := ok && sess.Deferred
+		if !ok || !isWaiting(sess.State) || deferredHere {
 			if len(queue) > 0 {
 				c.escortee = queue[0].Name
 				return swAction{Client: c.client, Target: c.escortee}, true
@@ -245,7 +259,11 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 			// what the walk-away branch above compares against, so a manual
 			// return to the lobby still parks, and the next session to start
 			// waiting still comes through this same branch and collects them.
-			if soleSession(s, c.escortee) {
+			//
+			// A defer overrides the hold: a one-row lobby is a poor
+			// destination, but it is the destination the user asked for, and
+			// holding would pin them to the session they just declared blocked.
+			if soleSession(s, c.escortee) && !deferredHere {
 				return swAction{}, false
 			}
 			c.escortee = ""
@@ -260,11 +278,32 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 		}
 		sess, ok := s.session(cur)
 		curWaiting := ok && isWaiting(sess.State)
+		curDeferred := ok && sess.Deferred
 		if cur != c.pausedCur {
 			// First look at this spot (fresh pause, or the user moved
-			// again): observation restarts, hand-back forgotten.
-			c.pausedCur, c.pausedCurWaiting, c.pausedHandedBack = cur, curWaiting, false
+			// again): observation restarts, hand-back forgotten. A session
+			// that was ALREADY deferred when the user walked into it is
+			// recorded as such and never reads as a fresh defer below —
+			// jumping into a deferred session to unblock it must not get you
+			// yanked straight back out.
+			c.pausedCur, c.pausedCurWaiting, c.pausedCurDeferred, c.pausedHandedBack = cur, curWaiting, curDeferred, false
 			break
+		}
+		// The user deferred the session they are sitting in. Same meaning as
+		// the escorting branch's defer, and the same answer: move them on,
+		// whatever the phase says about who put them here. Edge-triggered, so
+		// it fires once per defer rather than every tick the mark is set.
+		freshDefer := curDeferred && !c.pausedCurDeferred
+		c.pausedCurDeferred = curDeferred
+		if freshDefer {
+			c.clearPaused()
+			if len(queue) > 0 {
+				c.phase = swEscorting
+				c.escortee = queue[0].Name
+				return swAction{Client: c.client, Target: c.escortee}, true
+			}
+			c.phase = swParked
+			return swAction{Client: c.client, Target: s.Lobby}, true
 		}
 		if c.pausedCurWaiting && !curWaiting {
 			c.pausedHandedBack = true

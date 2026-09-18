@@ -1291,6 +1291,71 @@ func TestSwModelDeferKeyPromptsThenDefers(t *testing.T) {
 	}
 }
 
+// D on a deferred row re-opens the blocker prompt pre-filled with the
+// recorded reason instead of clearing the defer, and the status line and
+// footer say "blocker"/"save" rather than "defer".
+func TestSwModelShiftDEditsBlocker(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1
+	m.snap.Sessions[1].Deferred = true
+	m.snap.Sessions[1].DeferReason = "Ana's review"
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatal("D must open the prompt, not fire yet")
+	}
+	m = next.(swModel)
+	if !m.deferring || !m.deferEditing || m.deferName != "web" {
+		t.Fatalf("deferring = %v editing = %v name = %q, want an edit prompt for web", m.deferring, m.deferEditing, m.deferName)
+	}
+	if m.deferInput != "Ana's review" {
+		t.Errorf("deferInput = %q, want the recorded blocker pre-filled", m.deferInput)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "blocker web ◆ blocker: Ana's review") {
+		t.Errorf("status line missing the edit prompt:\n%s", view)
+	}
+	if !strings.Contains(view, "enter save · esc cancel") {
+		t.Errorf("footer missing the edit wording:\n%s", view)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter must fire the defer cmd")
+	}
+	if got := next.(swModel); got.deferring || got.deferEditing {
+		t.Error("enter must close the prompt and clear the edit flag")
+	}
+}
+
+// D on a row that isn't deferred has no blocker to edit: d's prompt, empty,
+// and worded as a fresh defer.
+func TestSwModelShiftDOnUndeferredIsAnEmptyPrompt(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1
+	m.snap.Sessions[1].DeferReason = "stale"
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	m = next.(swModel)
+	if !m.deferring || m.deferEditing || m.deferInput != "" {
+		t.Fatalf("deferring = %v editing = %v input = %q, want an empty defer prompt", m.deferring, m.deferEditing, m.deferInput)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "enter defer · esc cancel") {
+		t.Errorf("footer must keep the defer wording:\n%s", view)
+	}
+}
+
+// D on an empty list is a no-op, guarded like every other row key.
+func TestSwModelShiftDEmptyListNoop(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions = nil
+	m.sel = 0
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Error("D on an empty list must issue no cmd")
+	}
+	if next.(swModel).deferring {
+		t.Error("D on an empty list must not open the prompt")
+	}
+}
+
 // d on an already-deferred row clears it immediately, no prompt.
 func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
 	m := swTestModel()
@@ -1319,6 +1384,108 @@ func TestSwDetailLineShowsDeferReason(t *testing.T) {
 	stale := swSession{Name: "web", DeferReason: "CI"}
 	if swDetailLine(stale) != "" || swSessionRows(stale) != 1 {
 		t.Error("a reason without the defer mark must not render")
+	}
+}
+
+// The deferred rows are parked below a labelled rule, so the boundary between
+// the sessions the conductor can drive to and the ones it never will is
+// visible without reading every badge down the column.
+func TestSwModelViewDrawsDeferredDivider(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions[2].Deferred = true // scratch, already last
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	row := -1
+	for i, l := range lines {
+		if strings.Contains(l, "scratch") {
+			row = i
+			break
+		}
+	}
+	if row <= 0 {
+		t.Fatalf("could not find scratch's row:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[row-1], swDividerLabel) {
+		t.Errorf("the line above the first deferred row must be the divider, got %q", lines[row-1])
+	}
+	if got := strings.Count(strings.Join(lines, "\n"), swDividerLabel); got != 1 {
+		t.Errorf("the divider must be drawn once, found %d", got)
+	}
+}
+
+func TestSwModelViewNoDividerWithoutDeferred(t *testing.T) {
+	m := swTestModel()
+	if view := ansi.Strip(m.View()); strings.Contains(view, swDividerLabel) {
+		t.Errorf("a fleet with nothing deferred needs no divider:\n%s", view)
+	}
+}
+
+// A divider above the very first row would separate the deferred sessions
+// from nothing at all — it is a boundary, not a heading.
+func TestSwModelViewNoDividerWhenEveryRowIsDeferred(t *testing.T) {
+	m := swTestModel()
+	for i := range m.snap.Sessions {
+		m.snap.Sessions[i].Deferred = true
+	}
+	if view := ansi.Strip(m.View()); strings.Contains(view, swDividerLabel) {
+		t.Errorf("an all-deferred fleet needs no divider:\n%s", view)
+	}
+}
+
+// The divider costs a line, so the list budget has to pay for it: unpaid, a
+// full pane renders one row too many and pushes the footer off the bottom.
+func TestSwModelViewDividerCountedInListBudget(t *testing.T) {
+	m := swPreviewModel()
+	m.height = 20
+	var sessions []swSession
+	for i := 0; i < 30; i++ {
+		sessions = append(sessions, swSession{
+			Name: fmt.Sprintf("sess-%02d", i), State: "Idle", Context: -1, ClaudePane: "%2",
+			Deferred: i >= 25,
+		})
+	}
+	m.snap.Sessions = sessions
+	m.sel = 27 // scrolled to the bottom, where the divider is on screen
+	raw := m.View()
+	if !strings.Contains(ansi.Strip(raw), swDividerLabel) {
+		t.Fatalf("expected the divider on screen at this selection:\n%s", ansi.Strip(raw))
+	}
+	if got := len(strings.Split(raw, "\n")); got > m.height {
+		t.Errorf("view is %d lines, want at most %d", got, m.height)
+	}
+}
+
+// Deferring a session moves its row, and the selection must ride along with
+// the session the user was looking at rather than staying on an index that
+// now holds somebody else.
+func TestSwModelSnapshotKeepsSelectionOnTheSameSession(t *testing.T) {
+	m := swTestModel()
+	m.sel = 1 // web
+	snap := m.snap
+	snap.Sessions = []swSession{
+		{Name: "api", State: "Idle", Context: -1},
+		{Name: "scratch", Context: -1},
+		{Name: "web", State: "Thinking", Context: -1, Deferred: true},
+	}
+	next, _ := m.Update(swSnapshotMsg{snap: snap, at: time.Now()})
+	nm := next.(swModel)
+	if got := nm.snap.Sessions[nm.sel].Name; got != "web" {
+		t.Errorf("selection landed on %q, want web", got)
+	}
+}
+
+// A selected session that leaves the fleet has no row to follow: the
+// selection stays where it was, clamped to the shortened list.
+func TestSwModelSnapshotSelectionSurvivesVanishedSession(t *testing.T) {
+	m := swTestModel()
+	m.sel = 2 // scratch
+	snap := m.snap
+	snap.Sessions = []swSession{
+		{Name: "api", State: "Idle", Context: -1},
+		{Name: "web", State: "Thinking", Context: -1},
+	}
+	next, _ := m.Update(swSnapshotMsg{snap: snap, at: time.Now()})
+	if got := next.(swModel).sel; got != 1 {
+		t.Errorf("sel = %d, want 1 (clamped to the shortened fleet)", got)
 	}
 }
 
