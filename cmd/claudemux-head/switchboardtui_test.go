@@ -937,8 +937,7 @@ func TestSwitchboardShouldAutoRestart(t *testing.T) {
 		func(m *swModel) { m.standby = true },
 		func(m *swModel) { m.creating = true },
 		func(m *swModel) { m.createBusy = true },
-		func(m *swModel) { m.cond.phase = swEscorting },
-		func(m *swModel) { m.cond.phase = swPaused },
+		func(m *swModel) { m.deferring = true },
 		func(m *swModel) { m.fleetRestarting = true },
 	} {
 		mm := newSwModel("%1")
@@ -948,14 +947,28 @@ func TestSwitchboardShouldAutoRestart(t *testing.T) {
 			t.Errorf("non-quiescent lobby must not restart (%+v)", mm)
 		}
 	}
+
+	// The conductor's phase is no longer a gate: writeConductHandoff carries
+	// phase, escortee and snoozes across the exec, so the busiest lobby is as
+	// good a moment to upgrade as a parked one. Requiring swParked meant a user
+	// who works inside sessions never got the upgrade at all.
+	for _, phase := range []swPhase{swEscorting, swPaused} {
+		mm := newSwModel("%1")
+		mm.launchBin, mm.launchBinOK = stamp, true
+		mm.cond.phase = phase
+		mm.cond.escortee = "phenix"
+		if !mm.shouldAutoRestart(now) {
+			t.Errorf("phase %v must not block a rebuilt binary", phase)
+		}
+	}
 }
 
-// TestSwitchboardShouldAutoRestartLiveSnooze covers the case a parked lobby
-// still has a live snooze: the user just walked an escortee back to the
-// lobby (step() snoozes that session and lands in swParked), so a re-exec
-// right now would drop conductor.snoozed and un-skip the session the user
-// just skipped. shouldAutoRestart must wait out the snooze — worst case the
-// full swSnoozeTTL — before taking a pending rebuild.
+// TestSwitchboardShouldAutoRestartLiveSnooze covers a lobby with a live snooze:
+// the user walked an escortee back to the lobby, so conductor.snoozed holds the
+// episode they just skipped. This used to block the restart, because a re-exec
+// would drop the map and the fresh conductor would escort them straight back
+// into that session. The handoff now carries the map across, so the restart
+// proceeds and the snooze survives it.
 func TestSwitchboardShouldAutoRestartLiveSnooze(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "bin")
 	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
@@ -975,14 +988,23 @@ func TestSwitchboardShouldAutoRestartLiveSnooze(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.cond.snoozed = map[string]swSnooze{"x": {since: time.Unix(100, 0), at: time.Now()}}
-	if m.shouldAutoRestart(now) {
-		t.Error("parked lobby with a live snooze must not restart")
+	m.cond.snoozed = map[string]swSnooze{"x": {since: time.Unix(100, 0), at: now}}
+	if !m.shouldAutoRestart(now) {
+		t.Error("a live snooze must not block a rebuilt binary; the handoff carries it")
 	}
 
-	m.cond.snoozed = map[string]swSnooze{}
-	if !m.shouldAutoRestart(now) {
-		t.Error("parked lobby with no live snoozes must restart on a changed binary")
+	// And the snooze must actually survive the trip, or the escort the old gate
+	// was protecting against happens anyway.
+	path := filepath.Join(t.TempDir(), "handoff.json")
+	if err := writeConductHandoff(path, m.cond, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, ok := readConductHandoff(path, now)
+	if !ok {
+		t.Fatal("handoff not readable")
+	}
+	if sn, hit := got.snoozed["x"]; !hit || !sn.since.Equal(time.Unix(100, 0)) {
+		t.Errorf("snooze lost across the handoff: %#v", got.snoozed)
 	}
 }
 
