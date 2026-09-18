@@ -17,16 +17,10 @@ import (
 
 // Styles
 var (
-	dotIdle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575")).Render("●")
-	dotThinking = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6")).Render("●")
-	dotTool     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00")).Render("●")
-	dotError    = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("●")
-	dotCompact  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A855F7")).Render("●")
-
 	// None of the pane's styles set a Background: the head inherits the
 	// terminal's own, so it reads correctly under both light and dark themes
 	// without having to detect which is in use. A hardcoded background also
-	// can't survive this layout — the state dot, every progress bar, and the
+	// can't survive this layout — the state emoji, every progress bar, and the
 	// bold label are each rendered as their own styled fragment ending in a
 	// background reset, so an outer Background(...) only paints the gaps
 	// between them and the trailing width pad. That banding was invisible
@@ -416,6 +410,13 @@ type model struct {
 	mainCheckout string
 	inWorktree   bool
 
+	// projectEmoji and projectName are workDir's config `emoji:` and `name:`,
+	// read once at startup: like the color, they come from a file that does not
+	// change under a running session. projectEmoji is "" when none is declared
+	// or the value is rejected (see validProjectEmoji).
+	projectEmoji string
+	projectName  string
+
 	// worktreePending records that bin/claudemux marked this session as wanting
 	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
 	// one; hooks/claudemux-worktree.sh asks the model to — right before its
@@ -526,6 +527,9 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.workDir = wd
 		m.inWorktree = worktreeNameForCwd(wd) != ""
 		m.mainCheckout = mainCheckoutFor(wd)
+		cfg := projectConfigPath(wd)
+		m.projectEmoji = projectDeclaredEmoji(cfg)
+		m.projectName = projectDeclaredName(cfg)
 	}
 	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
 	if m.worktreePending {
@@ -872,6 +876,12 @@ func (m model) Init() tea.Cmd {
 	// The project color is static for the life of a session, so it is published
 	// once here rather than from the per-tick publish path.
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
+		cmds = append(cmds, c)
+	}
+	// The badge likewise. An empty one is still published: a head restarted
+	// after its project dropped `emoji:` must overwrite the old value, the
+	// reason publishOptionCmd never skips "".
+	if c := publishOptionCmd(m.selfPane, infoEmojiOption, m.projectEmoji); c != nil {
 		cmds = append(cmds, c)
 	}
 	// The seed call goes out exactly when newModel held the in-flight flag
@@ -1227,7 +1237,13 @@ func (m model) tabCmdFor(s Summary) tea.Cmd {
 	if !m.tabTitle || m.tabPinned {
 		return nil
 	}
-	return renameTabCmd(m.selfPane, tabLabel(m.worktreeTab, s.Tab, m.tabHaikuWins))
+	return renameTabCmd(m.selfPane, m.tabText(s))
+}
+
+// tabText is the window label a summary produces: the tab tabLabel picks, with
+// the project badge in front (see badgedTab).
+func (m model) tabText(s Summary) string {
+	return badgedTab(m.projectEmoji, tabLabel(m.worktreeTab, s.Tab, m.tabHaikuWins))
 }
 
 func (m model) summarize() tea.Cmd {
@@ -2075,7 +2091,7 @@ func (m model) conductRawFor(now time.Time) string {
 // budget to hand chipSegment (the right-hand gauges are sized after this
 // point).
 func renderStatusbar(m model, now time.Time, chip string) string {
-	dot := stateDot(m.state.Kind)
+	dot := stateEmoji(m.state.Kind)
 	durStr := "0:00"
 	if !m.state.Since.IsZero() {
 		durStr = formatDuration(now.Sub(m.state.Since))
@@ -2160,40 +2176,6 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 		}
 	}
 	return statusbarStyle.Width(m.width).Render(clipLine(line, m.width))
-}
-
-// stateDot returns the colored state indicator dot for kind, shared by
-// renderStatusbar and renderStateLine.
-func stateDot(kind StateKind) string {
-	switch kind {
-	case StateIdle:
-		return dotIdle
-	case StateThinking:
-		return dotThinking
-	case StateTool:
-		return dotTool
-	case StateAwaiting, StateError:
-		return dotError
-	case StateAsking:
-		// Blocked on the human, like Idle — same green "come look" dot.
-		return dotIdle
-	case StateCompacting:
-		return dotCompact
-	case StateBackground:
-		// Work is still running even though the main thread's turn ended —
-		// the busy dot is the honest read, not the idle one "Working N" sits
-		// next to.
-		return dotTool
-	case StateUnsure:
-		// Not confidently idle: the amber busy dot, because "come look" green
-		// is exactly the claim this state exists to withhold.
-		return dotTool
-	case StateWaiting:
-		// Claude is booting: something is happening, but not attention-worthy.
-		return dotThinking
-	default:
-		return dotIdle
-	}
 }
 
 // gaugeSet is the right-group gauges plus how many of them carry a progress
@@ -2413,14 +2395,14 @@ func fitChip(chip, glyph, bare string, avail int) string {
 }
 
 // renderStateLine renders the top line of the new split layout: the state
-// dot, label, duration, model name, and (when the session has a branch
+// emoji, label, duration, model name, project badge, and (when the session has a branch
 // and/or runs in a worktree) the branch and worktree chips assembled by
 // chipSegment — given a real, computed width budget here, unlike the packed
 // single-line statusbar's fixed cell cap. Only if the assembled line still
 // doesn't fit the pane width does the chip segment itself shrink, via
 // chipSegment's own degradation ladder; the state/model text never does.
 func renderStateLine(m model, now time.Time) string {
-	dot := stateDot(m.state.Kind)
+	dot := stateEmoji(m.state.Kind)
 	durStr := "0:00"
 	if !m.state.Since.IsZero() {
 		durStr = formatDuration(now.Sub(m.state.Since))
@@ -2438,6 +2420,9 @@ func renderStateLine(m model, now time.Time) string {
 	}
 	if c := m.deferChipText(); c != "" {
 		parts = append(parts, c)
+	}
+	if b := projectBadge(m.projectEmoji, m.projectName); b != "" {
+		parts = append(parts, b)
 	}
 
 	chip := m.worktreeChip()

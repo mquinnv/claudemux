@@ -356,8 +356,8 @@ func TestViewHeightFourOrdersStateMetersPrompts(t *testing.T) {
 		t.Fatalf("View() produced %d lines, want 4:\n%s", len(lines), out)
 	}
 	state, meters, first, last := lines[0], lines[1], lines[2], lines[3]
-	if !strings.Contains(state, "●") {
-		t.Errorf("state line (index 0) = %q, want the state dot", state)
+	if !strings.Contains(state, "🟢") {
+		t.Errorf("state line (index 0) = %q, want the idle emoji", state)
 	}
 	if !strings.Contains(meters, "ctx") {
 		t.Errorf("meters line (index 1) = %q, want the ctx gauge", meters)
@@ -659,8 +659,8 @@ func TestViewHeightTwoStateAndMeters(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("View() produced %d lines, want 2:\n%s", len(lines), out)
 	}
-	if !strings.Contains(lines[0], "●") {
-		t.Errorf("state line (index 0) = %q, want the state dot", lines[0])
+	if !strings.Contains(lines[0], "🟢") {
+		t.Errorf("state line (index 0) = %q, want the idle emoji", lines[0])
 	}
 	if !strings.Contains(lines[1], "ctx") {
 		t.Errorf("meters line (index 1) = %q, want the ctx gauge", lines[1])
@@ -2408,20 +2408,30 @@ func TestStatusChipPriority(t *testing.T) {
 }
 
 // StateBackground means work is still running even though the main thread's
-// turn ended, so the dot next to "Working N" must read as busy, not idle —
-// stateDot used to fall through to the default case and render dotIdle.
-//
-// dotIdle and dotTool render as byte-identical plain "●" in this non-TTY
-// test binary (no ANSI color survives), so comparing the real values can't
-// tell them apart. Swap in distinguishable sentinels for the duration of
-// the test so the assertion actually exercises which case fired.
-func TestStateDotBackgroundIsBusy(t *testing.T) {
-	origIdle, origTool := dotIdle, dotTool
-	dotIdle, dotTool = "SENTINEL-IDLE", "SENTINEL-TOOL"
-	defer func() { dotIdle, dotTool = origIdle, origTool }()
+// turn ended, so the symbol next to "Working N" must not read as idle — the
+// old stateDot once fell through to its default case and rendered the idle
+// dot here. Emoji are distinguishable in a non-TTY test binary (the colored
+// dots were not), so this compares the real values.
+func TestStateEmojiBackgroundIsNotIdle(t *testing.T) {
+	if got := stateEmoji(StateBackground); got == stateEmoji(StateIdle) {
+		t.Errorf("stateEmoji(StateBackground) = %q, the idle symbol; want a busy one", got)
+	}
+}
 
-	if got := stateDot(StateBackground); got != dotTool {
-		t.Errorf("stateDot(StateBackground) = %q, want dotTool (busy), not the idle dot", got)
+// Both status layouts lead with the action emoji, never the old colored dot.
+func TestStateLineAndStatusbarLeadWithActionEmoji(t *testing.T) {
+	m := model{ready: true, width: 100, state: State{Kind: StateThinking, Since: time.Now()}}
+	now := time.Now()
+	for name, line := range map[string]string{
+		"renderStateLine": renderStateLine(m, now),
+		"renderStatusbar": renderStatusbar(m, now, ""),
+	} {
+		if !strings.Contains(line, "🧠 Thinking") {
+			t.Errorf("%s = %q, want it to contain %q", name, line, "🧠 Thinking")
+		}
+		if strings.Contains(line, "●") {
+			t.Errorf("%s = %q, still renders the old dot", name, line)
+		}
 	}
 }
 

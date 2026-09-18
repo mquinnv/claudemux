@@ -305,7 +305,7 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 	}}
 
 	const (
-		topicCol = 1 + 2 + swNameColW + 1
+		topicCol = 1 + 2*(emojiCellW+1) + swNameColW + 1
 		ctxCol   = topicCol + swTopicColW + 1 + swStateColW + swAgeColW + 2
 	)
 	view := m.View()
@@ -319,11 +319,10 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 		if line == "" {
 			t.Fatalf("no row rendered for %q:\n%s", sess.Name, view)
 		}
-		r := []rune(line)
 		// The topic is a fixed-width cell now, not the line's free tail: it
 		// must fill exactly swTopicColW cells so state/age/context/model
 		// start at the same column on every row.
-		if got, want := string(r[topicCol:topicCol+swTopicColW]), swPad(sess.Topic, swTopicColW); got != want {
+		if got, want := ansi.Cut(line, topicCol, topicCol+swTopicColW), swPad(sess.Topic, swTopicColW); got != want {
 			t.Errorf("%s: topic cell at %d = %q, want %q\n%s",
 				sess.Name, topicCol, got, want, view)
 		}
@@ -331,7 +330,7 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 		if sess.Context >= 0 {
 			wantCtx = fmt.Sprintf("%d%%", sess.Context)
 		}
-		if got := string(r[ctxCol : ctxCol+swCtxColW]); !strings.HasSuffix(got, wantCtx) {
+		if got := ansi.Cut(line, ctxCol, ctxCol+swCtxColW); !strings.HasSuffix(got, wantCtx) {
 			t.Errorf("%s: context cell = %q, want it to end in %q\n%s", sess.Name, got, wantCtx, view)
 		}
 	}
@@ -385,12 +384,14 @@ func TestSwModelViewNeverExceedsWidth(t *testing.T) {
 func TestSwModelViewClipsWideRuneNameToColumn(t *testing.T) {
 	now := time.Now()
 	m := newSwModel("%9")
-	m.width, m.height = 100, 24
+	// The chrome plus 25 cells: room for the whole 24-cell topic, so the
+	// assertion below is about where it starts, not about it being clipped.
+	m.width, m.height = swRowChromeW+25, 24
 	m.snap = swSnapshot{Sessions: []swSession{
 		{Name: strings.Repeat("囲", swNameColW+5), State: "Idle", Since: now,
 			Context: 42, Topic: "wide-rune-name-alignment"},
 	}}
-	const topicCol = 1 + 2 + swNameColW + 1
+	const topicCol = 1 + 2*(emojiCellW+1) + swNameColW + 1
 	view := ansi.Strip(m.View())
 	line := ""
 	for _, l := range strings.Split(view, "\n") {
@@ -1477,13 +1478,22 @@ func TestSwModelDeferKeyEmptyListNoop(t *testing.T) {
 	}
 }
 
+// swDeferNarrowestW is the narrowest pane a deferred row fits in whole: the
+// fixed chrome, the topic column at its floor, and the DEFER badge. Derived
+// rather than written down, so it moves with the layout — it was 97 before
+// the emoji marker and badge columns added four cells to the chrome.
+func swDeferNarrowestW() int {
+	return swRowChromeW + swTopicColMinW + lipgloss.Width(swDeferBadgeText())
+}
+
 func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
-	// swTestModel's default width (100) is deliberate here: it is already
-	// narrow enough that the topic column fills the rest of the pane (see
+	// A pane three cells above swDeferNarrowestW is deliberate here: narrow
+	// enough that the topic column fills the rest of the pane (see
 	// TestSwModelViewKeepsMetersOnANarrowPane), which is exactly the width
 	// that used to make swTopicW leave the DEFER badge no room and let
 	// clipLine drop it. A wide pane like 140 never exercised that path.
 	m := swTestModel()
+	m.width = swDeferNarrowestW() + 3
 	m.snap.Sessions[0].Deferred = true
 	view := ansi.Strip(m.View())
 	var row string
@@ -1513,7 +1523,7 @@ func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
 // narrow for this row's other columns regardless of defer, and outside what
 // this fix is about.
 func TestSwModelViewDeferBadgeSurvivesNarrowWidths(t *testing.T) {
-	for _, width := range []int{97, 100, 120} {
+	for _, width := range []int{swDeferNarrowestW(), swDeferNarrowestW() + 3, 120} {
 		m := swTestModel()
 		m.width = width
 		m.snap.Sessions[0].Deferred = true
@@ -1634,5 +1644,72 @@ func TestSwModelStandbyReadoptsReplacedClient(t *testing.T) {
 	m.sel = 1
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd == nil {
 		t.Error("enter after the client was replaced must produce a switch cmd")
+	}
+}
+
+// The marker column keeps both jobs it had as a dot — deferred and snoozed —
+// and draws the session's action everywhere else. Every answer is exactly one
+// emoji cell wide, so the name column after it never moves.
+func TestSwMarker(t *testing.T) {
+	tests := []struct {
+		name    string
+		sess    swSession
+		snoozed bool
+		want    string
+	}{
+		{"deferred wins over waiting", swSession{State: "Idle", Deferred: true}, false, "◆"},
+		{"deferred wins over snoozed", swSession{State: "Idle", Deferred: true}, true, "◆"},
+		{"snoozed waiting", swSession{State: "Idle"}, true, "😴"},
+		{"waiting", swSession{State: "Idle"}, false, "🟢"},
+		{"busy", swSession{State: "Thinking"}, false, "🧠"},
+		{"tool", swSession{State: "Tool:Bash"}, false, "🔧"},
+		{"question is asking", swSession{State: "Tool:AskUserQuestion"}, false, "🙋"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := swMarker(tt.sess, tt.snoozed)
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("swMarker = %q, want it to contain %q", got, tt.want)
+			}
+			if w := lipgloss.Width(got); w != emojiCellW {
+				t.Errorf("width(swMarker) = %d, want %d", w, emojiCellW)
+			}
+		})
+	}
+}
+
+// An unknown state (a pre-publish head) gets a blank cell, not a guess.
+func TestSwMarkerUnknownStateIsBlank(t *testing.T) {
+	if got := swMarker(swSession{}, false); strings.TrimSpace(got) != "" || lipgloss.Width(got) != emojiCellW {
+		t.Errorf("swMarker(unknown) = %q, want %d blank cells", got, emojiCellW)
+	}
+}
+
+// A project badge sits between the marker and the name, and a session without
+// one keeps the slot blank: the name column starts at the same display cell on
+// every row, badge or no badge.
+func TestSwViewShowsBadgeAndHoldsNameColumn(t *testing.T) {
+	m := swTestModel()
+	m.snap.Sessions[0].Emoji = "🧵"
+	view := m.View()
+	if !strings.Contains(view, "🧵 api") {
+		t.Fatalf("view missing the badged name:\n%s", view)
+	}
+	nameCol := func(name string) int {
+		for _, line := range strings.Split(view, "\n") {
+			if i := strings.Index(line, name+" "); i >= 0 && strings.Contains(line, "  ") {
+				return lipgloss.Width(line[:i])
+			}
+		}
+		t.Fatalf("no row for %q:\n%s", name, view)
+		return -1
+	}
+	if api, web := nameCol("api"), nameCol("web"); api != web {
+		t.Errorf("name column: api at %d, web at %d — want the same cell", api, web)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(line); w > m.width {
+			t.Errorf("line is %d cells, wider than the %d-cell pane: %q", w, m.width, line)
+		}
 	}
 }

@@ -55,10 +55,11 @@ const (
 	swTopicColMinW = 14
 
 	// swRowChromeW is line 1's width with the topic column removed: the
-	// leading space, the marker, and every fixed column after the topic,
-	// separators included. swTopicW subtracts it from the pane width to see
-	// what the topic can afford.
-	swRowChromeW = 1 + 2 + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
+	// leading space, the marker and badge cells (each an emoji cell plus a
+	// space), and every fixed column after the topic, separators included.
+	// swTopicW subtracts it from the pane width to see what the topic can
+	// afford.
+	swRowChromeW = 1 + (emojiCellW + 1) + (emojiCellW + 1) + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
 )
 
 // swTopicW is the topic column's width for one render — swTopicColW when the
@@ -194,6 +195,32 @@ func swNameStyle(hex string, selected bool) lipgloss.Style {
 		return lipgloss.NewStyle()
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("#" + hex))
+}
+
+// swMarker renders a row's marker cell, exactly emojiCellW wide.
+//
+// It used to be a dot that meant only "needs you": orange when waiting, grey
+// when waiting but snoozed, ◆ when deferred, blank otherwise. It now draws the
+// session's action on every row, but keeps both jobs that were not the
+// action's to say:
+//
+//   - deferred still wins outright — a deferred session must not be
+//     forgotten, whatever it is doing, so it never falls back to its action;
+//   - a snoozed waiting session is 😴 rather than the idle emoji, the grey dot's
+//     "waiting, deliberately skipped".
+//
+// An unknown state (a pre-publish head) gets a blank cell rather than a guess.
+func swMarker(sess swSession, snoozed bool) string {
+	switch {
+	case sess.Deferred:
+		return swDeferStyle.Render(emojiCell("◆"))
+	case snoozed:
+		return emojiCell("😴")
+	}
+	if k, ok := publishedStateKind(sess.State); ok {
+		return stateEmoji(k)
+	}
+	return emojiCell("")
 }
 
 // swModeBadge renders the title-line mode badge. Escorting shows as
@@ -411,7 +438,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}\t#{"+infoColorOption+"}\t#{"+deferOption+"}\t#{"+deferReasonOption+"}")
+			"#{session_name}\t#{"+statePublishOption+"}\t#{"+statePublishSinceOption+"}\t#{"+infoContextOption+"}\t#{"+infoSummaryOption+"}\t#{"+infoPromptOption+"}\t#{"+infoModelOption+"}\t#{"+infoColorOption+"}\t#{"+deferOption+"}\t#{"+deferReasonOption+"}\t#{"+infoEmojiOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -1100,20 +1127,7 @@ func (m swModel) View() string {
 			}
 			b.WriteString(rule + "\n")
 		}
-		marker := "  "
-		switch {
-		case sess.Deferred:
-			// Deferred wins over the waiting dot: a deferred session is shown
-			// as deferred whether or not it is currently waiting — it must not
-			// be forgotten, so it never falls back to the plain wait marker.
-			marker = swDeferStyle.Render("◆ ")
-		case isWaiting(sess.State):
-			if m.cond.isSnoozed(sess, now) {
-				marker = swUnknownStyle.Render("● ") // waiting, deliberately skipped
-			} else {
-				marker = swWaitStyle.Render("● ")
-			}
-		}
+		marker := swMarker(sess, isWaiting(sess.State) && m.cond.isSnoozed(sess, now))
 		state, style := sess.State, swBusyStyle
 		switch {
 		case sess.State == "":
@@ -1150,7 +1164,7 @@ func (m swModel) View() string {
 		if sess.Deferred {
 			badge = swDeferBadgeText()
 		}
-		line := fmt.Sprintf(" %s%s %s %s%s  %s %s%s", marker, name,
+		line := fmt.Sprintf(" %s %s %s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),

@@ -9,11 +9,11 @@ import (
 // Raw tmux outputs as the switchboard's three -F formats produce them.
 // An unset user option renders as an empty field.
 const (
-	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\tb34dff\t1\t\n" +
-		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\t\t\t\n" +
-		"scratch\t\t\t\t\t\t\t\t\t\n" +
-		"switchboard\t\t\t\t\t\t\t\t\t\n" +
-		"plain\t\t\t\t\t\t\t\t\t\n"
+	swSessOut = "api\tIdle\t1754700000\t37\tfixing the build\trun the tests\tclaude-opus-4-7\tb34dff\t1\t\t🧵\n" +
+		"web\tTool:AskUserQuestion\t1754700100\t82\tpicking a color\twhich hue?\tclaude-fable-5\t\t\t\txy\n" +
+		"scratch\t\t\t\t\t\t\t\t\t\t\n" +
+		"switchboard\t\t\t\t\t\t\t\t\t\t\n" +
+		"plain\t\t\t\t\t\t\t\t\t\t\n"
 	swPaneOut = "api\t%1\tclaudemux-head\tbuild fixes\n" +
 		"api\t%2\tclaude\tbuild fixes\n" +
 		"web\t%5\tclaudemux-head\tcolor picker\n" +
@@ -100,14 +100,67 @@ func TestBuildSwSnapshotMalformedLines(t *testing.T) {
 	if len(eightField.Sessions) != 0 {
 		t.Errorf("pre-defer 8-field lines must be skipped, got %+v", eightField.Sessions)
 	}
+	tenField := buildSwSnapshot("api\tIdle\t1754700000\t37\tsum\tprompt\tm\tc\t1\tr\n", "api\t%1\tclaudemux-head\tt\n", "", "%9")
+	if len(tenField.Sessions) != 0 {
+		t.Errorf("pre-emoji 10-field lines must be skipped, got %+v", tenField.Sessions)
+	}
+}
+
+// Emoji parses from the eleventh field. It is a tmux user option, so anything
+// at all can be in it: only a value validProjectEmoji accepts survives, the
+// same guard isHex6 is for Color.
+func TestBuildSwSnapshotParsesEmoji(t *testing.T) {
+	s := buildSwSnapshot(swSessOut, swPaneOut, swClientOut, "%9")
+	api, ok := s.session("api")
+	if !ok || api.Emoji != "🧵" {
+		t.Errorf("api.Emoji = %q, want 🧵", api.Emoji)
+	}
+	web, ok := s.session("web")
+	if !ok || web.Emoji != "" {
+		t.Errorf("web.Emoji = %q, want empty: %q is not one grapheme", web.Emoji, "xy")
+	}
+}
+
+// The lobby reads the published machine form, not a StateKind. Every value
+// statePublishValue can emit maps back to the kind that emitted it, so the
+// lobby and the head draw the same action with the same emoji.
+func TestPublishedStateKindRoundTrips(t *testing.T) {
+	kinds := []StateKind{
+		StateIdle, StateThinking, StateTool, StateAwaiting, StateError,
+		StateCompacting, StateBackground, StateAsking, StateWaiting, StateUnsure,
+	}
+	for _, k := range kinds {
+		v := statePublishValue(State{Kind: k, ToolName: "Bash", BgCount: 2})
+		got, ok := publishedStateKind(v)
+		if !ok || got != k {
+			t.Errorf("publishedStateKind(%q) = %v, %v; want %v, true", v, got, ok, k)
+		}
+	}
+}
+
+// An open question arrives as the AskUserQuestion tool. isWaiting already
+// treats it as Asking; the emoji does too, rather than drawing a wrench on a
+// session that is waiting for you.
+func TestPublishedStateKindAskUserQuestionIsAsking(t *testing.T) {
+	if got, ok := publishedStateKind("Tool:AskUserQuestion"); !ok || got != StateAsking {
+		t.Errorf("publishedStateKind(Tool:AskUserQuestion) = %v, %v; want StateAsking, true", got, ok)
+	}
+}
+
+func TestPublishedStateKindRejectsUnknown(t *testing.T) {
+	for _, v := range []string{"", "Sleeping", "tool:Bash", "Idle "} {
+		if _, ok := publishedStateKind(v); ok {
+			t.Errorf("publishedStateKind(%q) ok = true, want false", v)
+		}
+	}
 }
 
 // Deferred parses from the ninth field: "1" is deferred, anything else
 // (empty, or any other value) is not.
 func TestBuildSwSnapshotParsesDeferred(t *testing.T) {
-	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t1\t\n" +
-		"web\tIdle\t1754700000\t37\t\t\t\t\t0\t\n" +
-		"scratch\tIdle\t1754700000\t37\t\t\t\t\t\t\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t1\t\t\n" +
+		"web\tIdle\t1754700000\t37\t\t\t\t\t0\t\t\n" +
+		"scratch\tIdle\t1754700000\t37\t\t\t\t\t\t\t\n"
 	paneOut := "api\t%1\tclaudemux-head\tt\n" +
 		"web\t%2\tclaudemux-head\tt\n" +
 		"scratch\t%3\tclaudemux-head\tt\n"
@@ -183,8 +236,8 @@ func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
 		"api\t%3\tclaude\ttopic\n" +
 		"shim\t%4\tclaudemux-head\ttopic\n" +
 		"shim\t%5\tnode\ttopic\n"
-	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t\t\n" +
-		"shim\tIdle\t1754700000\t37\t\t\t\t\t\t\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t\t\t\n" +
+		"shim\tIdle\t1754700000\t37\t\t\t\t\t\t\t\n"
 	s := buildSwSnapshot(sessOut, paneOut, swClientOut, "")
 	api, _ := s.session("api")
 	if api.ClaudePane != "%3" {
@@ -202,10 +255,10 @@ func TestBuildSwSnapshotPrefersClaudeOverNode(t *testing.T) {
 // always shown, and deferring one session must move that row alone rather
 // than reshuffle the fleet around it.
 func TestBuildSwSnapshotSortsDeferredLast(t *testing.T) {
-	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t1\t\n" +
-		"web\tIdle\t1754700000\t37\t\t\t\t\t0\t\n" +
-		"scratch\tIdle\t1754700000\t37\t\t\t\t\t1\t\n" +
-		"zeta\tIdle\t1754700000\t37\t\t\t\t\t\t\n"
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t1\t\t\n" +
+		"web\tIdle\t1754700000\t37\t\t\t\t\t0\t\t\n" +
+		"scratch\tIdle\t1754700000\t37\t\t\t\t\t1\t\t\n" +
+		"zeta\tIdle\t1754700000\t37\t\t\t\t\t\t\t\n"
 	paneOut := "api\t%1\tclaudemux-head\tt\n" +
 		"web\t%2\tclaudemux-head\tt\n" +
 		"scratch\t%3\tclaudemux-head\tt\n" +

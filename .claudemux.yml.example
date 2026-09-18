@@ -13,6 +13,11 @@ color: blue
 # Passed to `claude -n`, naming the session in Claude Code.
 name: my-project
 
+# This project's badge: leads the tmux window name, sits in the status pane's
+# state line, and gets its own column in the switchboard. One emoji, at most two
+# cells wide; anything else is ignored. Omit for no badge.
+# emoji: 🧵
+
 # Auto-worktree override for this project. `true` opts in even when
 # launch.auto_worktree is off globally (the default-branch heuristic still
 # applies); `false` exempts this project. Omit to follow the global setting.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -48,6 +49,40 @@ func statePublishValue(s State) string {
 		return "Starting"
 	}
 	return ""
+}
+
+// publishedStateKind is statePublishValue's inverse, for the lobby: it sees
+// only the published string, but draws the same action emoji the head does.
+// Tool:AskUserQuestion reads as Asking — isWaiting already treats an open
+// question that way, and a wrench on a session waiting for you would say the
+// opposite. ok=false for "" (a pre-publish head) and for anything
+// statePublishValue cannot emit.
+func publishedStateKind(v string) (StateKind, bool) {
+	switch v {
+	case "Idle":
+		return StateIdle, true
+	case "Thinking":
+		return StateThinking, true
+	case "Awaiting":
+		return StateAwaiting, true
+	case "Error":
+		return StateError, true
+	case "Compacting":
+		return StateCompacting, true
+	case "Asking", "Tool:AskUserQuestion":
+		return StateAsking, true
+	case "Starting":
+		return StateWaiting, true
+	}
+	switch {
+	case strings.HasPrefix(v, "Tool:"):
+		return StateTool, true
+	case strings.HasPrefix(v, "Background:"):
+		return StateBackground, true
+	case strings.HasPrefix(v, "Unsure:"):
+		return StateUnsure, true
+	}
+	return StateIdle, false
 }
 
 // statePublishArgs builds one tmux invocation setting both options. `;` is a
@@ -123,6 +158,12 @@ const (
 	// filesystem — resolving colors there would mean discovering each session's
 	// work directory and shelling out to the resolver once per session per poll.
 	infoColorOption = "@claudemux_color"
+
+	// infoEmojiOption carries the project badge (`emoji:` in .claudemux.yml),
+	// published once at start for the same reason as the color: it comes from a
+	// file that does not change under a running session, and the lobby never
+	// reads the filesystem.
+	infoEmojiOption = "@claudemux_emoji"
 )
 
 // infoValueMaxRunes bounds published summary/prompt text. 120 comfortably

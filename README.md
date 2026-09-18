@@ -355,7 +355,7 @@ A third hook, `hooks/claudemux-ask.sh`, tracks pending `AskUserQuestion` calls. 
 Code does not write the question to the transcript until it is answered, so without this
 hook a session sitting on a multiple-choice question reads as **Idle** or **Thinking** —
 exactly the wrong verdict for the one session that most needs your attention. With the
-hook, the head shows **Asking**, and the switchboard marks the session as waiting (dot,
+hook, the head shows **Asking**, and the switchboard marks the session as waiting (🙋 marker,
 highlight, auto-escort) just like an idle one.
 
 Two caveats. An Esc'd question can keep reading as **Asking** until you send the next
@@ -367,8 +367,8 @@ live session keeps running whatever it started with.
 
 **Unsure** is Idle the head no longer trusts. Background work is counted from the
 transcript and expires on a timer when nothing reports it finished; when that timer,
-not a completion, is what emptied the count, the head shows **Unsure N** with an amber
-dot and publishes `Unsure:N`. The switchboard does not treat it as waiting, so the
+not a completion, is what emptied the count, the head shows **Unsure N** with a ❓
+and publishes `Unsure:N`. The switchboard does not treat it as waiting, so the
 conductor will not escort you into a session whose pane may still say "2 shells still
 running". It clears on your next prompt or Claude's next turn.
 
@@ -505,7 +505,7 @@ teardown:
   draws under its `topic`/`now` pair, top to bottom:
 
   ```
-  ● idle 3m   sonnet-5   ⟳ summarizing         ← state line   (always)
+  🟢 Idle 3m  sonnet-5  ⟳ summarizing         ← state line   (always)
   ctx ███░░ 34%   5h ██░ 21%   wk █░ 12%       ← meters       (always)
   topic ❯ head shows last/first prompt rows    ← topic        (always)
   now   ❯ editing cmd/claudemux-head/tui.go    ← now          (always)
@@ -617,6 +617,7 @@ launch it in. See [`.claudemux.yml.example`](.claudemux.yml.example) for the ful
 ```yaml
 color: blue          # tmux status-bar / iTerm2 tab color
 name: my-project      # passed to `claude -n`
+emoji: 🧵             # this project's badge (optional)
 worktree: true        # opt this project in/out of the auto-worktree marker (optional)
 shell_size: 40%       # how big this project's shell pane is (optional)
 shell_command: gh-hud --repo mquinnv/claudemux  # run it in that pane (optional)
@@ -660,6 +661,38 @@ defaults.
 The tab coloring is **iTerm2-specific**. Other terminals silently ignore the escape
 sequence — you still get the tmux status-bar color, just not the tab tint. Nothing
 breaks; the color simply doesn't appear on the tab.
+
+### Project emoji
+
+`emoji:` in `.claudemux.yml` gives a project a badge. It leads the tmux window name (and
+so the window list and the terminal titlebar, as `crm · 🧵 crm bundling`), sits in the
+status pane's state line beside the project's `name:`, and gets its own column in the
+switchboard ahead of the session name.
+
+It must be a single emoji (one grapheme, so `👨‍💻` and `🇺🇸` are fine) no more than two
+cells wide. Anything else — two emoji, a word, an empty value — is ignored and the
+project simply has no badge, the same leniency a mistyped `color:` gets. Like the color,
+it is read once when the session starts.
+
+### Action emoji
+
+The state that used to be a colored dot is now an emoji, in the status pane and in the
+switchboard's marker column alike:
+
+| | | | |
+|---|---|---|---|
+| 🟢 Idle | 🧠 Thinking | 🔧 Tool | 🙋 Asking |
+| ⚠️ Awaiting | ❌ Error | 🗜️ Compacting | ⚙️ Working (background) |
+| ❓ Unsure | ⏳ Starting | | |
+
+The switchboard keeps the two markers that were never about the action: `◆` still wins
+for a deferred session, and a waiting session you have snoozed shows 😴 instead of 🟢.
+These are built in — not configurable per project.
+
+Every emoji is padded to a fixed two-cell slot by measuring it, not by assuming its
+width, so a one-cell glyph or a terminal that draws `⚠️` narrow cannot knock the
+switchboard's columns out of line. The marker and badge columns do make each switchboard
+row four cells wider than before.
 
 ### Tab titles
 
