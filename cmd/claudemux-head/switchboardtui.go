@@ -43,8 +43,11 @@ const (
 	// cells, so swCell still truncates by display width for CJK — a guard
 	// that ASCII topics never reach.)
 	swTopicColW = tabTitleMaxRunes
-	swStateColW = 14 // "Tool:AskUserQuestion" and friends get clipped here
-	swAgeColW   = 6  // widest formatDuration output in practice ("23h59m")
+	// The action emoji and a space lead the state word, so the column is that
+	// much wider than the word alone needs. "Tool:AskUserQuestion" and friends
+	// still get clipped here.
+	swStateColW = emojiCellW + 1 + 14
+	swAgeColW   = 6 // widest formatDuration output in practice ("23h59m")
 	swCtxBarW   = 5
 	swCtxColW   = swCtxBarW + 5 // bar + " 100%"
 	swModelColW = 13            // widest shortModel output ("sonnet 4.5 1M")
@@ -55,11 +58,10 @@ const (
 	swTopicColMinW = 14
 
 	// swRowChromeW is line 1's width with the topic column removed: the
-	// leading space, the marker and badge cells (each an emoji cell plus a
-	// space), and every fixed column after the topic, separators included.
-	// swTopicW subtracts it from the pane width to see what the topic can
-	// afford.
-	swRowChromeW = 1 + (emojiCellW + 1) + (emojiCellW + 1) + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
+	// leading space, the marker and badge cells (each plus a space), and every
+	// fixed column after the topic, separators included. swTopicW subtracts it
+	// from the pane width to see what the topic can afford.
+	swRowChromeW = 1 + (swMarkerW + 1) + (emojiCellW + 1) + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
 )
 
 // swTopicW is the topic column's width for one render — swTopicColW when the
@@ -197,30 +199,42 @@ func swNameStyle(hex string, selected bool) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("#" + hex))
 }
 
-// swMarker renders a row's marker cell, exactly emojiCellW wide.
+// swMarkerW is the marker cell's width: one glyph, no emoji.
+const swMarkerW = 1
+
+// swMarker renders a row's marker cell, exactly swMarkerW wide. It is the
+// attention flag and nothing else: ◆ deferred, an orange dot waiting, a grey
+// dot waiting but deliberately snoozed, blank otherwise. Deferred wins
+// outright — a deferred session must not be forgotten, whether or not it is
+// currently waiting.
 //
-// It used to be a dot that meant only "needs you": orange when waiting, grey
-// when waiting but snoozed, ◆ when deferred, blank otherwise. It now draws the
-// session's action on every row, but keeps both jobs that were not the
-// action's to say:
-//
-//   - deferred still wins outright — a deferred session must not be
-//     forgotten, whatever it is doing, so it never falls back to its action;
-//   - a snoozed waiting session is 😴 rather than the idle emoji, the grey dot's
-//     "waiting, deliberately skipped".
-//
-// An unknown state (a pre-publish head) gets a blank cell rather than a guess.
+// The action is not drawn here. It briefly was, and the front of the row then
+// held two emoji side by side — the action and the project badge — which read
+// as one jumble. The action belongs with its word in the state cell (see
+// swStateText); the front of the row is for which session it is.
 func swMarker(sess swSession, snoozed bool) string {
 	switch {
 	case sess.Deferred:
-		return swDeferStyle.Render(emojiCell("◆"))
-	case snoozed:
-		return emojiCell("😴")
+		return swDeferStyle.Render("◆")
+	case isWaiting(sess.State) && snoozed:
+		return swUnknownStyle.Render("●")
+	case isWaiting(sess.State):
+		return swWaitStyle.Render("●")
 	}
-	if k, ok := publishedStateKind(sess.State); ok {
-		return stateEmoji(k)
+	return " "
+}
+
+// swStateText is the state cell's text: the action emoji, then the published
+// state. An unknown state (a pre-publish head) keeps a blank glyph slot so its
+// word starts in the same column as every other row's.
+func swStateText(state string) string {
+	if k, ok := publishedStateKind(state); ok {
+		return stateEmoji(k) + " " + state
 	}
-	return emojiCell("")
+	if state == "" {
+		state = "unknown"
+	}
+	return emojiCell("") + " " + state
 }
 
 // swModeBadge renders the title-line mode badge. Escorting shows as
@@ -1122,10 +1136,10 @@ func (m swModel) View() string {
 			b.WriteString(rule + "\n")
 		}
 		marker := swMarker(sess, isWaiting(sess.State) && m.cond.isSnoozed(sess, now))
-		state, style := sess.State, swBusyStyle
+		state, style := swStateText(sess.State), swBusyStyle
 		switch {
 		case sess.State == "":
-			state, style = "unknown", swUnknownStyle
+			style = swUnknownStyle
 		case isWaiting(sess.State):
 			style = swWaitStyle
 		}

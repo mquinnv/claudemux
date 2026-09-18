@@ -15,7 +15,8 @@ name: my-project
 
 # This project's badge: leads the tmux window name, sits in the status pane's
 # state line, and gets its own column in the switchboard. One emoji, at most two
-# cells wide; anything else is ignored. Omit for no badge.
+# cells wide, and emoji by default — glyphs that need a variation selector
+# (🛠️ ⚙️ 🍽️) jitter in tmux+iTerm2 and are ignored. Omit for no badge.
 # emoji: 🧵
 
 # Auto-worktree override for this project. `true` opts in even when

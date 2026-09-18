@@ -355,7 +355,7 @@ A third hook, `hooks/claudemux-ask.sh`, tracks pending `AskUserQuestion` calls. 
 Code does not write the question to the transcript until it is answered, so without this
 hook a session sitting on a multiple-choice question reads as **Idle** or **Thinking** —
 exactly the wrong verdict for the one session that most needs your attention. With the
-hook, the head shows **Asking**, and the switchboard marks the session as waiting (🙋 marker,
+hook, the head shows **Asking**, and the switchboard marks the session as waiting (dot,
 highlight, auto-escort) just like an idle one.
 
 Two caveats. An Esc'd question can keep reading as **Asking** until you send the next
@@ -667,32 +667,38 @@ breaks; the color simply doesn't appear on the tab.
 `emoji:` in `.claudemux.yml` gives a project a badge. It leads the tmux window name (and
 so the window list and the terminal titlebar, as `crm · 🧵 crm bundling`), sits in the
 status pane's state line beside the project's `name:`, and gets its own column in the
-switchboard ahead of the session name.
+switchboard ahead of the session name (the switchboard's topic column drops it, so it
+shows once).
 
 It must be a single emoji (one grapheme, so `👨‍💻` and `🇺🇸` are fine) no more than two
-cells wide. Anything else — two emoji, a word, an empty value — is ignored and the
-project simply has no badge, the same leniency a mistyped `color:` gets. Like the color,
-it is read once when the session starts.
+cells wide, and one that is an emoji by default. Glyphs that are text characters turned
+into emoji by an invisible variation selector — `🛠️ ⚙️ ⚠️ 🎛️ 🍽️ ✏️` and the like — are
+rejected: tmux counts them two cells wide while iTerm2 draws them in one, so everything
+after one on a line lands a column off, and the switchboard rows jitter as tmux repaints
+them. Pick the emoji-by-default neighbour instead (`🔨` rather than `🛠️`, `🍴` rather
+than `🍽️`). Anything rejected — two emoji, a word, an empty value, a variation-selector
+glyph — is ignored and the project simply has no badge, the same leniency a mistyped
+`color:` gets. Like the color, it is read once when the session starts.
 
 ### Action emoji
 
-The state that used to be a colored dot is now an emoji, in the status pane and in the
-switchboard's marker column alike:
+The state that used to be a colored dot is now an emoji, beside its word — in the status
+pane's state line and in the switchboard's state column:
 
 | | | | |
 |---|---|---|---|
 | 🔔 Idle | 🧠 Thinking | 🔧 Tool | 🙋 Asking |
-| ⚠️ Awaiting | ❌ Error | 🗜️ Compacting | ⚙️ Working (background) |
+| 🛑 Awaiting | ❌ Error | 🧹 Compacting | 🔄 Working (background) |
 | ❓ Unsure | ⏳ Starting | | |
 
-The switchboard keeps the two markers that were never about the action: `◆` still wins
-for a deferred session, and a waiting session you have snoozed shows 😴 instead of 🔔.
-These are built in — not configurable per project.
+The switchboard's leading marker is still the attention flag it always was: an orange `●`
+for a session waiting on you, a grey `●` for one you have snoozed, `◆` for a deferred
+one. These are built in — not configurable per project.
 
 Every emoji is padded to a fixed two-cell slot by measuring it, not by assuming its
-width, so a one-cell glyph or a terminal that draws `⚠️` narrow cannot knock the
-switchboard's columns out of line. The marker and badge columns do make each switchboard
-row four cells wider than before.
+width, so a narrow glyph cannot knock the switchboard's columns out of line. The badge
+column and the emoji in the state column make each switchboard row six cells wider than
+before emoji.
 
 ### Tab titles
 
