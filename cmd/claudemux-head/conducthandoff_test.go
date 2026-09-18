@@ -10,13 +10,14 @@ import (
 
 func handoffFixture(now time.Time) conductor {
 	return conductor{
-		phase:            swEscorting,
-		client:           "/dev/ttys013",
-		escortee:         "phenix",
-		snoozed:          map[string]swSnooze{"ag-admin": {since: now.Add(-time.Hour), at: now.Add(-time.Minute)}},
-		pausedCur:        "gh-hud",
-		pausedCurWaiting: true,
-		pausedHandedBack: true,
+		phase:             swEscorting,
+		client:            "/dev/ttys013",
+		escortee:          "phenix",
+		snoozed:           map[string]swSnooze{"ag-admin": {since: now.Add(-time.Hour), at: now.Add(-time.Minute)}},
+		pausedCur:         "gh-hud",
+		pausedCurWaiting:  true,
+		pausedHandedBack:  true,
+		pausedCurDeferred: true,
 	}
 }
 
@@ -45,8 +46,8 @@ func TestConductHandoffRoundTrip(t *testing.T) {
 		t.Errorf("snooze = %v/%v, want %v/%v", sn.since, sn.at,
 			want.snoozed["ag-admin"].since, want.snoozed["ag-admin"].at)
 	}
-	if got.pausedCur != want.pausedCur || !got.pausedCurWaiting || !got.pausedHandedBack {
-		t.Errorf("paused observation lost: %q %v %v", got.pausedCur, got.pausedCurWaiting, got.pausedHandedBack)
+	if got.pausedCur != want.pausedCur || !got.pausedCurWaiting || !got.pausedHandedBack || !got.pausedCurDeferred {
+		t.Errorf("paused observation lost: %q %v %v %v", got.pausedCur, got.pausedCurWaiting, got.pausedHandedBack, got.pausedCurDeferred)
 	}
 }
 
@@ -99,8 +100,8 @@ func TestConductHandoffMissing(t *testing.T) {
 // whether the handoff should carry it, and only then update the count.
 func TestConductorFieldsAreAccountedForInHandoff(t *testing.T) {
 	// carried: phase, client, escortee, snoozed, pausedCur, pausedCurWaiting,
-	// pausedHandedBack.
-	const accountedFor = 7
+	// pausedHandedBack, pausedCurDeferred.
+	const accountedFor = 8
 	if got := reflect.TypeOf(conductor{}).NumField(); got != accountedFor {
 		t.Fatalf("conductor has %d fields, the handoff accounts for %d — decide whether the new field belongs in writeConductHandoff/readConductHandoff (and in this count) before changing this number", got, accountedFor)
 	}

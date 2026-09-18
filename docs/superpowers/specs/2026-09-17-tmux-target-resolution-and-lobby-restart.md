@@ -145,7 +145,11 @@ consumed once at startup:
   `defaultUsageCachePath`, `defaultStatuslineCachePath`).
 - Carries `phase`, the driven `client`, `escortee`, the snooze map, and the
   paused-session observation (`pausedCur`, `pausedCurWaiting`,
-  `pausedHandedBack`). Carrying `client` is safe even though it goes stale
+  `pausedHandedBack`, `pausedCurDeferred`). `pausedCurDeferred` is the paused
+  session's defer mark as of the last tick — the edge that tells a defer
+  pressed while paused (which moves the user on) from a session walked into
+  already deferred (which must not); dropping it would make a restart read an
+  existing defer as fresh. Carrying `client` is safe even though it goes stale
   fast: `resolveClient` already validates a restored name against the live
   snapshot and re-adopts if it is gone, exactly as it does for a fresh
   conductor — so a stale name costs one tick of look-again, while omitting it

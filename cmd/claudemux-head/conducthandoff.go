@@ -38,6 +38,10 @@ type rawConductHandoff struct {
 	PausedCur        string               `json:"paused_cur"`
 	PausedCurWaiting bool                 `json:"paused_cur_waiting"`
 	PausedHandedBack bool                 `json:"paused_handed_back"`
+	// PausedCurDeferred is pausedCur's defer mark as of the last tick: without
+	// it a session the user walked into already deferred would read as a
+	// fresh defer on the replacement's first tick, and move them on.
+	PausedCurDeferred bool `json:"paused_cur_deferred"`
 }
 
 // defaultConductHandoffPath matches the other head state files
@@ -62,14 +66,15 @@ func writeConductHandoff(path string, c conductor, now time.Time) error {
 		return nil
 	}
 	raw := rawConductHandoff{
-		At:               now.Unix(),
-		Phase:            int(c.phase),
-		Client:           c.client,
-		Escortee:         c.escortee,
-		Snoozed:          make(map[string]rawSnooze, len(c.snoozed)),
-		PausedCur:        c.pausedCur,
-		PausedCurWaiting: c.pausedCurWaiting,
-		PausedHandedBack: c.pausedHandedBack,
+		At:                now.Unix(),
+		Phase:             int(c.phase),
+		Client:            c.client,
+		Escortee:          c.escortee,
+		Snoozed:           make(map[string]rawSnooze, len(c.snoozed)),
+		PausedCur:         c.pausedCur,
+		PausedCurWaiting:  c.pausedCurWaiting,
+		PausedHandedBack:  c.pausedHandedBack,
+		PausedCurDeferred: c.pausedCurDeferred,
 	}
 	for name, sn := range c.snoozed {
 		raw.Snoozed[name] = rawSnooze{Since: sn.since.Unix(), At: sn.at.Unix()}
@@ -122,6 +127,7 @@ func readConductHandoff(path string, now time.Time) (conductor, bool) {
 	c.pausedCur = raw.PausedCur
 	c.pausedCurWaiting = raw.PausedCurWaiting
 	c.pausedHandedBack = raw.PausedHandedBack
+	c.pausedCurDeferred = raw.PausedCurDeferred
 	for name, sn := range raw.Snoozed {
 		c.snoozed[name] = swSnooze{since: time.Unix(sn.Since, 0), at: time.Unix(sn.At, 0)}
 	}

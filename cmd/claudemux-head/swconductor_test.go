@@ -639,6 +639,42 @@ func TestConductHandoffRestoredPausedObservationSurvives(t *testing.T) {
 	}
 }
 
+// TestConductHandoffRestoredPreexistingDeferDoesNotYank: a restored swPaused
+// conductor whose paused session was already deferred when the handoff was
+// written must not read that mark as a fresh defer on its first live tick. A
+// fresh defer (pausedCurDeferred false -> true under the client) moves the
+// user on — to the queue head, or back to the lobby — so a handoff that
+// dropped pausedCurDeferred would turn a restart landing while the user sits
+// in a session they walked into knowing it was deferred into a yank out of it.
+func TestConductHandoffRestoredPreexistingDeferDoesNotYank(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := conductor{
+		phase:             swPaused,
+		client:            "/dev/ttys001",
+		snoozed:           map[string]swSnooze{},
+		pausedCur:         "b",
+		pausedCurWaiting:  true,
+		pausedCurDeferred: true,
+	}
+	path := filepath.Join(t.TempDir(), "handoff.json")
+	if err := writeConductHandoff(path, c, now); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	restored, ok := readConductHandoff(path, now)
+	if !ok {
+		t.Fatal("handoff not readable")
+	}
+	// Still deferred, still under the client, and another session waiting
+	// that a fresh defer would dispatch to.
+	s := snapAt("b", deferredWaiting("b", 50), waiting("a", 100))
+	if act, ok := restored.step(s, now); ok {
+		t.Fatalf("pre-existing defer read as fresh after restore: dispatched %+v", act)
+	}
+	if restored.phase != swPaused || restored.pausedCur != "b" || !restored.pausedCurDeferred {
+		t.Errorf("phase=%v cur=%q deferred=%v, want swPaused/\"b\"/true", restored.phase, restored.pausedCur, restored.pausedCurDeferred)
+	}
+}
+
 // TestConductHandoffRestoredStaleClientReadopts: a carried client that no
 // longer exists (the tmux client_name churned across the restart) must cost
 // exactly what a fresh conductor's first encounter with a vanished client
