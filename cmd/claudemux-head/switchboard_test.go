@@ -121,6 +121,25 @@ func TestBuildSwSnapshotParsesEmoji(t *testing.T) {
 	}
 }
 
+// The topic is the tmux window name, which the head leads with the project
+// badge. The lobby already gives the badge its own column, so it comes off the
+// front of the topic — otherwise every badged row shows it twice.
+func TestBuildSwSnapshotStripsBadgeFromTopic(t *testing.T) {
+	sessOut := "api\tIdle\t1754700000\t37\t\t\t\t\t\t\t🧵\n" +
+		"web\tIdle\t1754700000\t37\t\t\t\t\t\t\t\n"
+	paneOut := "api\t%1\tclaudemux-head\t🧵 build fixes\n" +
+		"web\t%5\tclaudemux-head\t🧵 not my badge\n"
+	s := buildSwSnapshot(sessOut, paneOut, "", "%9")
+	if api, _ := s.session("api"); api.Topic != "build fixes" {
+		t.Errorf("api.Topic = %q, want the badge stripped", api.Topic)
+	}
+	// Only the session's OWN badge is stripped: a topic that merely starts
+	// with some emoji is left alone.
+	if web, _ := s.session("web"); web.Topic != "🧵 not my badge" {
+		t.Errorf("web.Topic = %q, want it untouched", web.Topic)
+	}
+}
+
 // The lobby reads the published machine form, not a StateKind. Every value
 // statePublishValue can emit maps back to the kind that emitted it, so the
 // lobby and the head draw the same action with the same emoji.

@@ -305,7 +305,7 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 	}}
 
 	const (
-		topicCol = 1 + 2*(emojiCellW+1) + swNameColW + 1
+		topicCol = 1 + swMarkerW + 1 + emojiCellW + 1 + swNameColW + 1
 		ctxCol   = topicCol + swTopicColW + 1 + swStateColW + swAgeColW + 2
 	)
 	view := m.View()
@@ -391,7 +391,7 @@ func TestSwModelViewClipsWideRuneNameToColumn(t *testing.T) {
 		{Name: strings.Repeat("囲", swNameColW+5), State: "Idle", Since: now,
 			Context: 42, Topic: "wide-rune-name-alignment"},
 	}}
-	const topicCol = 1 + 2*(emojiCellW+1) + swNameColW + 1
+	const topicCol = 1 + swMarkerW + 1 + emojiCellW + 1 + swNameColW + 1
 	view := ansi.Strip(m.View())
 	line := ""
 	for _, l := range strings.Split(view, "\n") {
@@ -1692,9 +1692,11 @@ func TestSwModelStandbyReadoptsReplacedClient(t *testing.T) {
 	}
 }
 
-// The marker column keeps both jobs it had as a dot — deferred and snoozed —
-// and draws the session's action everywhere else. Every answer is exactly one
-// emoji cell wide, so the name column after it never moves.
+// The marker column is the attention flag again, not the action: ◆ for
+// deferred, a dot for waiting (grey when snoozed — the color is not visible in
+// a non-TTY test, so only the glyph is asserted), blank for everything else.
+// The action lives in the state cell beside its word (see swStateText). Every
+// answer is exactly one cell, so the columns after it never move.
 func TestSwMarker(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1704,29 +1706,61 @@ func TestSwMarker(t *testing.T) {
 	}{
 		{"deferred wins over waiting", swSession{State: "Idle", Deferred: true}, false, "◆"},
 		{"deferred wins over snoozed", swSession{State: "Idle", Deferred: true}, true, "◆"},
-		{"snoozed waiting", swSession{State: "Idle"}, true, "😴"},
-		{"waiting", swSession{State: "Idle"}, false, "🔔"},
-		{"busy", swSession{State: "Thinking"}, false, "🧠"},
-		{"tool", swSession{State: "Tool:Bash"}, false, "🔧"},
-		{"question is asking", swSession{State: "Tool:AskUserQuestion"}, false, "🙋"},
+		{"snoozed waiting", swSession{State: "Idle"}, true, "●"},
+		{"waiting", swSession{State: "Idle"}, false, "●"},
+		{"question is waiting", swSession{State: "Tool:AskUserQuestion"}, false, "●"},
+		{"busy is blank", swSession{State: "Thinking"}, false, " "},
+		{"unknown is blank", swSession{}, false, " "},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := swMarker(tt.sess, tt.snoozed)
-			if !strings.Contains(got, tt.want) {
-				t.Errorf("swMarker = %q, want it to contain %q", got, tt.want)
+			if ansi.Strip(got) != tt.want {
+				t.Errorf("swMarker = %q, want %q", ansi.Strip(got), tt.want)
 			}
-			if w := lipgloss.Width(got); w != emojiCellW {
-				t.Errorf("width(swMarker) = %d, want %d", w, emojiCellW)
+			if w := lipgloss.Width(got); w != swMarkerW {
+				t.Errorf("width(swMarker) = %d, want %d", w, swMarkerW)
 			}
 		})
 	}
 }
 
-// An unknown state (a pre-publish head) gets a blank cell, not a guess.
-func TestSwMarkerUnknownStateIsBlank(t *testing.T) {
-	if got := swMarker(swSession{}, false); strings.TrimSpace(got) != "" || lipgloss.Width(got) != emojiCellW {
-		t.Errorf("swMarker(unknown) = %q, want %d blank cells", got, emojiCellW)
+// The action glyph sits with the action word, in the state cell, and an
+// unknown state keeps a blank glyph slot so its word starts where every other
+// row's does.
+func TestSwStateText(t *testing.T) {
+	tests := []struct{ state, want string }{
+		{"Thinking", "🧠 Thinking"},
+		{"Idle", "🔔 Idle"},
+		{"Tool:Bash", "🔧 Tool:Bash"},
+		{"Tool:AskUserQuestion", "🙋 Tool:AskUserQuestion"},
+		{"", "   unknown"},
+	}
+	for _, tt := range tests {
+		if got := swStateText(tt.state); got != tt.want {
+			t.Errorf("swStateText(%q) = %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+// In the rendered row, the action glyph is beside the word in the middle of
+// the row, not at the front beside the project badge.
+func TestSwViewPutsActionGlyphWithStateWord(t *testing.T) {
+	m := swTestModel()
+	m.width = 140
+	m.snap.Sessions[1].Emoji = "🐝"
+	view := ansi.Strip(m.View())
+	var row string
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, " web ") {
+			row = l
+		}
+	}
+	if !strings.Contains(row, "🧠 Thinking") {
+		t.Errorf("web row = %q, want the glyph beside its state word", row)
+	}
+	if strings.HasPrefix(strings.TrimLeft(row, " "), "🧠") {
+		t.Errorf("web row = %q, still leads with the action glyph", row)
 	}
 }
 

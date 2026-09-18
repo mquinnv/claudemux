@@ -20,14 +20,19 @@ import (
 // swTopicW), an emoji whose width is assumed rather than measured shears every
 // row beneath it. So nothing renders an emoji directly — everything goes
 // through emojiCell, which pads to this width by measuring.
+//
+// Measuring is only as good as agreement between the measurers, though, and
+// for VS16-qualified glyphs there is none (see validProjectEmoji). So the
+// glyphs this code chooses, and the badges it accepts, are ones that need no
+// variation selector.
 const emojiCellW = 2
 
 // validProjectEmoji reports whether s is usable as a project badge: exactly one
-// grapheme cluster that fits the slot.
+// grapheme cluster that fits the slot, and needs no variation selector.
 //
 // The grapheme count is what makes "🧵x" and "🧵🎸" invalid while keeping the
-// single-grapheme multi-rune cases — ⚠️ (VS16), 👨‍💻 (ZWJ), 🇺🇸 (regional
-// indicator pair) — valid. A rune count would reject all three.
+// single-grapheme multi-rune cases — 👨‍💻 (ZWJ), 🇺🇸 (regional indicator
+// pair) — valid. A rune count would reject both.
 //
 // A rejected value is treated as "nothing declared" rather than as an error,
 // matching how isHex6 guards `color:`: .claudemux.yml is read leniently, and a
@@ -38,6 +43,16 @@ func validProjectEmoji(s string) bool {
 		return false
 	}
 	if uniseg.GraphemeClusterCount(s) != 1 {
+		return false
+	}
+	// No variation selector. U+FE0F turns a text character (🛠 ⚙ ⚠ 🎛 …) into
+	// its emoji form, and that form's width is exactly where the stack
+	// disagrees: tmux counts it as two cells (variation-selector-always-wide)
+	// while iTerm2 draws it in one. Everything after it on the line then lands
+	// a column off, and snaps back whenever tmux repaints only the changed
+	// cells — the lobby rows jumped left and right once a second. Glyphs that
+	// are emoji by default need no selector and measure two cells everywhere.
+	if strings.ContainsRune(s, '️') {
 		return false
 	}
 	w := lipgloss.Width(s)
@@ -141,15 +156,15 @@ func stateEmoji(kind StateKind) string {
 	case StateTool:
 		return emojiCell("🔧")
 	case StateAwaiting:
-		return emojiCell("⚠️")
+		return emojiCell("🛑")
 	case StateError:
 		return emojiCell("❌")
 	case StateCompacting:
-		return emojiCell("🗜️")
+		return emojiCell("🧹")
 	case StateBackground:
-		// The turn ended but launched work is still running: machinery turning,
+		// The turn ended but launched work is still running: still going round,
 		// not a human waiting.
-		return emojiCell("⚙️")
+		return emojiCell("🔄")
 	case StateAsking:
 		// A question is on screen. Distinct from Idle: both are blocked on the
 		// human, but this one names what it wants.

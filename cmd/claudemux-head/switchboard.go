@@ -160,7 +160,14 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if secs, err := strconv.ParseInt(f[2], 10, 64); err == nil {
 			sess.Since = time.Unix(secs, 0)
 		}
+		// The topic is the window name, which the head leads with this
+		// session's badge (badgedTab). The row gives the badge a column of its
+		// own, so it comes off the topic rather than showing twice. Only the
+		// session's own badge: any other leading emoji is the topic's.
 		sess.Topic = topics[sess.Name]
+		if sess.Emoji != "" {
+			sess.Topic = strings.TrimPrefix(sess.Topic, sess.Emoji+" ")
+		}
 		sess.ClaudePane = claudePanes[sess.Name]
 		if sess.ClaudePane == "" {
 			sess.ClaudePane = shimPanes[sess.Name]

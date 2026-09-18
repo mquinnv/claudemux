@@ -21,7 +21,11 @@ func TestValidProjectEmoji(t *testing.T) {
 		want bool
 	}{
 		{"plain emoji", "🧵", true},
-		{"emoji with variation selector", "⚠️", true},
+		// A variation selector makes a text character into an emoji, and the
+		// width that produces is where tmux (2 cells) and iTerm2 (1) disagree
+		// — the disagreement that made lobby rows jump a column.
+		{"dingbat with variation selector", "⚠️", false},
+		{"emoji-able symbol with variation selector", "🛠️", false},
 		{"bare dingbat", "⚠", true},
 		{"zwj sequence is one grapheme", "👨‍💻", true},
 		{"flag is one grapheme", "🇺🇸", true},
@@ -78,6 +82,9 @@ func TestStateEmojiCoversEveryKindDistinctly(t *testing.T) {
 		}
 		if lipgloss.Width(got) != emojiCellW {
 			t.Errorf("stateEmoji(%v) = %q, width %d, want %d", k, got, lipgloss.Width(got), emojiCellW)
+		}
+		if strings.ContainsRune(got, '️') {
+			t.Errorf("stateEmoji(%v) = %q needs a variation selector; terminals disagree on its width", k, got)
 		}
 		if prev, dup := seen[got]; dup {
 			t.Errorf("stateEmoji(%v) = %q, already used by %v", k, got, prev)
