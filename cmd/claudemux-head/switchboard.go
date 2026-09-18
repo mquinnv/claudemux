@@ -32,6 +32,11 @@ type swSession struct {
 	// start — the lobby never touches the filesystem, so this is the only route
 	// by which a project's color reaches a row.
 	Color string
+	// Emoji is the project badge (@claudemux_emoji), "" when the project declares
+	// none, the head predates the option, or the value fails validProjectEmoji —
+	// a tmux user option can hold anything, so it is guarded here the way
+	// swNameStyle guards Color. Published once at start, like Color.
+	Emoji string
 	// ClaudePane is the tmux pane id running claude, "" when the session has
 	// none. The lobby previews this pane rather than the session's active one:
 	// a session left focused on its shell would preview a shell prompt, and
@@ -96,7 +101,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -138,13 +143,16 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 10 || f[0] == "" {
+		if len(f) != 11 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
 			continue
 		}
 		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1", DeferReason: f[9]}
+		if validProjectEmoji(f[10]) {
+			sess.Emoji = f[10]
+		}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {
 			sess.Context = ctx

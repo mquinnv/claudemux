@@ -274,9 +274,11 @@ func resetTabCmd(selfPane, workDir string) tea.Cmd {
 		}
 
 		hex, fg := projectStyleFor(ctx, workDir)
-		name := restoreName(
-			projectDeclaredName(projectConfigPath(workDir)),
-			session, workDir)
+		cfg := projectConfigPath(workDir)
+		// The badge rides onto the restored name exactly as it rides onto a
+		// summary's label, so pinning the tab does not strip it.
+		name := badgedTab(projectDeclaredEmoji(cfg),
+			restoreName(projectDeclaredName(cfg), session, workDir))
 
 		for _, args := range tabResetTmuxArgs(selfPane, session, name, hex, fg) {
 			_ = exec.CommandContext(ctx, "tmux", args...).Run()
