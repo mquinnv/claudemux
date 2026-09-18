@@ -1533,7 +1533,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoArmTeardown(prevTyped, msg.time)
 				if m.teardown == teardownReady && m.lastTyped != prevTyped &&
 					!teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
-					m = m.abortTeardown("session resumed", msg.time)
+					m = m.reopenTeardownGate(msg.time)
 				}
 				if m.teardown == teardownDirect && m.lastTyped != prevTyped {
 					m = m.abortTeardown("session resumed", msg.time)
@@ -1577,15 +1577,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// standing guarantee: if the session keeps going after that (a new
 		// prompt lands that is not the wrap-up itself), the evidence may be
 		// stale by the time `x` is pressed — the clean/pushed tree a probe
-		// saw at noon says nothing about unpushed work made since. Re-arming
-		// from teardownIdle already tracks this edge (autoArmTeardown above);
-		// this mirrors that edge detection for the ready phase, dropping back
-		// to idle so a resumed session is re-armed and re-probed from
-		// scratch rather than trusting a latched gate.
+		// saw at noon says nothing about unpushed work made since. So the
+		// gate closes and must be re-earned from a fresh probe — see
+		// reopenTeardownGate for why that is back to watching, not idle.
 		switch m.teardown {
 		case teardownReady:
 			if m.lastTyped != prevTyped && !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
-				return m.abortTeardown("session resumed", msg.time), allPub
+				return m.reopenTeardownGate(msg.time), allPub
 			}
 		case teardownDirect:
 			// No wrap-up exception here, unlike the ready phase above: a
@@ -2948,6 +2946,35 @@ func (m model) teardownProbeDue(now time.Time) bool {
 		return true
 	}
 	return now.Sub(m.teardownProbeAt) >= teardownBlockedProbeInterval
+}
+
+// reopenTeardownGate closes an open ready gate and goes back to watching the
+// wrap-up (teardownSent), so the gate has to be earned again from a fresh
+// probe.
+//
+// Back to watching, not idle: the new prompt is very often the wrap-up's own
+// continuation. A gate that needs no worktree evidence — a manual `x` outside
+// a worktree, or an auto-arm whose clean/pushed bar the main checkout already
+// meets — opens the moment /done stops to ask "proceed with cleanup?", and the
+// "yes" that answers it is a new prompt. Aborting there dropped the teardown
+// while the wrap-up was still running, and nothing re-armed it, so `x` was
+// never offered once the cleanup finished.
+//
+// Resumed unrelated work lands here too and costs nothing: the gate reopens
+// only on the same evidence it demanded the first time, after that work's turn
+// ends, and esc still cancels.
+func (m model) reopenTeardownGate(now time.Time) model {
+	teardownLogf("reopen gate prompt=%q jsonl=%s", m.lastTyped, m.jsonlPath)
+	m.teardown = teardownSent
+	m.teardownAt = now
+	m.teardownPrompt = m.lastTyped
+	m.teardownSubmitted = true
+	m.teardownArmedBusy = false
+	m.teardownBlocked = false
+	m.teardownBlockReason = ""
+	m.teardownProbing = false
+	m.teardownProbeAt = time.Time{}
+	return m
 }
 
 // abortTeardown returns to idle with a reason on the status line. Nothing that
