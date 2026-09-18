@@ -3126,25 +3126,28 @@ func TestTeardownProbeMsgIgnoresWrongMode(t *testing.T) {
 
 // A ready gate is evidence gathered at the moment it opened, not a standing
 // guarantee. type /done at noon -> ready latches; keep working; press x at
-// 5pm intending to START a fresh wrap-up -> without this check it sends
-// /exit immediately on stale evidence. A new prompt landing while ready --
-// unless it is the wrap-up command itself, which is a legitimate re-arm --
-// means work resumed and the gate must be re-earned.
-func TestTeardownReadyAbortsOnResumedWork(t *testing.T) {
+// 5pm -> without this check it sends /exit immediately on stale evidence. A
+// new prompt landing while ready -- unless it is the wrap-up command itself,
+// which is a legitimate re-arm -- closes the gate, which must be re-earned
+// from a fresh probe (see reopenTeardownGate).
+func TestTeardownReadyClosesOnResumedWork(t *testing.T) {
 	// Seed a first prompt so there is a real lastTyped value to edge away
 	// from, then arm to teardownReady the way other tests do: set the phase
 	// and fields directly, bypassing the probe that would normally get here.
 	base, _ := pollPrompt(teardownTestModel(), "start the work", time.Now())
 
-	t.Run("a new non-wrap-up prompt aborts", func(t *testing.T) {
+	t.Run("a new non-wrap-up prompt closes the gate", func(t *testing.T) {
 		m := base
 		m.teardown = teardownReady
 		got, _ := pollPrompt(m, "one more thing before we wrap up", time.Now())
-		if got.teardown != teardownIdle {
-			t.Fatalf("phase = %v, want teardownIdle; resumed work must not sail through on a stale gate", got.teardown)
+		if got.teardown != teardownSent {
+			t.Fatalf("phase = %v, want teardownSent; resumed work must not sail through on a stale gate", got.teardown)
 		}
-		if got.teardownNote != "session resumed" {
-			t.Errorf("note = %q, want %q", got.teardownNote, "session resumed")
+		if !got.teardownSubmitted {
+			t.Error("teardownSubmitted = false; the reopened watch would abort as \"wrap-up didn't submit\"")
+		}
+		if got.state.Kind != StateThinking {
+			t.Errorf("state = %v, want StateThinking; the next probe must not reopen on the pre-prompt idle", got.state.Kind)
 		}
 	})
 
@@ -3165,6 +3168,49 @@ func TestTeardownReadyAbortsOnResumedWork(t *testing.T) {
 			t.Errorf("phase = %v, want teardownReady; re-typing the wrap-up command is not resumed work", got.teardown)
 		}
 	})
+}
+
+// Regression: /done outside a worktree stops to ask "proceed with cleanup?".
+// The main checkout is already clean and pushed, so the auto gate opens on
+// that question; the "yes" that answers it used to abort the teardown as
+// "session resumed", and `x` was never offered once the cleanup finished.
+func TestTeardownSurvivesWrapUpConfirmation(t *testing.T) {
+	now := time.Now()
+	m, _ := pollPrompt(teardownTestModel(), "start the work", now)
+	m.sessionCwd = "/tmp/plain-project"
+	m, _ = pollPrompt(m, "/done", now)
+	if m.teardown != teardownSent || !m.teardownAuto || m.teardownInWorktree {
+		t.Fatalf("phase=%v auto=%v inWorktree=%v, want an auto-armed non-worktree watch", m.teardown, m.teardownAuto, m.teardownInWorktree)
+	}
+
+	// /done asks its question: the turn ends on a clean tree.
+	m.state = State{Kind: StateIdle, Since: now}
+	next, _ := m.Update(teardownProbeMsg{checkedClean: true})
+	m = next.(model)
+	if m.teardown != teardownReady {
+		t.Fatalf("phase = %v, want teardownReady at the confirmation question", m.teardown)
+	}
+
+	// The user answers.
+	m, _ = pollPrompt(m, "yes", now.Add(time.Second))
+	if m.teardown != teardownSent {
+		t.Fatalf("phase = %v (note %q), want teardownSent; answering the wrap-up is not resumed work", m.teardown, m.teardownNote)
+	}
+
+	// While the cleanup runs, a clean probe must not reopen the gate.
+	next, _ = m.Update(teardownProbeMsg{checkedClean: true})
+	m = next.(model)
+	if m.teardown != teardownSent {
+		t.Fatalf("phase = %v, want teardownSent while the reply's turn is running", m.teardown)
+	}
+
+	// Cleanup finished: the gate opens again and `x` is offered.
+	m.state = State{Kind: StateIdle, Since: now.Add(time.Minute)}
+	next, _ = m.Update(teardownProbeMsg{checkedClean: true})
+	m = next.(model)
+	if m.teardown != teardownReady {
+		t.Errorf("phase = %v, want teardownReady once the wrap-up finished", m.teardown)
+	}
 }
 
 // Claude exiting during the wait triggers the kill.
