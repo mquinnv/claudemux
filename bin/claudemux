@@ -985,10 +985,11 @@ create_session() {
 
   # Pin the head pane to exactly $head_rows rows. The `-l` at split time does
   # NOT survive attach: with window-size=latest, attaching a client whose size
-  # differs from the tput-derived new-session size makes tmux redistribute pane
-  # heights proportionally, shrinking the head pane (losing the bottom context
-  # rows and/or the statusbar). A window-resized hook re-pins it on every
-  # resize — the attach included — so every configured row always renders.
+  # differs from the size new-session was given (see session_size) makes tmux
+  # redistribute pane heights proportionally, shrinking the head pane (losing
+  # the bottom context rows and/or the statusbar). A window-resized hook
+  # re-pins it on every resize — the attach included — so every configured row
+  # always renders.
   #
   # The height is baked into the hook at creation, so a session already running
   # keeps the height it launched with when head.rows changes. That is the same

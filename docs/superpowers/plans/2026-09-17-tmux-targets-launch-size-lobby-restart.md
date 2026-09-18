@@ -674,6 +674,8 @@ func TestConductorFieldsAreAccountedForInHandoff(t *testing.T) {
 	// carried: phase, escortee, snoozed, pausedCur, pausedCurWaiting,
 	// pausedHandedBack. Deliberately not carried: client — resolveClient
 	// re-adopts on the first tick, and a stale client name is worse than looking.
+	// [Superseded: the handoff carries client — see the spec's section 3 and
+	// the Task 4 fix round.]
 	const accountedFor = 7
 	if got := reflect.TypeOf(conductor{}).NumField(); got != accountedFor {
 		t.Fatalf("conductor has %d fields, the handoff accounts for %d — decide whether the new field belongs in writeConductHandoff/readConductHandoff (and in this count) before changing this number", got, accountedFor)
@@ -788,6 +790,9 @@ func writeConductHandoff(path string, c conductor, now time.Time) error {
 // The conductor's client is deliberately NOT carried: resolveClient re-adopts
 // on the first tick, and a stale client name would be a worse answer than
 // looking.
+//
+// [Superseded: the handoff carries client — see the spec's section 3 and the
+// Task 4 fix round.]
 func readConductHandoff(path string, now time.Time) (conductor, bool) {
 	if path == "" {
 		return conductor{}, false

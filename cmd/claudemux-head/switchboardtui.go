@@ -322,7 +322,8 @@ func newSwModel(selfPane string) swModel {
 // who works inside sessions leaves the conductor escorting or paused with
 // snoozes live indefinitely, so the gate never opened and the lobby ran a
 // binary eight days older than the fleet's heads. writeConductHandoff carries
-// phase, escortee, snoozes and the paused observation across the exec instead.
+// phase, the driven client, escortee, snoozes and the paused observation
+// across the exec instead.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
 	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting &&
 		m.launchBinOK && binChanged(m.launchBin, now)

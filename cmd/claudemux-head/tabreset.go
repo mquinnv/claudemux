@@ -164,11 +164,16 @@ func tabResetTmuxArgs(pane, session, name, hex, fg string) [][]string {
 		cmds = append(cmds, []string{"rename-window", "-t", pane, name})
 	}
 	if session != "" && hex != "" && fg != "" {
+		// The trailing colon forces session-name resolution: "set" and "set -w"
+		// are typed target-pane/target-window, so a bare name would first try a
+		// window-name PREFIX match in the caller's own session. Not live today
+		// (this reset always runs inside the session it targets), but the next
+		// caller from the lobby would inherit the hazard swSwitchTarget explains.
 		cmds = append(cmds,
-			[]string{"set", "-t", session, "status-style", "bg=#" + hex + ",fg=" + fg},
+			[]string{"set", "-t", session + ":", "status-style", "bg=#" + hex + ",fg=" + fg},
 			// pane-active-border-style is a window option; sessions here are
 			// single-window.
-			[]string{"set", "-w", "-t", session, "pane-active-border-style", "fg=#" + hex},
+			[]string{"set", "-w", "-t", session + ":", "pane-active-border-style", "fg=#" + hex},
 		)
 	}
 	return cmds

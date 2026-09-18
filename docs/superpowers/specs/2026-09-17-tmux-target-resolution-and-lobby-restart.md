@@ -57,6 +57,18 @@ Observed leftovers on the live lobby: `set-titles-string "claudemux · #W"`,
 `status-left-length 32`, `status-style "bg=#b34dff"` (this project's purple).
 The claudemux session was the only one of ten in the fleet missing all four.
 
+Every site in the table above is a `set` / `set -w` / `set-hook` invocation —
+typed `target-pane`/`target-window` in tmux(1) — so these were live bugs, not
+theoretical ones. Two other launcher targets changed on this branch, `attach
+-t` (`bin/claudemux:266`) and `inject_op_env`'s `set-environment -t`
+(`bin/claudemux:541,543`), are typed `target-session`, whose bare-name
+resolution never falls back to window-name matching, so they were never
+affected by this bug; those changes are defensive, like `swSwitchTarget`
+below. A harness with a positive control confirms the split: run as a child
+of a lobby-like pane whose window name prefix-collides with the target,
+bare `set-environment -t` and bare `switch-client -t` both land on the named
+session, while bare `set -t` lands on the lobby.
+
 The Go side has the same shape at `swSwitchCmd` (`switch-client -c <client> -t
 <target>`), which is how the conductor escorts. Established with a harness
 (task-2-report.md, Step 1): `-c` does not re-base resolution onto the
@@ -103,10 +115,14 @@ client's).
 Prefer the size of the client that will actually display the session, falling
 back to the tty, falling back to tmux's own default:
 
-1. inside tmux (`$TMUX` set) → `tmux display-message -p -t "$TMUX_PANE"
+1. inside tmux (`$TMUX_PANE` set) → `tmux display-message -p -t "$TMUX_PANE"
    '#{client_width}x#{client_height}'` (verified to work from a non-tty
    subprocess: returned the real client's `148x52` where `tput` said `80x24`)
-2. else a tty on stdout (`[ -t 1 ]`) → `tput cols` / `tput lines`
+2. else a tty on stderr (`[ -t 2 ]`) → `tput cols` / `tput lines`. `session_size`
+   only ever runs inside `$(...)`, so stdout is a pipe and `[ -t 1 ]` would
+   always read false; ncurses' `tput` reads the terminal size through stderr,
+   which still points at the real tty in that position, so `[ -t 2 ]` is the
+   check that actually detects one.
 3. else omit `-x`/`-y` entirely and let tmux default
 
 Guard the parse: a non-numeric or empty answer falls through to the next
