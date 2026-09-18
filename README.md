@@ -505,7 +505,7 @@ teardown:
   draws under its `topic`/`now` pair, top to bottom:
 
   ```
-  🟢 Idle 3m  sonnet-5  ⟳ summarizing         ← state line   (always)
+  🔔 Idle 3m  sonnet-5  ⟳ summarizing         ← state line   (always)
   ctx ███░░ 34%   5h ██░ 21%   wk █░ 12%       ← meters       (always)
   topic ❯ head shows last/first prompt rows    ← topic        (always)
   now   ❯ editing cmd/claudemux-head/tui.go    ← now          (always)
@@ -681,12 +681,12 @@ switchboard's marker column alike:
 
 | | | | |
 |---|---|---|---|
-| 🟢 Idle | 🧠 Thinking | 🔧 Tool | 🙋 Asking |
+| 🔔 Idle | 🧠 Thinking | 🔧 Tool | 🙋 Asking |
 | ⚠️ Awaiting | ❌ Error | 🗜️ Compacting | ⚙️ Working (background) |
 | ❓ Unsure | ⏳ Starting | | |
 
 The switchboard keeps the two markers that were never about the action: `◆` still wins
-for a deferred session, and a waiting session you have snoozed shows 😴 instead of 🟢.
+for a deferred session, and a waiting session you have snoozed shows 😴 instead of 🔔.
 These are built in — not configurable per project.
 
 Every emoji is padded to a fixed two-cell slot by measuring it, not by assuming its

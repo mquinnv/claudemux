@@ -1705,7 +1705,7 @@ func TestSwMarker(t *testing.T) {
 		{"deferred wins over waiting", swSession{State: "Idle", Deferred: true}, false, "◆"},
 		{"deferred wins over snoozed", swSession{State: "Idle", Deferred: true}, true, "◆"},
 		{"snoozed waiting", swSession{State: "Idle"}, true, "😴"},
-		{"waiting", swSession{State: "Idle"}, false, "🟢"},
+		{"waiting", swSession{State: "Idle"}, false, "🔔"},
 		{"busy", swSession{State: "Thinking"}, false, "🧠"},
 		{"tool", swSession{State: "Tool:Bash"}, false, "🔧"},
 		{"question is asking", swSession{State: "Tool:AskUserQuestion"}, false, "🙋"},
