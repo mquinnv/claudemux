@@ -220,6 +220,27 @@ you get carried to it. To sit and watch the fleet instead, press `Space` — it
 toggles **standby**, which keeps the states live but never dispatches, until you
 press `Space` again.
 
+### After a reboot
+
+Every session head keeps a small record of its session in
+`~/.claude/claudemux/sessions/`, refreshed every 30 seconds. When the machine
+reboots — an OS update, a crash — or the tmux server dies, the first switchboard
+you open finds the sessions that were running at the time and offers them back:
+
+    ⏻ 7 sessions were running before the reboot (Sep 18 13:52) · r restore all · s select · x dismiss
+
+`r` brings them all back, `s` opens a checklist (space toggles, enter restores),
+`x` dismisses. Each restored session gets its old name, its project's usual
+layout, and claude resumed on the same conversation (`claude --resume`), started
+in the directory it was last working in — a worktree, if it had entered one.
+Restored sessions wait at their prompt; ones that were mid-turn when the machine
+went down are marked `⚡ interrupted` in the checklist so you know which to nudge.
+
+The offer is made once per boot: whatever you choose, the records move to
+`sessions/restored-<time>/`. Sessions you ended with the head's teardown are
+never offered, and neither are sessions you closed well before the reboot —
+only the ones that stopped together, within ten minutes of the last.
+
 Under the title, the lobby shows the same account budget meters as the head:
 the 5-hour and weekly rate-limit gauges with their reset times (and an
 "empty in X" projection when usage is climbing), so you can see the account's
@@ -578,6 +599,12 @@ teardown:
   `claudemux -w <existing-session>` attaches without marking it, silently ignoring
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
+
+`claudemux` launcher options for session recovery and customization:
+- `-N name` — Use exactly this tmux session name instead of the directory basename. Fails if a session by that name exists (no attach, no `-2` suffix): the switchboard's reboot restore uses it to bring a session back under its old name, and must never merge into another session.
+- `-r session-id` — Resume this claude session id (`claude --resume <session-id>`).
+- `-C dir` — Start the claude pane in this directory instead of the launch dir — claude finds a `--resume` id under the project dir of its cwd, and a session that entered a worktree lives under the worktree's.
+
 - `launch.project_dirs` — consumed by `claudemux`, not the TUI. The roots to search by
   name when a launch query is neither a real directory nor a zoxide hit — the fallback
   that keeps `claudemux <name>` (and the switchboard's `n` key) from simply failing on a
