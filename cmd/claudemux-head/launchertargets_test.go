@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -91,4 +92,49 @@ func shellFuncBody(src, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// The resume id is spliced into claude's command line unquoted, so the
+// launcher must reject anything outside the UUID alphabet before it does any
+// work — checked before tmux or the hook are touched, which is also what
+// makes it testable here.
+func TestLauncherRejectsBadResumeID(t *testing.T) {
+	cmd := exec.Command("bash", launcherPath, "-d", "-r", "bad id;rm", "/tmp")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("launcher accepted a bad resume id; output: %s", out)
+	}
+	if !strings.Contains(string(out), "invalid resume id") {
+		t.Errorf("output %q does not mention the invalid resume id", out)
+	}
+}
+
+func TestLauncherDeclaresRestoreOptions(t *testing.T) {
+	src, err := os.ReadFile(launcherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	if !strings.Contains(s, `getopts "ndwWr:N:C:"`) {
+		t.Error(`getopts does not declare r:, N:, C:`)
+	}
+	body, ok := shellFuncBody(s, "create_session")
+	if !ok {
+		t.Fatal("create_session not found")
+	}
+	for _, want := range []string{`--resume $RESUME_ID`, `EXACT_NAME`, `CLAUDE_DIR`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("create_session does not use %s", want)
+		}
+	}
+	rip, ok := shellFuncBody(s, "run_in_pane")
+	if !ok || !strings.Contains(rip, `-c "$3"`) {
+		t.Error("run_in_pane does not accept a directory as $3")
+	}
+}
+
+func TestLauncherSyntax(t *testing.T) {
+	if out, err := exec.Command("bash", "-n", launcherPath).CombinedOutput(); err != nil {
+		t.Fatalf("bash -n: %v\n%s", err, out)
+	}
 }
