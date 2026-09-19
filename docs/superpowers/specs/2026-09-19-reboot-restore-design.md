@@ -64,9 +64,19 @@ session:
 
 - `session_name` — `#{session_name}`; `launch_dir` — `#{session_path}` (the
   `-c` dir the launcher created the session with).
-- `session_id` / `claude_cwd` — from the pane map entry the head already follows
-  (after continuation resolution). A head with no bound session yet does not
-  write a record — there is nothing to resume.
+- `session_id` — from the pane map entry the head already follows (after
+  continuation resolution). A head with no bound session yet does not write
+  a record — there is nothing to resume.
+- `claude_cwd` — the first of the transcript's last main-chain cwd, then that
+  cwd's ancestors, then the head's own launch dir, whose Claude project-dir
+  encoding (every character outside `[A-Za-z0-9]` becomes `-`) matches the
+  directory the transcript actually lives under. A tool `cd` during the
+  session can leave the transcript's last cwd inside a subdirectory of where
+  claude was actually launched (e.g. `cd cmd/foo` from a worktree root), and
+  recording that subdirectory verbatim would send restore's `-C` looking for
+  the `--resume` id under the wrong project dir. Falls back to the launch dir
+  when no candidate matches, or there is no transcript yet to compare
+  against.
 - `state` — the same machine value it publishes as `@claudemux_state`.
 - `topic` — the summary line, for display in the restore picker only.
 - `last_seen` — unix seconds of the write.
@@ -94,7 +104,17 @@ A record is **lost** when all of:
    died together, not a session closed hours or days earlier.
    `newest_pre_cutoff` is the newest `last_seen` among records satisfying (1).
 3. No live tmux session has its `session_name`, and no live pane is already
-   running its `session_id` (it was already restored by hand).
+   running its `session_id` (it was already restored by hand). A live pane's
+   `session_id` only counts when its pane-map file's mtime is at or after the
+   cutoff — pane numbers restart with the tmux server, so a pre-reboot file
+   left over at a pane number the new server has since reused would
+   otherwise mark a lost session's id as live by coincidence.
+
+Records satisfying (1) and (2) are deduped by `session_id` first, keeping
+the one with the newest `last_seen`, before (3) is applied: a tmux session
+renamed within the cluster window can leave a record under both its old and
+new name pointing at the same conversation, and restoring both would resume
+two claudes onto it.
 
 A lost record is **interrupted** when its `state` was a working state
 (`Thinking`, `Tool:*`, `Background:*`, `Compacting`) — the same set the head
@@ -105,8 +125,9 @@ The result is sorted by `last_seen` descending. The offer's timestamp is
 
 ### 3. The offer (switchboard lobby)
 
-On open, and on each lobby refresh until handled, the lobby runs the selection.
-If it finds lost sessions, it shows a strip above the session list:
+The lobby runs the selection once, on its first successful fleet snapshot —
+not on every refresh (a lobby restart rescans). If it finds lost sessions, it
+shows a strip above the session list:
 
 ```
 ⏻ 7 sessions were running before the reboot (Sep 18 13:52) · r restore all · s select · x dismiss
