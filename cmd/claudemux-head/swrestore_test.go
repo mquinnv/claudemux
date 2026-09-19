@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +24,36 @@ func lostRec(name, id, launch, cwd string, lastSeen int64, interrupted bool) los
 			LastSeen: lastSeen, Topic: "topic " + name,
 		}},
 		Interrupted: interrupted,
+	}
+}
+
+// TestLiveSessionIDs covers finding 4: pane-map files are keyed by pane
+// number, which restarts with the tmux server, so a stale pre-reboot map
+// file left at a since-reused pane number must not mark a lost session's id
+// as "live" just because some pane happens to hold that number again.
+func TestLiveSessionIDs(t *testing.T) {
+	dir := t.TempDir()
+	const cutoff = 1_000
+
+	writePane := func(pane, sessionID string, mtime int64) {
+		path := filepath.Join(dir, pane+".json")
+		data, _ := json.Marshal(paneMap{SessionID: sessionID, TranscriptPath: "/t", Cwd: "/c"})
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ts := time.Unix(mtime, 0)
+		if err := os.Chtimes(path, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePane("1", "fresh-id", cutoff+5)  // written by the current tmux server: live
+	writePane("2", "stale-id", cutoff-5)  // pre-reboot leftover: not live
+	writePane("3", "onedge-id", cutoff)   // exactly at cutoff: counts as live
+
+	got := liveSessionIDs(dir, []string{"%1", "%2", "%3", "%4"}, cutoff)
+	want := map[string]bool{"fresh-id": true, "onedge-id": true}
+	if len(got) != len(want) || !got["fresh-id"] || !got["onedge-id"] || got["stale-id"] {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

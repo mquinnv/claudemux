@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -130,18 +131,33 @@ func swRestoreScanCmd(sessions []swSession) tea.Cmd {
 		if !ok {
 			return swRestoreScanMsg{}
 		}
-		liveIDs := map[string]bool{}
-		for _, p := range panes {
-			if pm, ok := readPaneRecord(paneMapDir(), p); ok {
-				liveIDs[pm.SessionID] = true
-			}
-		}
-		lost, cluster, newest := selectLost(recs, cutoff, liveNames, liveIDs)
+		lost, cluster, newest := selectLost(recs, cutoff, liveNames, liveSessionIDs(paneMapDir(), panes, cutoff))
 		if len(lost) == 0 {
 			return swRestoreScanMsg{}
 		}
 		return swRestoreScanMsg{offer: &swRestoreOffer{lost: lost, cluster: cluster, cutoff: cutoff, newest: newest}}
 	}
+}
+
+// liveSessionIDs reads the pane map for each candidate pane and returns the
+// session ids recorded there, ignoring any file whose mtime is before
+// cutoff. Pane numbers restart with the tmux server, so a stale pre-reboot
+// map file left at a pane number the new server has since reused would
+// otherwise mark a lost session's id as "live" — the file's own mtime is
+// the only signal that it predates this boot/server.
+func liveSessionIDs(dir string, panes []string, cutoff int64) map[string]bool {
+	ids := map[string]bool{}
+	for _, p := range panes {
+		name := strings.TrimPrefix(p, "%") + ".json"
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || info.ModTime().Unix() < cutoff {
+			continue
+		}
+		if pm, ok := readPaneRecord(dir, p); ok {
+			ids[pm.SessionID] = true
+		}
+	}
+	return ids
 }
 
 // restoreArgs is the launcher argv (after "claudemux") for one session.
