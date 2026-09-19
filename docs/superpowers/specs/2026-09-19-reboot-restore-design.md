@@ -33,8 +33,9 @@ went down**.
 
 ## Non-goals
 
-- Auto-prompting interrupted sessions to continue. Restored sessions wait at
-  their prompt; ones that were mid-turn are only *flagged*.
+- Auto-prompting interrupted sessions to continue. claudemux sends nothing to
+  a restored session; ones that were mid-turn are only *flagged* — Claude
+  Code itself may pick an interrupted turn back up on its own when it resumes.
 - Restoring shell-pane state (running commands, scrollback). The shell pane is
   launched fresh, running `launch.shell_command` if configured, as on any launch.
 - Recovering the 2026-09-18 sessions automatically (they predate the records).

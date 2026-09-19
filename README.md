@@ -232,9 +232,15 @@ you open finds the sessions that were running at the time and offers them back:
 `r` brings them all back, `s` opens a checklist (space toggles, enter restores),
 `x` dismisses. Each restored session gets its old name, its project's usual
 layout, and claude resumed on the same conversation (`claude --resume`), started
-in the directory it was last working in — a worktree, if it had entered one.
-Restored sessions wait at their prompt; ones that were mid-turn when the machine
-went down are marked `⚡ interrupted` in the checklist so you know which to nudge.
+in the directory it was last working in — a worktree, if it had entered one. Its
+project's `/color` (if any) is applied at launch exactly as on any claudemux
+launch — that's a Claude Code color, local to its own UI, separate from the
+tmux/iTerm tinting under **Appearance: project colors** below.
+
+claudemux sends nothing to a restored session: it comes back exactly as claude
+left it. Sessions that were mid-turn when the machine went down are only marked
+`⚡ interrupted` in the checklist, for you to check on — Claude Code itself may
+pick the interrupted turn back up on its own when it resumes.
 
 The offer is made once per boot: whatever you choose, the records move to
 `sessions/restored-<time>/`. Sessions you ended with the head's teardown are
