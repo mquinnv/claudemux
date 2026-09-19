@@ -291,6 +291,17 @@ A fleet longer than the pane scrolls: the list follows the selection, and a
 `↑ N more · ↓ N more` line says how many sessions are off screen in each
 direction. Hiding the preview with `p` gives its rows to the list.
 
+Restore uses three launcher options `claudemux` gained for this (see
+**Configuration** for the rest of the flags):
+
+- `-N name` — reuse the tmux session name instead of the directory basename;
+  fails rather than attach if a session by that name already exists, since
+  restore must never merge into another session.
+- `-r session-id` — resume this claude conversation (`claude --resume`).
+- `-C dir` — start the claude pane in this directory instead of the launch
+  dir. Ignored if the directory no longer exists (a worktree since
+  removed) — claude starts in the launch dir instead.
+
 ## Install
 
 **Homebrew** (recommended — it installs `tmux`, `jq`, and `git` for you):
@@ -599,12 +610,6 @@ teardown:
   `claudemux -w <existing-session>` attaches without marking it, silently ignoring
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
-
-`claudemux` launcher options for session recovery and customization:
-- `-N name` — Use exactly this tmux session name instead of the directory basename. Fails if a session by that name exists (no attach, no `-2` suffix): the switchboard's reboot restore uses it to bring a session back under its old name, and must never merge into another session.
-- `-r session-id` — Resume this claude session id (`claude --resume <session-id>`).
-- `-C dir` — Start the claude pane in this directory instead of the launch dir — claude finds a `--resume` id under the project dir of its cwd, and a session that entered a worktree lives under the worktree's.
-
 - `launch.project_dirs` — consumed by `claudemux`, not the TUI. The roots to search by
   name when a launch query is neither a real directory nor a zoxide hit — the fallback
   that keeps `claudemux <name>` (and the switchboard's `n` key) from simply failing on a

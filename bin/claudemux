@@ -36,7 +36,8 @@
 #   -r   Resume this claude session id (`claude --resume <id>`).
 #   -C   Start the claude pane in this directory instead of the launch dir —
 #        claude finds a --resume id under the project dir of its cwd, and a
-#        session that entered a worktree lives under the worktree's.
+#        session that entered a worktree lives under the worktree's. Ignored
+#        if the directory no longer exists: claude starts in the launch dir.
 #
 # This script does not create worktrees and no longer passes `claude
 # --worktree`. It decides whether a session SHOULD have one and exports
