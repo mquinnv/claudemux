@@ -1778,6 +1778,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.teardownInWorktree && teardownTurnEnded(m.state.Kind)
 
 	case recordWrittenMsg:
+		// A tmux session renamed since the last heartbeat now has a record
+		// under both names pointing at the same conversation — delete the
+		// stale one so a reboot within lostClusterWindow of the rename
+		// doesn't offer to resume the same session_id twice.
+		if m.recordName != "" && msg.name != m.recordName {
+			removeSessionRecord(sessionRecordDir(), m.recordName)
+		}
 		m.recordName = msg.name
 		return m, nil
 

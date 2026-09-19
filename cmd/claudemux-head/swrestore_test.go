@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,37 @@ func TestRestoreArgs(t *testing.T) {
 	}
 	if _, err := restoreArgs(lostRec("r", "bad id", "/p", "", 1, false), exists); err == nil {
 		t.Error("bad session id: want error")
+	}
+}
+
+// TestArchiveRestoreOfferArchivesCluster covers finding 5: excluded and
+// deduped records (in cluster, not in lost) must be archived along with the
+// offered ones, or a later lobby run in the same boot re-offers them.
+func TestArchiveRestoreOfferArchivesCluster(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := sessionRecordDir()
+	_ = writeSessionRecord(dir, sessionRecord{SessionName: "lost-one", SessionID: "1"})
+	_ = writeSessionRecord(dir, sessionRecord{SessionName: "already-live", SessionID: "2"})
+	_ = writeSessionRecord(dir, sessionRecord{SessionName: "dup-old-name", SessionID: "3"})
+
+	o := &swRestoreOffer{
+		lost: []lostSession{lostRec("lost-one", "1", "/p", "", 1, false)},
+		cluster: []string{
+			sessionRecordFile(dir, "lost-one"),
+			sessionRecordFile(dir, "already-live"),
+			sessionRecordFile(dir, "dup-old-name"),
+		},
+		cutoff: 77,
+	}
+	archiveRestoreOffer(o)
+
+	if got := readSessionRecords(dir); len(got) != 0 {
+		t.Errorf("records still live after archive: %+v", got)
+	}
+	archived := readSessionRecords(filepath.Join(dir, "restored-77"))
+	if len(archived) != 3 {
+		t.Errorf("archive holds %d records, want 3 (lost + excluded + duplicate)", len(archived))
 	}
 }
 

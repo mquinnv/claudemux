@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -106,6 +107,56 @@ func TestClaudeProjectDirName(t *testing.T) {
 	got := claudeProjectDirName("/p/x/.claude/worktrees/w")
 	if want := "-p-x--claude-worktrees-w"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestRecordWrittenMsgDeletesRenamedRecord covers finding 2(b): a tmux
+// session renamed within lostClusterWindow of a reboot leaves a record
+// under its old name too (the head hasn't heartbeat since the rename), and
+// both would point at the same session_id — selectLost's dedupe (2a) covers
+// that, but deleting the stale file here means it never gets that far.
+func TestRecordWrittenMsgDeletesRenamedRecord(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := sessionRecordDir()
+	if err := writeSessionRecord(dir, sessionRecord{SessionName: "old", SessionID: "x", LastSeen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := sessionRecordFile(dir, "old")
+
+	m := model{recordName: "old"}
+	next, _ := m.Update(recordWrittenMsg{name: "new"})
+	m = next.(model)
+
+	if m.recordName != "new" {
+		t.Errorf("recordName = %q, want \"new\"", m.recordName)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("old record still present: err = %v, want NotExist", err)
+	}
+}
+
+// The very first heartbeat (recordName "") has nothing to delete, and a
+// repeat heartbeat under the same name must not delete the file it just
+// wrote.
+func TestRecordWrittenMsgNoDeleteWhenNameUnchanged(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := sessionRecordDir()
+	if err := writeSessionRecord(dir, sessionRecord{SessionName: "same", SessionID: "x", LastSeen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	path := sessionRecordFile(dir, "same")
+
+	m := model{recordName: "same"}
+	next, _ := m.Update(recordWrittenMsg{name: "same"})
+	m = next.(model)
+
+	if m.recordName != "same" {
+		t.Errorf("recordName = %q, want \"same\"", m.recordName)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("record deleted on unchanged name: %v", err)
 	}
 }
 

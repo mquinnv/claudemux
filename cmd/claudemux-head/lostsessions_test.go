@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"sort"
+	"testing"
+)
 
 func rec(name, id, state string, lastSeen int64) loadedRecord {
 	return loadedRecord{Path: "/d/" + name + ".json", Rec: sessionRecord{
@@ -16,6 +20,16 @@ func lostNames(l []lostSession) []string {
 	return out
 }
 
+// pathsOf collects the .Path of each loadedRecord rec() built, for comparing
+// against a cluster return.
+func pathOf(name string) string { return "/d/" + name + ".json" }
+
+func sortedStrings(ss []string) []string {
+	out := append([]string(nil), ss...)
+	sort.Strings(out)
+	return out
+}
+
 func TestSelectLostCluster(t *testing.T) {
 	const cutoff = 100_000
 	recs := []loadedRecord{
@@ -25,7 +39,7 @@ func TestSelectLostCluster(t *testing.T) {
 		rec("d", "4", "Idle", cutoff-60-601),       // outside: closed earlier
 		rec("e", "5", "Idle", cutoff+5),            // written after cutoff: alive now
 	}
-	lost, newest := selectLost(recs, cutoff, nil, nil)
+	lost, cluster, newest := selectLost(recs, cutoff, nil, nil)
 	if newest != cutoff-60 {
 		t.Errorf("newest = %d, want %d", newest, cutoff-60)
 	}
@@ -42,11 +56,15 @@ func TestSelectLostCluster(t *testing.T) {
 	if !lost[1].Interrupted || lost[0].Interrupted {
 		t.Errorf("interrupted flags wrong: %+v", lost)
 	}
+	wantCluster := []string{pathOf("a"), pathOf("b"), pathOf("c")}
+	if got := sortedStrings(cluster); !reflect.DeepEqual(got, sortedStrings(wantCluster)) {
+		t.Errorf("cluster = %v, want %v", got, wantCluster)
+	}
 }
 
 func TestSelectLostCutoffBoundary(t *testing.T) {
 	// last_seen == cutoff is NOT before the cutoff: that head was alive at boot.
-	lost, _ := selectLost([]loadedRecord{rec("a", "1", "Idle", 500)}, 500, nil, nil)
+	lost, _, _ := selectLost([]loadedRecord{rec("a", "1", "Idle", 500)}, 500, nil, nil)
 	if len(lost) != 0 {
 		t.Fatalf("lost = %v, want none", lostNames(lost))
 	}
@@ -58,19 +76,50 @@ func TestSelectLostExcludesLive(t *testing.T) {
 		rec("b", "2", "Idle", 90),
 		rec("c", "3", "Idle", 90),
 	}
-	lost, _ := selectLost(recs, 100, map[string]bool{"a": true}, map[string]bool{"2": true})
+	lost, cluster, _ := selectLost(recs, 100, map[string]bool{"a": true}, map[string]bool{"2": true})
 	if got := lostNames(lost); len(got) != 1 || got[0] != "c" {
 		t.Fatalf("lost = %v, want [c]", got)
+	}
+	// a and b are excluded from lost (already running again) but must still
+	// be archived — a later lobby run in the same boot must not re-offer
+	// them once the live session that matched them has gone away again.
+	want := []string{pathOf("a"), pathOf("b"), pathOf("c")}
+	if got := sortedStrings(cluster); !reflect.DeepEqual(got, sortedStrings(want)) {
+		t.Errorf("cluster = %v, want %v", got, want)
 	}
 }
 
 func TestSelectLostEmpty(t *testing.T) {
-	if lost, newest := selectLost(nil, 100, nil, nil); len(lost) != 0 || newest != 0 {
-		t.Fatalf("got %v %d", lost, newest)
+	if lost, cluster, newest := selectLost(nil, 100, nil, nil); len(lost) != 0 || len(cluster) != 0 || newest != 0 {
+		t.Fatalf("got %v %v %d", lost, cluster, newest)
 	}
 	// Every record written after the cutoff: nothing to offer.
-	if lost, _ := selectLost([]loadedRecord{rec("a", "1", "Idle", 200)}, 100, nil, nil); len(lost) != 0 {
-		t.Fatalf("got %v", lostNames(lost))
+	if lost, cluster, _ := selectLost([]loadedRecord{rec("a", "1", "Idle", 200)}, 100, nil, nil); len(lost) != 0 || len(cluster) != 0 {
+		t.Fatalf("got lost=%v cluster=%v", lostNames(lost), cluster)
+	}
+}
+
+// TestSelectLostDedupesBySessionID covers finding 2: a tmux session renamed
+// within lostClusterWindow of the reboot leaves a record under both its old
+// and new name, both carrying the same session_id (the head only rewrites
+// its own record's filename, so the previous name's file goes stale but
+// isn't deleted until the next successful heartbeat under the new name).
+// Restoring both would resume two claudes onto one conversation.
+func TestSelectLostDedupesBySessionID(t *testing.T) {
+	recs := []loadedRecord{
+		rec("old-name", "shared-id", "Idle", 80),
+		rec("new-name", "shared-id", "Idle", 90), // newer: renamed after this heartbeat
+	}
+	lost, cluster, _ := selectLost(recs, 100, nil, nil)
+	got := lostNames(lost)
+	if len(got) != 1 || got[0] != "new-name" {
+		t.Fatalf("lost = %v, want [new-name] (newest LastSeen kept)", got)
+	}
+	// Both files are archived even though only one is offered, so the stale
+	// old-name record doesn't linger to be picked up by a later boot.
+	want := []string{pathOf("old-name"), pathOf("new-name")}
+	if got := sortedStrings(cluster); !reflect.DeepEqual(got, sortedStrings(want)) {
+		t.Errorf("cluster = %v, want %v", got, want)
 	}
 }
 

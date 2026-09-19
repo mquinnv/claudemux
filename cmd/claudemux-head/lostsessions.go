@@ -31,10 +31,13 @@ type lostSession struct {
 }
 
 // selectLost returns the records that died together before cutoff, newest
-// first, and the newest pre-cutoff last_seen (0 when there is none).
+// first; every record in that cluster (cluster), including ones excluded
+// below as duplicates or already-live, so the caller can archive all of
+// them and never re-offer the cluster on a later lobby run in the same
+// boot; and the newest pre-cutoff last_seen (0 when there is none).
 // liveNames/liveIDs exclude sessions already running again — by tmux name,
 // or by claude session id when the user resumed one by hand elsewhere.
-func selectLost(recs []loadedRecord, cutoff int64, liveNames, liveIDs map[string]bool) ([]lostSession, int64) {
+func selectLost(recs []loadedRecord, cutoff int64, liveNames, liveIDs map[string]bool) ([]lostSession, []string, int64) {
 	var newest int64
 	for _, r := range recs {
 		if r.Rec.LastSeen < cutoff && r.Rec.LastSeen > newest {
@@ -42,22 +45,51 @@ func selectLost(recs []loadedRecord, cutoff int64, liveNames, liveIDs map[string
 		}
 	}
 	if newest == 0 {
-		return nil, 0
+		return nil, nil, 0
 	}
 	floor := newest - int64(lostClusterWindow/time.Second)
-	var lost []lostSession
+
+	var inWindow []loadedRecord
 	for _, r := range recs {
 		ls := r.Rec.LastSeen
 		if ls >= cutoff || ls < floor {
 			continue
 		}
+		inWindow = append(inWindow, r)
+	}
+	cluster := make([]string, 0, len(inWindow))
+	for _, r := range inWindow {
+		cluster = append(cluster, r.Path)
+	}
+
+	// Dedupe by session id, keeping the newest record: a tmux session
+	// renamed within the cluster window leaves a record under both its old
+	// and new name pointing at the same conversation, and restoring both
+	// would resume two claudes onto it. newestByID/order together keep the
+	// pick deterministic (map iteration order isn't) when two records for
+	// the same id share a LastSeen.
+	newestByID := make(map[string]loadedRecord, len(inWindow))
+	var order []string
+	for _, r := range inWindow {
+		id := r.Rec.SessionID
+		if _, seen := newestByID[id]; !seen {
+			order = append(order, id)
+		}
+		if cur, ok := newestByID[id]; !ok || r.Rec.LastSeen > cur.Rec.LastSeen {
+			newestByID[id] = r
+		}
+	}
+
+	var lost []lostSession
+	for _, id := range order {
+		r := newestByID[id]
 		if liveNames[r.Rec.SessionName] || liveIDs[r.Rec.SessionID] {
 			continue
 		}
 		lost = append(lost, lostSession{loadedRecord: r, Interrupted: interruptedState(r.Rec.State)})
 	}
 	sort.SliceStable(lost, func(i, j int) bool { return lost[i].Rec.LastSeen > lost[j].Rec.LastSeen })
-	return lost, newest
+	return lost, cluster, newest
 }
 
 // interruptedState reports whether a published state value (see

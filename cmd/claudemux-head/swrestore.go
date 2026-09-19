@@ -20,9 +20,10 @@ import (
 
 // swRestoreOffer is the offer strip's state. nil on swModel means no strip.
 type swRestoreOffer struct {
-	lost   []lostSession
-	cutoff int64 // names the archive dir
-	newest int64 // shown as "before the reboot (Sep 18 13:52)"
+	lost    []lostSession
+	cluster []string // every record path in the cluster: lost + excluded + deduped
+	cutoff  int64    // names the archive dir
+	newest  int64    // shown as "before the reboot (Sep 18 13:52)"
 
 	picking bool
 	checked []bool
@@ -82,14 +83,14 @@ func (o *swRestoreOffer) selected() []lostSession {
 	return out
 }
 
-// archiveRestoreOffer moves every offered record out of the live dir. The
-// offer is a one-time decision: unchecked rows are archived too.
+// archiveRestoreOffer moves every record in the offer's cluster out of the
+// live dir — not just the ones offered: records excluded because their
+// session was already live, and duplicates selectLost dropped, are archived
+// too, so a later lobby run in the same boot doesn't re-offer them. The
+// offer is a one-time decision: unchecked rows in the picker are archived
+// as well.
 func archiveRestoreOffer(o *swRestoreOffer) {
-	paths := make([]string, 0, len(o.lost))
-	for _, l := range o.lost {
-		paths = append(paths, l.Path)
-	}
-	_ = archiveSessionRecords(sessionRecordDir(), o.cutoff, paths)
+	_ = archiveSessionRecords(sessionRecordDir(), o.cutoff, o.cluster)
 }
 
 // swRestoreScanCmd looks for lost sessions. It runs once per lobby, on the
@@ -135,11 +136,11 @@ func swRestoreScanCmd(sessions []swSession) tea.Cmd {
 				liveIDs[pm.SessionID] = true
 			}
 		}
-		lost, newest := selectLost(recs, cutoff, liveNames, liveIDs)
+		lost, cluster, newest := selectLost(recs, cutoff, liveNames, liveIDs)
 		if len(lost) == 0 {
 			return swRestoreScanMsg{}
 		}
-		return swRestoreScanMsg{offer: &swRestoreOffer{lost: lost, cutoff: cutoff, newest: newest}}
+		return swRestoreScanMsg{offer: &swRestoreOffer{lost: lost, cluster: cluster, cutoff: cutoff, newest: newest}}
 	}
 }
 
