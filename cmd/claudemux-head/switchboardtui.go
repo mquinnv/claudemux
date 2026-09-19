@@ -361,9 +361,14 @@ func newSwModel(selfPane string) swModel {
 
 // shouldAutoRestart reports whether this poll may re-exec into a rebuilt
 // binary. The in-memory state that cannot survive a re-exec is the transient
-// UI: standby, the create prompt, an in-flight create, the defer prompt, and a
-// fleet-restart sweep whose sends run in a goroutine outside this model. Those
-// still hold the gate shut.
+// UI: standby, the create prompt, an in-flight create, the defer prompt, a
+// fleet-restart sweep whose sends run in a goroutine outside this model, and
+// a restore offer being picked or actively launching sessions. Those still
+// hold the gate shut — startRestore archives every offered record before the
+// first launch, so a re-exec mid-restore would drop the rest of the queue
+// silently (the rescan finds nothing left to offer, and no failure is ever
+// shown); picking is held too, so a rebuild mid-decision doesn't discard the
+// user's checklist.
 //
 // The conductor's own state no longer does. It used to: this waited for
 // swParked with no live snoozes, because discarding conductor.snoozed would
@@ -374,7 +379,8 @@ func newSwModel(selfPane string) swModel {
 // phase, the driven client, escortee, snoozes and the paused observation
 // across the exec instead.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
-	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting &&
+	restoring := m.restore != nil && (m.restore.busy || m.restore.picking)
+	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting && !restoring &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
@@ -728,12 +734,13 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh the preview on the same beat as the fleet. tea.Batch drops
 		// nil commands, so this is a no-op when there is nothing to capture.
-		// The conductor also sits out the create and defer prompts:
-		// dispatching the client away mid-typing would yank the user off the
-		// prompt, and dispatching while a launch is in flight would race the
-		// switch the launch is about to issue itself.
+		// The conductor also sits out the create and defer prompts, and the
+		// restore picker: dispatching the client away mid-typing (or
+		// mid-checklist) would yank the user off the prompt, and dispatching
+		// while a launch is in flight would race the switch the launch is
+		// about to issue itself.
 		pv := m.previewCmd()
-		if !m.standby && !m.creating && !m.createBusy && !m.deferring {
+		if !m.standby && !m.creating && !m.createBusy && !m.deferring && !(m.restore != nil && m.restore.picking) {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
 					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan)
@@ -1173,18 +1180,22 @@ func (m swModel) View() string {
 		b.WriteString(swMetersLine(m, now) + "\n")
 	}
 	if o := m.restore; o != nil {
-		strip := swWaitStyle.Render(swRestoreStripText(o))
-		if m.width > 0 {
-			strip = clipLine(strip, m.width)
-		}
-		b.WriteString(strip + "\n")
 		if o.picking {
+			// The strip's own hint text ("r restore all · s select · x
+			// dismiss") names keys that do nothing in picking mode — the
+			// picker's own header line already says what does, so the strip
+			// itself is skipped rather than drawn above the checklist.
 			b.WriteString("\n")
 			for _, l := range swRestorePickerLines(o, now, m.width) {
 				b.WriteString(l + "\n")
 			}
 			return b.String()
 		}
+		strip := swWaitStyle.Render(swRestoreStripText(o))
+		if m.width > 0 {
+			strip = clipLine(strip, m.width)
+		}
+		b.WriteString(strip + "\n")
 	}
 	b.WriteString("\n")
 	if len(m.snap.Sessions) == 0 {
@@ -1433,6 +1444,9 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 				limit--
 			}
 			if m.rateOK {
+				limit--
+			}
+			if m.restore != nil && !m.restore.picking {
 				limit--
 			}
 			if limit < 1 {

@@ -912,6 +912,59 @@ func TestSwitchboardRestartKeyStaysLiteralWhileCreating(t *testing.T) {
 	}
 }
 
+// The restore strip (swrestore.go) is drawn unconditionally by View whenever
+// m.restore is set, even when the preview box itself is hidden or too small
+// to show — so the "no box" fallback in listWindow must budget a row for it
+// exactly like it already does for the tmux-error and meters lines, or the
+// fleet list overruns the pane's footer by one row.
+func TestSwitchboardListWindowBudgetsRestoreStripRow(t *testing.T) {
+	m := newSwModel("%9")
+	m.previewHidden = true
+	m.height = 30
+	sessions := make([]swSession, 50)
+	for i := range sessions {
+		sessions[i] = swSession{Name: fmt.Sprintf("s%d", i)}
+	}
+	m.snap = swSnapshot{Sessions: sessions}
+
+	_, startWithout, endWithout := m.listWindow()
+	withoutRows := endWithout - startWithout
+
+	m.restore = &swRestoreOffer{lost: []lostSession{lostRec("a", "1", "/p", "", 1, false)}}
+	_, startWith, endWith := m.listWindow()
+	withRows := endWith - startWith
+
+	if withRows != withoutRows-1 {
+		t.Errorf("restore strip must cost exactly one row of list budget: without=%d with=%d", withoutRows, withRows)
+	}
+
+	// While picking, the strip is not drawn (the picker replaces the whole
+	// list+preview area instead), so it must not cost a list row either.
+	m.restore.picking = true
+	_, startPicking, endPicking := m.listWindow()
+	if got := endPicking - startPicking; got != withoutRows {
+		t.Errorf("picking must not cost a list row: got=%d want=%d", got, withoutRows)
+	}
+}
+
+// The conductor must sit out the restore picker the same way it sits out the
+// create and defer prompts: dispatching the client away while the user is
+// checking boxes would yank them off the picker mid-decision.
+func TestSwModelRestorePickingSuppressesConductor(t *testing.T) {
+	snap := swSnapshot{
+		Sessions: []swSession{{Name: "api", State: "Idle", Since: time.Unix(100, 0)}},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys001": "switchboard"},
+	}
+	m := swTestModel()
+	m.restore = &swRestoreOffer{picking: true}
+	next, _ := m.Update(swSnapshotMsg{snap: snap})
+	got := next.(swModel)
+	if got.cond.phase != swParked || got.cond.escortee != "" {
+		t.Errorf("conductor dispatched while picking: phase=%v escortee=%q", got.cond.phase, got.cond.escortee)
+	}
+}
+
 func TestSwitchboardShouldAutoRestart(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "bin")
 	if err := os.WriteFile(p, []byte("v1"), 0o755); err != nil {
@@ -940,6 +993,8 @@ func TestSwitchboardShouldAutoRestart(t *testing.T) {
 		func(m *swModel) { m.createBusy = true },
 		func(m *swModel) { m.deferring = true },
 		func(m *swModel) { m.fleetRestarting = true },
+		func(m *swModel) { m.restore = &swRestoreOffer{busy: true} },
+		func(m *swModel) { m.restore = &swRestoreOffer{picking: true} },
 	} {
 		mm := newSwModel("%1")
 		mm.launchBin, mm.launchBinOK = stamp, true

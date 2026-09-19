@@ -157,3 +157,22 @@ func TestSwRestoreStepAdvances(t *testing.T) {
 		t.Error("clean restore left the strip up")
 	}
 }
+
+// While picking, the strip's own hint text ("r restore all · s select · x
+// dismiss") must not appear above the checklist — those keys do nothing in
+// picking mode, and the picker's own header line already says what does.
+func TestSwRestoreViewPickingHidesStripText(t *testing.T) {
+	m := newSwModel("%0")
+	m.width, m.height = 80, 24
+	m.snap = swSnapshot{Sessions: []swSession{{Name: "api", State: "Idle"}}}
+	m.restore = &swRestoreOffer{lost: []lostSession{lostRec("a", "1", "/p", "", 1, false)}}
+	m.restore.startPicking()
+
+	view := m.View()
+	if strings.Contains(view, "r restore all") || strings.Contains(view, "s select") {
+		t.Errorf("strip hint text must not render while picking:\n%s", view)
+	}
+	if !strings.Contains(view, "restore which sessions?") {
+		t.Errorf("picker header missing:\n%s", view)
+	}
+}
