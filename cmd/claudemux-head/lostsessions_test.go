@@ -94,7 +94,7 @@ func TestParseBootTime(t *testing.T) {
 	if !ok || sec != 1789750380 {
 		t.Errorf("got %d %v", sec, ok)
 	}
-	for _, bad := range []string{"", "garbage"} {
+	for _, bad := range []string{"", "garbage", "{ sec = , usec = 1 }", "{ sec = -5, usec = 0 }"} {
 		if _, ok := parseBootTime(bad); ok {
 			t.Errorf("parseBootTime(%q) ok, want failure", bad)
 		}

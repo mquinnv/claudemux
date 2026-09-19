@@ -75,7 +75,8 @@ func interruptedState(state string) bool {
 	return false
 }
 
-var bootTimeRe = regexp.MustCompile(`sec = (\d+)`)
+// bootTimeRe anchors on the opening brace so "usec" doesn't match the "sec" substring.
+var bootTimeRe = regexp.MustCompile(`\{\s*sec = (\d+)`)
 
 // parseBootTime reads `sysctl -n kern.boottime` output:
 // "{ sec = 1789750380, usec = 123456 } Thu Sep 18 13:53:00 2026".
