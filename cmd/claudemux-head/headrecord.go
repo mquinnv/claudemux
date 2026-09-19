@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,21 +38,73 @@ func (m model) recordDue(now time.Time) bool {
 
 // sessionRecordFor builds the record from what the head knows. The session
 // name and launch dir come from tmux, in writeRecordCmd, off the Update loop.
-// ClaudeCwd prefers the cwd the transcript last recorded (a session that
-// entered a worktree resumes from there) and falls back to the head's own
-// directory.
 func (m model) sessionRecordFor(now time.Time) sessionRecord {
-	cwd := m.sessionCwd
-	if cwd == "" {
-		cwd = m.workDir
-	}
 	return sessionRecord{
 		SessionID: m.sessionID,
-		ClaudeCwd: cwd,
+		ClaudeCwd: claudeCwdFor(m.sessionCwd, m.workDir, m.jsonlPath),
 		State:     statePublishValue(m.state),
 		Topic:     m.summary.Topic,
 		LastSeen:  now.Unix(),
 	}
+}
+
+// claudeCwdFor picks the directory restore should pass as `-C`: the one
+// whose Claude project-dir encoding matches where the transcript actually
+// lives. sessionCwd is the transcript's last main-chain cwd, but a tool `cd`
+// during the session can leave it inside a subdirectory of where claude was
+// actually launched (e.g. `cd cmd/claudemux-head` from a worktree root) —
+// claude looks up --resume ids under the project dir of ITS OWN cwd, so
+// recording the deeper subdirectory makes restore fail "no conversation
+// found" even though the same transcript is one level up. Walk from
+// sessionCwd through its ancestors, then workDir, and use the first whose
+// encoding matches jsonlPath's own directory name. workDir — the head's
+// launch dir, always correct by construction — is the fallback when nothing
+// matches, or there is no transcript yet to compare against.
+func claudeCwdFor(sessionCwd, workDir, jsonlPath string) string {
+	if sessionCwd == "" || jsonlPath == "" {
+		return workDir
+	}
+	want := filepath.Base(filepath.Dir(jsonlPath))
+	for _, dir := range append(ancestors(sessionCwd), workDir) {
+		if claudeProjectDirName(dir) == want {
+			return dir
+		}
+	}
+	return workDir
+}
+
+// ancestors returns dir and each of its parents up to (not including) "/".
+func ancestors(dir string) []string {
+	var out []string
+	for dir != "" && dir != "/" && dir != "." {
+		out = append(out, dir)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return out
+}
+
+// claudeProjectDirName reproduces Claude Code's project-dir encoding: every
+// byte outside [A-Za-z0-9] becomes '-'. encodeProjectPath (session.go) only
+// replaces '/' and so mismatches worktree paths, which also carry '.' from
+// ".claude/worktrees/...". This is forward-only, used to test a candidate
+// cwd against an already-encoded directory name — see transcriptForSession's
+// comment for why the encoding isn't safe to reverse in general.
+func claudeProjectDirName(absPath string) string {
+	b := make([]byte, len(absPath))
+	for i := 0; i < len(absPath); i++ {
+		c := absPath[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			b[i] = c
+		default:
+			b[i] = '-'
+		}
+	}
+	return string(b)
 }
 
 // parseSessionNamePath splits "#{session_name}\t#{session_path}" output.

@@ -40,9 +40,12 @@ func TestRecordDue(t *testing.T) {
 
 func TestSessionRecordFor(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
+	// jsonlPath's directory is the already-encoded project dir for
+	// "/p/x/.claude/worktrees/w" (dots and slashes both become '-').
 	m := model{
 		sessionID: "abc", sessionCwd: "/p/x/.claude/worktrees/w", workDir: "/p/x",
-		state: State{Kind: StateTool, ToolName: "Bash"}, summary: Summary{Topic: "Fix it"},
+		jsonlPath: "/home/u/.claude/projects/-p-x--claude-worktrees-w/abc.jsonl",
+		state:     State{Kind: StateTool, ToolName: "Bash"}, summary: Summary{Topic: "Fix it"},
 	}
 	r := m.sessionRecordFor(now)
 	want := sessionRecord{SessionID: "abc", ClaudeCwd: "/p/x/.claude/worktrees/w",
@@ -52,7 +55,57 @@ func TestSessionRecordFor(t *testing.T) {
 	}
 	m.sessionCwd = ""
 	if r := m.sessionRecordFor(now); r.ClaudeCwd != "/p/x" {
-		t.Errorf("fallback cwd = %q, want workDir", r.ClaudeCwd)
+		t.Errorf("no sessionCwd: cwd = %q, want workDir", r.ClaudeCwd)
+	}
+}
+
+// TestClaudeCwdFor covers the three cases sessionRecordFor's ClaudeCwd
+// choice can land on: a tool `cd` left sessionCwd inside a subdirectory of
+// where claude actually resumes, sessionCwd is already that directory, and
+// no candidate matches at all.
+func TestClaudeCwdFor(t *testing.T) {
+	worktreeJSONL := "/home/u/.claude/projects/-p-x--claude-worktrees-w/abc.jsonl"
+
+	t.Run("subdir cwd resolves to the ancestor that matches", func(t *testing.T) {
+		got := claudeCwdFor("/p/x/.claude/worktrees/w/cmd/sub", "/p/x", worktreeJSONL)
+		if want := "/p/x/.claude/worktrees/w"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("worktree cwd matching its own project dir stays", func(t *testing.T) {
+		got := claudeCwdFor("/p/x/.claude/worktrees/w", "/p/x", worktreeJSONL)
+		if want := "/p/x/.claude/worktrees/w"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no match falls back to workDir", func(t *testing.T) {
+		got := claudeCwdFor("/elsewhere/entirely", "/p/x", worktreeJSONL)
+		if want := "/p/x"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty jsonlPath falls back to workDir", func(t *testing.T) {
+		got := claudeCwdFor("/p/x/.claude/worktrees/w", "/p/x", "")
+		if want := "/p/x"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty sessionCwd falls back to workDir", func(t *testing.T) {
+		got := claudeCwdFor("", "/p/x", worktreeJSONL)
+		if want := "/p/x"; got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestClaudeProjectDirName(t *testing.T) {
+	got := claudeProjectDirName("/p/x/.claude/worktrees/w")
+	if want := "-p-x--claude-worktrees-w"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
