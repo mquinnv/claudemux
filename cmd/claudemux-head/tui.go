@@ -146,6 +146,13 @@ type model struct {
 	// not per tick.
 	publishedState string
 
+	// Reboot-restore heartbeat (headrecord.go). recordName is the tmux
+	// session name the last record was written under — what teardown
+	// deletes. lastRecordAt/lastRecordState drive recordDue.
+	recordName      string
+	lastRecordAt    time.Time
+	lastRecordState string
+
 	// publishedSince is the Since of the last publish. Paired with
 	// publishedState in maybePublishState's guard so a value-identical
 	// transition with a new anchored Since (Idle -> busy blip -> Idle)
@@ -1454,6 +1461,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		now := time.Time(msg)
+		if m.recordDue(now) {
+			m.lastRecordAt = now
+			m.lastRecordState = statePublishValue(m.state)
+			cmds = append(cmds, writeRecordCmd(m.selfPane, sessionRecordDir(), m.sessionRecordFor(now)))
+		}
 		if m.shouldAutoRestart(now) {
 			m.restart = true
 			return m, tea.Quit
@@ -1765,11 +1777,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.teardownBlocked = m.teardownSubmitted &&
 			m.teardownInWorktree && teardownTurnEnded(m.state.Kind)
 
+	case recordWrittenMsg:
+		m.recordName = msg.name
+		return m, nil
+
 	case claudeGoneMsg:
 		m.teardownProbing = false
 		if m.teardown != teardownExiting || !msg.gone {
 			return m, nil
 		}
+		// Ended on purpose: never offer this session back after a reboot.
+		removeSessionRecord(sessionRecordDir(), m.recordName)
 		return m, killSessionCmd(m.selfPane)
 
 	case usageTickMsg:
