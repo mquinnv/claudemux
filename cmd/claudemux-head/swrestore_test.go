@@ -1,0 +1,159 @@
+package main
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func keyRunes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func lostRec(name, id, launch, cwd string, lastSeen int64, interrupted bool) lostSession {
+	return lostSession{
+		loadedRecord: loadedRecord{Path: "/d/" + name + ".json", Rec: sessionRecord{
+			SessionName: name, SessionID: id, LaunchDir: launch, ClaudeCwd: cwd,
+			LastSeen: lastSeen, Topic: "topic " + name,
+		}},
+		Interrupted: interrupted,
+	}
+}
+
+func TestRestoreArgs(t *testing.T) {
+	exists := func(p string) bool { return p != "/gone" }
+	args, err := restoreArgs(lostRec("remix-2", "abc", "/p/remix", "/p/remix/wt", 1, false), exists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-d -W -N remix-2 -r abc -C /p/remix/wt -- /p/remix"
+	if got := strings.Join(args, " "); got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+	// cwd same as launch dir, or gone: no -C.
+	for _, cwd := range []string{"/p/remix", "/gone", ""} {
+		args, _ := restoreArgs(lostRec("r", "abc", "/p/remix", cwd, 1, false), exists)
+		if strings.Contains(strings.Join(args, " "), "-C") {
+			t.Errorf("cwd %q: unexpected -C in %v", cwd, args)
+		}
+	}
+	if _, err := restoreArgs(lostRec("r", "abc", "/gone", "", 1, false), exists); err == nil {
+		t.Error("missing launch dir: want error")
+	}
+	if _, err := restoreArgs(lostRec("r", "bad id", "/p", "", 1, false), exists); err == nil {
+		t.Error("bad session id: want error")
+	}
+}
+
+func TestSwRestoreStripText(t *testing.T) {
+	newest := time.Date(2026, 9, 18, 13, 52, 0, 0, time.Local).Unix()
+	o := &swRestoreOffer{newest: newest, lost: []lostSession{
+		lostRec("a", "1", "/p", "", newest, false),
+		lostRec("b", "2", "/p", "", newest, true),
+	}}
+	got := swRestoreStripText(o)
+	for _, want := range []string{"2 sessions were running before the reboot", "Sep 18 13:52", "r restore all", "s select", "x dismiss"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("strip %q missing %q", got, want)
+		}
+	}
+	o.lost = o.lost[:1]
+	if got := swRestoreStripText(o); !strings.Contains(got, "1 session was running") {
+		t.Errorf("singular: %q", got)
+	}
+	o.busy, o.done, o.total = true, 1, 2
+	if got := swRestoreStripText(o); !strings.Contains(got, "restoring 2/2") {
+		t.Errorf("busy: %q", got)
+	}
+	o.busy, o.done, o.total, o.failed = false, 2, 2, []string{"b: launch dir gone"}
+	if got := swRestoreStripText(o); !strings.Contains(got, "restored 1/2") || !strings.Contains(got, "b: launch dir gone") || !strings.Contains(got, "x dismiss") {
+		t.Errorf("failures: %q", got)
+	}
+}
+
+func TestSwRestorePickerAndSelected(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	o := &swRestoreOffer{lost: []lostSession{
+		lostRec("a", "1", "/p", "", now.Unix()-120, false),
+		lostRec("b", "2", "/p", "", now.Unix()-60, true),
+	}}
+	o.startPicking()
+	if len(o.selected()) != 2 {
+		t.Fatalf("picker starts with everything checked")
+	}
+	o.toggle() // cursor 0
+	if sel := o.selected(); len(sel) != 1 || sel[0].Rec.SessionName != "b" {
+		t.Fatalf("selected = %+v", sel)
+	}
+	lines := swRestorePickerLines(o, now, 80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "[ ] a") || !strings.Contains(joined, "[x] b") || !strings.Contains(joined, "⚡ interrupted") {
+		t.Errorf("picker:\n%s", joined)
+	}
+	o.moveCursor(5)
+	if o.cursor != 1 {
+		t.Errorf("cursor clamps to last row, got %d", o.cursor)
+	}
+	o.moveCursor(-5)
+	if o.cursor != 0 {
+		t.Errorf("cursor clamps to first row, got %d", o.cursor)
+	}
+}
+
+func TestSwRestoreKeys(t *testing.T) {
+	m := newSwModel("%0")
+	m.restore = &swRestoreOffer{lost: []lostSession{lostRec("a", "1", "/p", "", 1, false)}}
+	m.restoreArchive = func(*swRestoreOffer) {} // no disk in tests
+
+	// x dismisses.
+	mm, _ := m.Update(keyRunes("x"))
+	if mm.(swModel).restore != nil {
+		t.Error("x did not dismiss the offer")
+	}
+	// s opens the picker; esc backs out; enter with everything unchecked archives and ends.
+	mm, _ = m.Update(keyRunes("s"))
+	sm := mm.(swModel)
+	if !sm.restore.picking {
+		t.Fatal("s did not open the picker")
+	}
+	mm, _ = sm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if mm.(swModel).restore.picking {
+		t.Error("esc did not close the picker")
+	}
+	// r starts a restore: busy, with a command to run.
+	mm, cmd := m.Update(keyRunes("r"))
+	if !mm.(swModel).restore.busy || cmd == nil {
+		t.Error("r did not start restoring")
+	}
+	// Keys do nothing with no offer.
+	m.restore = nil
+	mm, _ = m.Update(keyRunes("x"))
+	if mm.(swModel).restore != nil {
+		t.Error("offer appeared from nowhere")
+	}
+}
+
+func TestSwRestoreStepAdvances(t *testing.T) {
+	m := newSwModel("%0")
+	m.restore = &swRestoreOffer{busy: true, total: 2, queue: []lostSession{lostRec("b", "2", "/p", "", 1, false)}}
+	mm, cmd := m.Update(swRestoreStepMsg{name: "a"})
+	sm := mm.(swModel)
+	if sm.restore.done != 1 || cmd == nil || len(sm.restore.queue) != 0 {
+		t.Fatalf("after first step: %+v cmd=%v", sm.restore, cmd != nil)
+	}
+	mm, _ = sm.Update(swRestoreStepMsg{name: "b", err: errString("boom")})
+	sm = mm.(swModel)
+	if sm.restore == nil || sm.restore.busy || len(sm.restore.failed) != 1 {
+		t.Fatalf("after failed last step: %+v", sm.restore)
+	}
+	// All succeeded: the strip goes away.
+	m.restore = &swRestoreOffer{busy: true, total: 1}
+	mm, _ = m.Update(swRestoreStepMsg{name: "a"})
+	if mm.(swModel).restore != nil {
+		t.Error("clean restore left the strip up")
+	}
+}

@@ -338,6 +338,13 @@ type swModel struct {
 	// stale conductor silently doesn't know newer published states.
 	launchBin   binStamp
 	launchBinOK bool
+	// Reboot restore (swrestore.go). restore is the offer strip, nil when
+	// there is none; restoreScanned stops the scan after the first
+	// successful snapshot. restoreArchive is archiveRestoreOffer, a field
+	// so tests don't touch ~/.claude.
+	restore        *swRestoreOffer
+	restoreScanned bool
+	restoreArchive func(*swRestoreOffer)
 }
 
 func newSwModel(selfPane string) swModel {
@@ -348,6 +355,7 @@ func newSwModel(selfPane string) swModel {
 		usageCachePath: defaultUsageCachePath(),
 	}
 	m.launchBin, m.launchBinOK = launchBinStamp()
+	m.restoreArchive = archiveRestoreOffer
 	return m
 }
 
@@ -691,6 +699,14 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			selName = m.snap.Sessions[m.sel].Name
 		}
 		m.snap = msg.snap
+		// The scan needs the live fleet to exclude sessions already running
+		// again, so it waits for the first successful snapshot rather than
+		// running at startup — and runs only once per lobby.
+		var restoreScan tea.Cmd
+		if !m.restoreScanned {
+			m.restoreScanned = true
+			restoreScan = swRestoreScanCmd(m.snap.Sessions)
+		}
 		if selName != "" {
 			for i, sess := range m.snap.Sessions {
 				if sess.Name == selName {
@@ -720,7 +736,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.standby && !m.creating && !m.createBusy && !m.deferring {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
-					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub)
+					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan)
 			}
 		} else if m.standby {
 			// step() is what keeps the driven client current, and in standby
@@ -735,7 +751,29 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// next step is what tells a replaced client from a walk-away.
 			m.cond.resolveClient(m.snap)
 		}
-		return m, tea.Batch(swNextTick(), pv, pub)
+		return m, tea.Batch(swNextTick(), pv, pub, restoreScan)
+	case swRestoreScanMsg:
+		m.restore = msg.offer
+		return m, nil
+	case swRestoreStepMsg:
+		o := m.restore
+		if o == nil || !o.busy {
+			return m, nil
+		}
+		if msg.err != nil {
+			o.failed = append(o.failed, msg.name+": "+msg.err.Error())
+		}
+		o.done++
+		if len(o.queue) > 0 {
+			next := o.queue[0]
+			o.queue = o.queue[1:]
+			return m, swRestoreOneCmd(next)
+		}
+		o.busy = false
+		if len(o.failed) == 0 {
+			m.restore = nil
+		}
+		return m, nil
 	case usageTickMsg:
 		// See the head's usageTickMsg case: the tick is a file read and never
 		// stops; usageMaySpawn is the only gate on spawning.
@@ -860,6 +898,42 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deferInput = deferInputKey(m.deferInput, msg)
 			}
 			return m, nil
+		}
+		if o := m.restore; o != nil && !o.busy {
+			if o.picking {
+				switch msg.String() {
+				case "esc":
+					o.picking = false
+				case "j", "down":
+					o.moveCursor(1)
+				case "k", "up":
+					o.moveCursor(-1)
+				case " ", "space":
+					o.toggle()
+				case "enter":
+					return m, m.startRestore()
+				case "ctrl+c":
+					return m, tea.Quit
+				}
+				return m, nil
+			}
+			switch msg.String() {
+			case "r":
+				if o.total == 0 {
+					return m, m.startRestore()
+				}
+			case "s":
+				if o.total == 0 {
+					o.startPicking()
+					return m, nil
+				}
+			case "x":
+				if o.total == 0 {
+					m.restoreArchive(o)
+				}
+				m.restore = nil
+				return m, nil
+			}
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -1098,6 +1172,20 @@ func (m swModel) View() string {
 	if m.rateOK {
 		b.WriteString(swMetersLine(m, now) + "\n")
 	}
+	if o := m.restore; o != nil {
+		strip := swWaitStyle.Render(swRestoreStripText(o))
+		if m.width > 0 {
+			strip = clipLine(strip, m.width)
+		}
+		b.WriteString(strip + "\n")
+		if o.picking {
+			b.WriteString("\n")
+			for _, l := range swRestorePickerLines(o, now, m.width) {
+				b.WriteString(l + "\n")
+			}
+			return b.String()
+		}
+	}
 	b.WriteString("\n")
 	if len(m.snap.Sessions) == 0 {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
@@ -1332,7 +1420,7 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 		want += rows[i]
 	}
 	if !m.previewHidden {
-		lay = computePreviewLayout(m.height, m.lastErr != "", m.rateOK, want)
+		lay = computePreviewLayout(m.height, m.lastErr != "", m.rateOK, m.restore != nil && !m.restore.picking, want)
 	}
 	limit := lay.ListRows
 	if !lay.Show {
