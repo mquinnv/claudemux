@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claudemux [-n] [-d] [-w|-W] [switch|setup|dir|query ...]
+# Usage: claudemux [-n] [-d] [-w|-W] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
@@ -29,6 +29,15 @@
 #        CREATED sessions — attaching to an existing session reuses whatever
 #        claude command it was launched with, same as name/color. Combine
 #        with -n to force a new session if you need -w/-W to take effect.
+#   -N   Use exactly this tmux session name instead of the directory basename.
+#        Fails if a session by that name exists (no attach, no -2 suffix):
+#        the switchboard's reboot restore uses it to bring a session back
+#        under its old name, and must never merge into another session.
+#   -r   Resume this claude session id (`claude --resume <id>`).
+#   -C   Start the claude pane in this directory instead of the launch dir —
+#        claude finds a --resume id under the project dir of its cwd, and a
+#        session that entered a worktree lives under the worktree's. Ignored
+#        if the directory no longer exists: claude starts in the launch dir.
 #
 # This script does not create worktrees and no longer passes `claude
 # --worktree`. It decides whether a session SHOULD have one and exports
@@ -53,16 +62,30 @@ worktree_mode_set() {
   fi
   WORKTREE_MODE="$1"
 }
-while getopts "ndwW" opt; do
+RESUME_ID=""
+EXACT_NAME=""
+CLAUDE_DIR=""
+while getopts "ndwWr:N:C:" opt; do
   case "$opt" in
     n) FORCE_NEW=true ;;
     d) DETACHED=true ;;
     w) worktree_mode_set force ;;
     W) worktree_mode_set skip ;;
-    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [switch|setup|dir|query ...]" >&2; exit 1 ;;
+    r) RESUME_ID="$OPTARG" ;;
+    N) EXACT_NAME="$OPTARG" ;;
+    C) CLAUDE_DIR="$OPTARG" ;;
+    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
+
+# The id is spliced into claude's command line unquoted (as the head's `c`
+# restart does), so it must be a plain session id — same alphabet as
+# resumeIDOK in cmd/claudemux-head/claudereboot.go.
+if [ -n "$RESUME_ID" ] && ! [[ "$RESUME_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "claudemux: invalid resume id: $RESUME_ID" >&2
+  exit 1
+fi
 
 # resolve_self — absolute path of this script with symlinks followed.
 #
@@ -576,10 +599,16 @@ pane_cmd() {
 # leaves the shell as the process group leader.
 run_in_pane() {
   tmux set -p -t "$1" remain-on-exit failed 2>/dev/null || true
-  # No -c: respawn-pane keeps the pane's working directory, which is the
-  # work_dir it was created with (verified) — the same assumption the shell
-  # pane's respawn in deferred_launch has always made.
-  tmux respawn-pane -k -t "$1" "exec $2"
+  # No -c by default: respawn-pane keeps the pane's working directory, which is
+  # the work_dir it was created with (verified) — the same assumption the shell
+  # pane's respawn in deferred_launch has always made. A third argument moves
+  # the pane first (-C: resume claude from its recorded cwd); later respawns of
+  # the same pane without -c keep that directory.
+  if [ -n "${3:-}" ]; then
+    tmux respawn-pane -k -t "$1" -c "$3" "exec $2"
+  else
+    tmux respawn-pane -k -t "$1" "exec $2"
+  fi
 }
 
 # run_shell_in_pane PANE COMMAND — make PANE run COMMAND and then hand the user
@@ -788,8 +817,15 @@ create_session() {
   local work_dir="$1"
   local session_name clone_suffix=""
   session_name="$(basename "$work_dir")"
-
-  if tmux has-session -t "=$session_name" 2>/dev/null; then
+  if [ -n "$EXACT_NAME" ]; then
+    # Restore: the name is the whole point, so a clash is an error rather than
+    # an attach or a -2 suffix.
+    session_name="$EXACT_NAME"
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
+      echo "claudemux: session $session_name already exists" >&2
+      exit 1
+    fi
+  elif tmux has-session -t "=$session_name" 2>/dev/null; then
     if [ "$FORCE_NEW" = true ]; then
       local i=2
       while tmux has-session -t "=${session_name}-${i}" 2>/dev/null; do
@@ -812,6 +848,12 @@ create_session() {
   local proj_color proj_name claude_cmd claude_bin worktree_env
   proj_color="$(project_field "$work_dir" color)"
   proj_name="$(project_field "$work_dir" name)"
+  local claude_dir=""
+  # Only a directory that still exists; a removed worktree falls back to the
+  # launch dir, and a failed resume there shows in the pane (remain-on-exit).
+  if [ -n "$CLAUDE_DIR" ] && [ -d "$CLAUDE_DIR" ]; then
+    claude_dir="$CLAUDE_DIR"
+  fi
   # Absolute path when one can be resolved. The panes below are spawned with a
   # command, and tmux runs a pane command through a NON-interactive shell: it
   # never sources the rc file that put ~/.local/bin on PATH, and the environment
@@ -823,6 +865,11 @@ create_session() {
   # function — leaving the name unresolved is what lets that keep working.
   claude_bin="$(command -v claude || true)"
   claude_cmd="$(printf '%q' "${claude_bin:-claude}") --permission-mode auto"
+  # Before -n and the "/color X" prompt argument: --resume takes a value, and
+  # the prompt must stay the last positional.
+  if [ -n "$RESUME_ID" ]; then
+    claude_cmd+=" --resume $RESUME_ID"
+  fi
   [ -n "$proj_name" ] && claude_cmd+=" -n $(printf '%q' "$proj_name")"
   [ -n "$proj_color" ] && claude_cmd+=" $(printf '%q' "/color $proj_color")"
   # A marked session creates its worktree on its FIRST RESPONSE, not at launch:
@@ -968,7 +1015,7 @@ create_session() {
     # everything from here on is what the holder execs, verbatim, and a flag
     # placed after this point would be read as part of that command instead.
     holder_cmd+=" --expected 25s -- $claude_cmd"
-    run_in_pane "$claude_pane" "$holder_cmd"
+    run_in_pane "$claude_pane" "$holder_cmd" "$claude_dir"
     # A configured shell command rides along instead of being started here: the
     # shell pane has to stay a bare shell until the secrets land, or
     # deferred_launch's guard cannot tell it apart from a pane the user started
@@ -976,7 +1023,7 @@ create_session() {
     deferred_launch "$session_name" "$work_dir" "$claude_pane" "$shell_pane" \
       "$claude_cmd" "$(basename "$head_bin")" "$shell_cmd" >/dev/null 2>&1 &
   else
-    run_in_pane "$claude_pane" "$claude_cmd"
+    run_in_pane "$claude_pane" "$claude_cmd" "$claude_dir"
     if [ -n "$shell_pane" ] && [ -n "$shell_cmd" ]; then
       run_shell_in_pane "$shell_pane" "$shell_cmd"
     fi

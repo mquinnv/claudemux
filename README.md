@@ -220,6 +220,33 @@ you get carried to it. To sit and watch the fleet instead, press `Space` — it
 toggles **standby**, which keeps the states live but never dispatches, until you
 press `Space` again.
 
+### After a reboot
+
+Every session head keeps a small record of its session in
+`~/.claude/claudemux/sessions/`, refreshed every 30 seconds. When the machine
+reboots — an OS update, a crash — or the tmux server dies, the first switchboard
+you open finds the sessions that were running at the time and offers them back:
+
+    ⏻ 7 sessions were running before the reboot (Sep 18 13:52) · r restore all · s select · x dismiss
+
+`r` brings them all back, `s` opens a checklist (space toggles, enter restores),
+`x` dismisses. Each restored session gets its old name, its project's usual
+layout, and claude resumed on the same conversation (`claude --resume`), started
+in the directory it was last working in — a worktree, if it had entered one. Its
+project's `/color` (if any) is applied at launch exactly as on any claudemux
+launch — that's a Claude Code color, local to its own UI, separate from the
+tmux/iTerm tinting under **Appearance: project colors** below.
+
+claudemux sends nothing to a restored session: it comes back exactly as claude
+left it. Sessions that were mid-turn when the machine went down are only marked
+`⚡ interrupted` in the checklist, for you to check on — Claude Code itself may
+pick the interrupted turn back up on its own when it resumes.
+
+The offer is made once per boot: whatever you choose, the records move to
+`sessions/restored-<time>/`. Sessions you ended with the head's teardown are
+never offered, and neither are sessions you closed well before the reboot —
+only the ones that stopped together, within ten minutes of the last.
+
 Under the title, the lobby shows the same account budget meters as the head:
 the 5-hour and weekly rate-limit gauges with their reset times (and an
 "empty in X" projection when usage is climbing), so you can see the account's
@@ -269,6 +296,17 @@ starts a new session, `q` quits.
 A fleet longer than the pane scrolls: the list follows the selection, and a
 `↑ N more · ↓ N more` line says how many sessions are off screen in each
 direction. Hiding the preview with `p` gives its rows to the list.
+
+Restore uses three launcher options `claudemux` gained for this (see
+**Configuration** for the rest of the flags):
+
+- `-N name` — reuse the tmux session name instead of the directory basename;
+  fails rather than attach if a session by that name already exists, since
+  restore must never merge into another session.
+- `-r session-id` — resume this claude conversation (`claude --resume`).
+- `-C dir` — start the claude pane in this directory instead of the launch
+  dir. Ignored if the directory no longer exists (a worktree since
+  removed) — claude starts in the launch dir instead.
 
 ## Install
 

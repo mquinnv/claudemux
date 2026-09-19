@@ -159,9 +159,19 @@ func TestComputePreviewLayout(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := computePreviewLayout(tt.height, tt.hasErr, tt.hasMeters, tt.listWant); got != tt.want {
+			if got := computePreviewLayout(tt.height, tt.hasErr, tt.hasMeters, false, tt.listWant); got != tt.want {
 				t.Errorf("computePreviewLayout(%d, %v, %v, %d) = %+v, want %+v", tt.height, tt.hasErr, tt.hasMeters, tt.listWant, got, tt.want)
 			}
 		})
+	}
+}
+
+// The reboot-restore offer strip (swrestore.go) costs exactly one row, same
+// as the error and meters lines.
+func TestComputePreviewLayoutStripCostsARow(t *testing.T) {
+	without := computePreviewLayout(40, false, false, false, 100)
+	with := computePreviewLayout(40, false, false, true, 100)
+	if with.ListRows+with.Content+2 != without.ListRows+without.Content+2-1 {
+		t.Errorf("strip did not cost exactly one row: without=%+v with=%+v", without, with)
 	}
 }
