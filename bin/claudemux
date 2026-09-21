@@ -605,10 +605,51 @@ run_in_pane() {
   # the pane first (-C: resume claude from its recorded cwd); later respawns of
   # the same pane without -c keep that directory.
   if [ -n "${3:-}" ]; then
-    tmux respawn-pane -k -t "$1" -c "$3" "exec $2"
+    tmux respawn-pane -k -t "$1" -c "$3" "$(pane_cd "$1" "$3")exec $2"
   else
-    tmux respawn-pane -k -t "$1" "exec $2"
+    tmux respawn-pane -k -t "$1" "$(pane_cd "$1")exec $2"
   fi
+}
+
+# pane_cd PANE [DIR] — print a `cd DIR && ` prefix for a pane command, DIR
+# defaulting to the directory tmux holds for PANE (pane_start_path: what -c set
+# at creation or at the last respawn).
+#
+# tmux's -c is not enough on its own. A server whose OWN working directory has
+# been deleted ignores -c entirely (measured on 3.7c, deleted before or after
+# the server started): session_path reports the requested directory while every
+# pane is spawned in the dead one, where claude and anything else on node dies
+# at startup with `ENOENT: process.cwd failed`. A cd made by the pane's own
+# shell works regardless, so the command carries one. tmux_new_session keeps a
+# server from getting into that state; this is for the server that already has,
+# which can only be cured by restarting it and every session in it.
+#
+# `&&` and %q are both spelled the same in POSIX shells and fish, which matters
+# because this runs through default-shell -c; and `cd X && exec Y` still leaves
+# the pane's process being Y, which is what run_in_pane promises. Prints
+# nothing when no directory is known or it is gone: the command then runs where
+# tmux puts it, exactly as it did before this existed.
+pane_cd() {
+  local dir="${2:-}"
+  [ -n "$dir" ] || dir="$(tmux display-message -p -t "$1" '#{pane_start_path}' 2>/dev/null || true)"
+  if [ -n "$dir" ] && [ -d "$dir" ]; then
+    printf 'cd %q && ' "$dir"
+  fi
+}
+
+# tmux_new_session ARGS... — `tmux new-session ARGS...`, run from $HOME.
+#
+# new-session is the one call here that can START the tmux server, and a server
+# keeps the working directory of whatever started it for as long as it lives.
+# Started from a worktree that is later removed, it ignores -c for every pane
+# it spawns from then on (see pane_cd), and new sessions stop working until the
+# server is restarted. $HOME does not get deleted. A subshell, so the launcher's
+# own directory is untouched; callers pass absolute paths to -c.
+tmux_new_session() {
+  (
+    cd "${HOME:-/}" 2>/dev/null || cd /
+    tmux new-session "$@"
+  )
 }
 
 # run_shell_in_pane PANE COMMAND — make PANE run COMMAND and then hand the user
@@ -657,12 +698,17 @@ run_in_pane() {
 # see deferred_launch, whose "has the user started something here?" guard is
 # why the op_env path defers this call rather than making it at create time.
 run_shell_in_pane() {
-  local shell sq="'" rep="'\\''" cmd
+  local shell sq="'" rep="'\\''" cmd dir
   shell="$(tmux show -gv default-shell 2>/dev/null || true)"
   [ -n "$shell" ] || shell="${SHELL:-/bin/sh}"
   cmd="${2//$sq/$rep}"
+  # The pane's directory rides along as "$2" and the wrapper cds into it first,
+  # for the reason pane_cd gives; here it also covers the trailing shell. An
+  # empty or vanished directory is a cd that fails quietly, not a lost pane.
+  dir="$(tmux display-message -p -t "$1" '#{pane_start_path}' 2>/dev/null || true)"
+  dir="${dir//$sq/$rep}"
   tmux respawn-pane -k -t "$1" \
-    "exec /bin/sh -c 'set -m; /bin/sh -c \"\$1\"; exec \"$shell\"' claudemux '$cmd'"
+    "exec /bin/sh -c 'cd \"\$2\" 2>/dev/null; set -m; /bin/sh -c \"\$1\"; exec \"$shell\"' claudemux '$cmd' '$dir'"
 }
 
 # deferred_launch SESSION DIR CLAUDE_PANE SHELL_PANE CLAUDE_CMD HOLDER SHELL_CMD
@@ -755,7 +801,7 @@ deferred_launch() {
     fi
   fi
   if [ "$(pane_cmd "$claude_pane")" = "$holder" ]; then
-    tmux respawn-pane -k -t "$claude_pane" "exec $claude_cmd"
+    tmux respawn-pane -k -t "$claude_pane" "$(pane_cd "$claude_pane")exec $claude_cmd"
   fi
   return 0
 }
@@ -966,7 +1012,7 @@ create_session() {
   if [ -n "$sess_size" ]; then
     size_args=(-x "${sess_size%x*}" -y "${sess_size#*x}")
   fi
-  tmux new-session -d -s "$session_name" -c "$work_dir" "${size_args[@]+"${size_args[@]}"}"
+  tmux_new_session -d -s "$session_name" -c "$work_dir" "${size_args[@]+"${size_args[@]}"}"
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
   shell_pane=""
   case "$layout" in
@@ -1089,7 +1135,7 @@ open_switchboard() {
   head_bin="$(command -v claudemux-head || true)"
   head_bin="${head_bin:-claudemux-head}"
   if ! tmux has-session -t '=switchboard' 2>/dev/null; then
-    tmux new-session -d -s switchboard "exec $head_bin switchboard"
+    tmux_new_session -d -s switchboard "exec $head_bin switchboard"
   fi
   # prefix+S is the skip key: returning to the lobby is the switchboard's skip
   # gesture (the conductor snoozes the session you left and advances), so a
