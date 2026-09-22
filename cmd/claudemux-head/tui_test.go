@@ -3223,6 +3223,28 @@ func TestClaudeGoneTriggersKill(t *testing.T) {
 	}
 }
 
+// The exit wait watches the pane the /exit send reports it typed into, and
+// does not probe at all until that pane is known: there is nothing yet whose
+// exit could be observed.
+func TestExitSendRecordsPane(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownExiting
+	m.teardownAt = time.Now()
+	next, _ := m.Update(tickMsg(time.Now()))
+	if next.(model).teardownProbing {
+		t.Error("exit wait probed before the /exit pane was known")
+	}
+	next, _ = m.Update(teardownSentMsg{pane: "%74"})
+	m = next.(model)
+	if m.teardownExitPane != "%74" {
+		t.Errorf("teardownExitPane = %q, want %%74", m.teardownExitPane)
+	}
+	next, _ = m.Update(tickMsg(time.Now()))
+	if !next.(model).teardownProbing {
+		t.Error("exit wait did not probe once the /exit pane was known")
+	}
+}
+
 // Claude still alive keeps waiting.
 func TestClaudeStillAliveKeepsWaiting(t *testing.T) {
 	m := teardownTestModel()
