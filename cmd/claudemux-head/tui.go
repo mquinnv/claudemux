@@ -358,6 +358,10 @@ type model struct {
 	// worktree still exists).
 	teardownBlockReason string
 	teardownProbing     bool
+	// teardownExitPane is the pane /exit was typed into, reported by its
+	// teardownSentMsg. The exit wait watches this pane and no other (see
+	// paneExited); until it is known there is nothing to probe.
+	teardownExitPane string
 	// teardownProbeAt stamps the last ready-gate probe that was issued, so a
 	// blocked teardown can back off to teardownBlockedProbeInterval instead of
 	// forking git every second for as long as it sits on screen.
@@ -1503,9 +1507,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if now.Sub(m.teardownAt) >= teardownExitTimeout {
 				return m.abortTeardown("claude didn't exit", now), tea.Batch(cmds...)
 			}
-			if !m.teardownProbing {
+			if !m.teardownProbing && m.teardownExitPane != "" {
 				m.teardownProbing = true
-				cmds = append(cmds, claudeGoneCmd(m.selfPane))
+				cmds = append(cmds, claudeGoneCmd(m.selfPane, m.teardownExitPane))
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -1700,6 +1704,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				note = "claude didn't exit"
 			}
 			return m.abortTeardown(note, time.Now()), nil
+		}
+		if m.teardown == teardownExiting {
+			m.teardownExitPane = msg.pane
 		}
 
 	case mainDirtyMsg:
@@ -2774,6 +2781,7 @@ func (m model) teardownKey() (model, tea.Cmd) {
 
 	case teardownReady:
 		m.teardown = teardownExiting
+		m.teardownExitPane = ""
 		m.teardownAt = time.Now()
 		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
 	}
@@ -2813,6 +2821,7 @@ func (m model) teardownDirectKey() (model, tea.Cmd) {
 	case teardownDirect:
 		teardownLogf("direct-commit jsonl=%s", m.jsonlPath)
 		m.teardown = teardownExiting
+		m.teardownExitPane = ""
 		m.teardownAt = time.Now()
 		return m, teardownSendCmd(m.selfPane, m.paneDir, "/exit")
 	}
@@ -3012,6 +3021,7 @@ func (m model) abortTeardown(note string, now time.Time) model {
 	m.teardownBlocked = false
 	m.teardownBlockReason = ""
 	m.teardownProbing = false
+	m.teardownExitPane = ""
 	m.teardownSubmitted = false
 	m.teardownArmedBusy = false
 	m.teardownAuto = false

@@ -363,13 +363,33 @@ func TestTeardownProbeCmdLiveDir(t *testing.T) {
 // Outside tmux nothing can be observed, so "gone" must be false: reporting
 // gone would let the exit wait fall through to a kill-session.
 func TestClaudeGoneCmdOutsideTmux(t *testing.T) {
-	msg := claudeGoneCmd("")()
+	msg := claudeGoneCmd("", "%74")()
 	gone, ok := msg.(claudeGoneMsg)
 	if !ok {
 		t.Fatalf("msg = %T, want claudeGoneMsg", msg)
 	}
 	if gone.gone {
 		t.Error("gone = true outside tmux")
+	}
+}
+
+// The exit wait watches the one pane /exit was typed into. Every launcher
+// session also carries an ops-hud pane whose foreground command is `node`, so
+// asking "is any claude/node pane left" never went false after claude exited:
+// the wait timed out and the session was left standing.
+func TestPaneExited(t *testing.T) {
+	const listing = "%75 @28 claudemux-head /p\n%76 @28 node /p\n"
+	if !paneExited(listing, "%74") {
+		t.Error("claude pane gone, ops-hud node pane still up: want exited")
+	}
+	if paneExited(listing+"%74 @28 claude /p\n", "%74") {
+		t.Error("claude pane still listed: want not exited")
+	}
+	if paneExited("", "%74") {
+		t.Error("empty listing (failed observation) reported exited")
+	}
+	if paneExited(listing, "") {
+		t.Error("unknown pane reported exited")
 	}
 }
 

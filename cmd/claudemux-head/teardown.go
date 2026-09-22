@@ -441,8 +441,9 @@ const teardownTmuxTimeout = 2 * time.Second
 
 // teardownSentMsg reports the outcome of typing the wrap-up command. note is
 // empty on success and an abort reason otherwise — it is rendered verbatim in
-// the status chip.
-type teardownSentMsg struct{ note string }
+// the status chip. pane is the pane the text was typed into, set on success:
+// for the /exit send it is the pane the exit wait watches (see paneExited).
+type teardownSentMsg struct{ note, pane string }
 
 // teardownProbeMsg carries one ready-gate observation. checkedClean records
 // which question this probe actually answered — worktree-goneness or git
@@ -460,8 +461,7 @@ type teardownProbeMsg struct {
 	checkedClean bool
 }
 
-// claudeGoneMsg reports whether any pane in this session is still running
-// claude.
+// claudeGoneMsg reports whether the pane /exit was typed into has exited.
 type claudeGoneMsg struct{ gone bool }
 
 // teardownSendCmd types text into the session's claude pane and submits it.
@@ -522,7 +522,7 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 		// Success here means the keystrokes were delivered, NOT that claude
 		// accepted them. The model separately watches the transcript for
 		// evidence of a submitted prompt and aborts on teardownSubmitTimeout.
-		return teardownSentMsg{}
+		return teardownSentMsg{pane: pane}
 	}
 }
 
@@ -544,29 +544,41 @@ func teardownProbeCmd(workDir, mainCheckout string, checkClean bool) tea.Cmd {
 	}
 }
 
-// claudeGoneCmd reports whether claude has exited.
+// paneExited reports whether pane has left a listPanes listing — the one
+// signal that the claude /exit was typed into is gone. claude runs as the
+// pane's process (the launcher execs it), so with remain-on-exit off its exit
+// closes the pane.
 //
-// This goes through listPanes/claudePaneCandidates directly rather than
-// mappedTranscript, because mappedTranscript's ok=false collapses two very
-// different situations into one value: a genuinely empty pane listing (every
-// candidate exited) and a listPanes call that failed or timed out (a wedged
-// tmux server, a transient error) and so returned "" regardless. A live
-// session always lists at least this pane, so an empty listing here is never
-// evidence of exit — it means the observation itself failed. Only a
-// non-empty listing with zero claude/node candidates is confirmed exit.
-// Outside tmux nothing is observable either, so it reports not-gone in every
-// unobservable case — the exit wait then times out rather than falling
-// through to an irreversible kill-session.
-func claudeGoneCmd(selfPane string) tea.Cmd {
+// It watches that one pane rather than asking whether any claude-looking pane
+// is left, because the session holds other panes that look like one: the
+// launcher's ops-hud pane runs as `node`, which claudePaneCandidates counts as
+// a claude, so the any-candidate question never went false and every teardown
+// in a launcher session timed out with the session still standing.
+//
+// An empty listing is a failed observation, not an exit — a live session
+// always lists at least the head's own pane — and an empty pane means there
+// is nothing to watch. Both report not-exited, so the exit wait times out
+// rather than falling through to an irreversible kill-session.
+func paneExited(listing, pane string) bool {
+	if listing == "" || pane == "" {
+		return false
+	}
+	for _, line := range strings.Split(listing, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == pane {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeGoneCmd reports whether the claude in pane has exited. See paneExited;
+// outside tmux nothing is observable, so it reports not-gone.
+func claudeGoneCmd(selfPane, pane string) tea.Cmd {
 	return func() tea.Msg {
 		if selfPane == "" {
 			return claudeGoneMsg{}
 		}
-		listing := listPanes(selfPane)
-		if listing == "" {
-			return claudeGoneMsg{}
-		}
-		return claudeGoneMsg{gone: len(claudePaneCandidates(listing, selfPane)) == 0}
+		return claudeGoneMsg{gone: paneExited(listPanes(selfPane), pane)}
 	}
 }
 
