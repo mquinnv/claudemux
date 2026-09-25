@@ -918,3 +918,89 @@ func TestPausedDeferClearedThenSetFiresAgain(t *testing.T) {
 		t.Fatalf("act = %+v ok=%v, want a second return to the lobby", act, ok)
 	}
 }
+
+// starting is a session whose head is bound to the waiting placeholder: the
+// pane map names a session id whose transcript is not on disk yet.
+func starting(name string) swSession {
+	return swSession{Name: name, State: "Starting", Since: time.Unix(1754700000, 0)}
+}
+
+// `/clear` rotates the session id. Claude Code fires SessionStart with the
+// new id before it creates the new transcript, so for a poll or two the
+// head publishes Starting. That is neither "waiting" nor "working": the
+// human is sitting at a prompt they just cleared. Reading it as a hand-back
+// escorted them out of the session they had cleared to keep working in.
+func TestConductorEscortHoldsThroughStarting(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100), waiting("b", 200)), now)
+	if _, ok := c.step(snapAt("a", starting("a"), waiting("b", 200)), now.Add(time.Second)); ok {
+		t.Fatal("a session booting under the user has not been handed back")
+	}
+	if c.phase != swEscorting || c.escortee != "a" {
+		t.Fatalf("phase=%v escortee=%q, want still escorting a", c.phase, c.escortee)
+	}
+	// The cleared session comes back as Idle with a fresh episode: still
+	// nothing to do.
+	if _, ok := c.step(snapAt("a", waiting("a", 300), waiting("b", 200)), now.Add(2*time.Second)); ok {
+		t.Fatal("cleared session waiting again must still hold")
+	}
+	// Only a real prompt moves the user on.
+	act, ok := c.step(snapAt("a", busy("a"), waiting("b", 200)), now.Add(3*time.Second))
+	if !ok || act.Target != "b" {
+		t.Fatalf("hand-back after the clear must dispatch to b, got %+v ok=%v", act, ok)
+	}
+}
+
+// Same rotation with the queue empty and a fleet of two: leaving for the
+// lobby is exactly the ejection the user complained about.
+func TestConductorEscortStartingDoesNotReturnToLobby(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100), busy("b")), now)
+	if act, ok := c.step(snapAt("a", starting("a"), busy("b")), now.Add(time.Second)); ok {
+		t.Fatalf("must not leave a starting escortee, got %+v", act)
+	}
+	if c.phase != swEscorting {
+		t.Errorf("phase = %v, want escorting", c.phase)
+	}
+}
+
+// Paused: the user walked into a waiting session themselves and cleared it.
+// Starting is not the waiting → not-waiting edge the hand-back latch keys
+// on, so a waiter appearing afterwards must not collect them.
+func TestPausedStartingDoesNotLatchHandBack(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	c.step(snapAt("b", waiting("b", 50)), now)
+	if _, ok := c.step(snapAt("b", starting("b"), waiting("a", 100)), now.Add(time.Second)); ok {
+		t.Fatal("clear must not dispatch")
+	}
+	if _, ok := c.step(snapAt("b", waiting("b", 300), waiting("a", 100)), now.Add(2*time.Second)); ok {
+		t.Fatal("cleared session waiting again must not dispatch")
+	}
+	if c.pausedHandedBack {
+		t.Error("hand-back latched across a clear")
+	}
+	// A prompt typed into the cleared session is the real hand-back.
+	act, ok := c.step(snapAt("b", busy("b"), waiting("a", 100)), now.Add(3*time.Second))
+	if !ok || act.Target != "a" {
+		t.Fatalf("prompt after clear must dispatch to a, got %+v ok=%v", act, ok)
+	}
+}
+
+// Idle → Starting → Thinking with no Idle tick in between (a fast poll
+// straddled the clear): the prompt is still a hand-back, so the waiting
+// observation must survive the Starting tick rather than reset to false.
+func TestPausedHandBackSurvivesStartingTick(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	pauseAt(&c, "b", waiting("b", 50))
+	c.step(snapAt("b", waiting("b", 50), waiting("a", 100)), now)
+	c.step(snapAt("b", starting("b"), waiting("a", 100)), now.Add(time.Second))
+	act, ok := c.step(snapAt("b", busy("b"), waiting("a", 100)), now.Add(2*time.Second))
+	if !ok || act.Target != "a" {
+		t.Fatalf("hand-back must dispatch to a, got %+v ok=%v", act, ok)
+	}
+}

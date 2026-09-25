@@ -269,6 +269,17 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 		// one thing the key must not do.
 		sess, ok := s.session(c.escortee)
 		deferredHere := ok && sess.Deferred
+		// Starting is not a hand-back. `/clear` rotates the session id, and
+		// Claude Code fires SessionStart with the new id a beat before it
+		// creates the new transcript, so the head sits on the waiting
+		// placeholder for a poll or two and publishes Starting. The human is
+		// at the prompt they just cleared — nothing has been handed to
+		// Claude — so hold exactly as for a waiting escortee. Only a real
+		// prompt (Thinking, Tool, …) moves them on. A defer pressed while
+		// booting still wins, as everywhere else.
+		if ok && isBooting(sess.State) && !deferredHere {
+			return swAction{}, false
+		}
 		if !ok || !isWaiting(sess.State) || deferredHere {
 			if len(queue) > 0 {
 				c.escortee = queue[0].Name
@@ -326,6 +337,14 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 			}
 			c.phase = swParked
 			return swAction{Client: c.client, Target: s.Lobby}, true
+		}
+		// A Starting tick is no observation at all: the session under the
+		// user is between transcripts (see the escorting branch), neither
+		// waiting nor handed back. Skip it rather than record it, so the
+		// waiting seen before a `/clear` still pairs with the prompt typed
+		// after it, and the clear itself never reads as the hand-back edge.
+		if ok && isBooting(sess.State) {
+			break
 		}
 		if c.pausedCurWaiting && !curWaiting {
 			c.pausedHandedBack = true
