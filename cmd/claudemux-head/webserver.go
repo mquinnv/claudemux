@@ -37,14 +37,17 @@ func webHandler(f *webFleet) http.Handler {
 		_, _ = w.Write(webPageHTML)
 	})
 	mux.HandleFunc("GET /api/fleet", func(w http.ResponseWriter, r *http.Request) {
+		// Headers go on before the marshal so an error response still
+		// carries Cache-Control: no-store; http.Error overwrites
+		// Content-Type itself, which is fine.
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		body, err := json.Marshal(f.view())
 		if err != nil {
 			teardownLogf("web: encoding fleet: %v", err)
 			http.Error(w, "encoding fleet failed", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(body)
 	})
 	return webRecover(mux)
