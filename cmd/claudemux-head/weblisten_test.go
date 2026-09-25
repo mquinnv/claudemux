@@ -75,22 +75,32 @@ func TestResolveWebListenTailscale(t *testing.T) {
 	}
 }
 
-func TestParseTailscaleStatusSuffix(t *testing.T) {
+func TestParseTailscaleStatus(t *testing.T) {
 	cases := []struct {
 		name    string
 		out     string
-		want    string
+		want    webAllow
 		errPart string
 	}{
-		{name: "ordinary suffix", out: `{"MagicDNSSuffix":"nodes.headscale.mage.net"}`, want: "nodes.headscale.mage.net"},
-		{name: "trailing dot and mixed case", out: `{"MagicDNSSuffix":"Nodes.Headscale.Mage.Net."}`, want: "nodes.headscale.mage.net"},
-		{name: "magicdns off", out: `{"MagicDNSSuffix":""}`, want: ""},
-		{name: "field absent", out: `{"Self":{}}`, want: ""},
+		{name: "ordinary suffix", out: `{"MagicDNSSuffix":"nodes.headscale.mage.net"}`, want: webAllow{Suffix: "nodes.headscale.mage.net"}},
+		{name: "trailing dot and mixed case", out: `{"MagicDNSSuffix":"Nodes.Headscale.Mage.Net."}`, want: webAllow{Suffix: "nodes.headscale.mage.net"}},
+		{name: "magicdns off", out: `{"MagicDNSSuffix":""}`, want: webAllow{}},
+		{name: "field absent", out: `{"Self":{}}`, want: webAllow{}},
 		{name: "not json", out: "tailscale is stopped", errPart: "tailscale status"},
+		{
+			name: "Self.DNSName present with trailing dot",
+			out:  `{"MagicDNSSuffix":"nodes.headscale.mage.net","Self":{"DNSName":"michaels-claudes.nodes.headscale.mage.net."}}`,
+			want: webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"},
+		},
+		{
+			name: "missing Self entirely, suffix-only JSON still parses",
+			out:  `{"MagicDNSSuffix":"nodes.headscale.mage.net"}`,
+			want: webAllow{Suffix: "nodes.headscale.mage.net"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parseTailscaleStatusSuffix(c.out)
+			got, err := parseTailscaleStatus(c.out)
 			if c.errPart != "" {
 				if err == nil || !strings.Contains(err.Error(), c.errPart) {
 					t.Fatalf("err = %v, want one mentioning %q", err, c.errPart)
@@ -98,7 +108,7 @@ func TestParseTailscaleStatusSuffix(t *testing.T) {
 				return
 			}
 			if err != nil || got != c.want {
-				t.Errorf("parseTailscaleStatusSuffix(%q) = %q, %v; want %q", c.out, got, err, c.want)
+				t.Errorf("parseTailscaleStatus(%q) = %+v, %v; want %+v", c.out, got, err, c.want)
 			}
 		})
 	}

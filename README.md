@@ -263,7 +263,10 @@ web:
 ```
 
 and the lobby's title row shows the URL it bound — `http://100.64.0.15:7474/`,
-or the node's MagicDNS name on that port. The page leads with a one-sentence
+or the node's MagicDNS name on that port. Teammates can also just type the
+bare node name — `http://michaels-claudes:7474/` — since MagicDNS makes the
+suffix a search domain; the guard accepts only this node's own short name as
+a bare host, not any other single-label name. The page leads with a one-sentence
 **headline** for the whole fleet (Haiku, same key and `summary.enabled` switch
 as the per-session summaries; the header shows plain counts until the first one
 lands), then the account's 5-hour and weekly gauges, then one card per session

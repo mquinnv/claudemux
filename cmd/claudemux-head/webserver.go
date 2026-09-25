@@ -35,9 +35,10 @@ const (
 
 // webHandler routes the two paths. Method patterns make the mux answer 405
 // for a POST to a known path and 404 for everything else; "/{$}" matches
-// the root only, so "/index.html" is not quietly the page. allowSuffix is
-// the tailnet's MagicDNS suffix (weblisten.go); see webGuard.
-func webHandler(f *webFleet, allowSuffix string) http.Handler {
+// the root only, so "/index.html" is not quietly the page. allow is the
+// tailnet's MagicDNS suffix and this node's own short name (weblisten.go);
+// see webGuard.
+func webHandler(f *webFleet, allow webAllow) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -61,7 +62,7 @@ func webHandler(f *webFleet, allowSuffix string) http.Handler {
 		}
 		_, _ = w.Write(body)
 	})
-	return webRecover(webGuard(mux, allowSuffix))
+	return webRecover(webGuard(mux, allow))
 }
 
 // webTailscaleCGNAT and webTailscaleULA are the two address ranges Tailscale
@@ -87,14 +88,14 @@ func mustParseCIDR(s string) *net.IPNet {
 // carries raw prompts. Two independent checks, both must pass, regardless
 // of what address the server is bound to — LAN exposure is a spec
 // non-goal, not something the guard assumes away.
-func webGuard(next http.Handler, allowSuffix string) http.Handler {
+func webGuard(next http.Handler, allow webAllow) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !webAllowedRemote(r.RemoteAddr) {
 			teardownLogf("web: refused %s %s: remote %q is not on the tailnet", r.Method, r.URL.Path, r.RemoteAddr)
 			http.Error(w, "forbidden: not on the tailnet", http.StatusForbidden)
 			return
 		}
-		if !webAllowedHost(r.Host, allowSuffix) {
+		if !webAllowedHost(r.Host, allow) {
 			teardownLogf("web: refused %s %s: host %q not recognised", r.Method, r.URL.Path, r.Host)
 			http.Error(w, "forbidden: unrecognised host", http.StatusForbidden)
 			return
@@ -117,12 +118,15 @@ func webAllowedRemote(remoteAddr string) bool {
 }
 
 // webAllowedHost checks the request's Host header: an IP literal or
-// "localhost" always passes, and a name passes when it equals, or ends
-// with "." + allowSuffix (case-insensitive, a trailing dot on the request
-// host tolerated). An empty allowSuffix (no tailscale, or a plain
-// 127.0.0.1 bind) means only IP literals and localhost pass — the design's
-// explicitly acceptable fallback.
-func webAllowedHost(host, allowSuffix string) bool {
+// "localhost" always passes; a name passes when it equals, or ends with,
+// "." + allow.Suffix (case-insensitive, a trailing dot on the request host
+// tolerated); and a single-label host (no dots) passes when it equals
+// allow.ShortName — the bare node name a teammate types because the
+// tailnet's MagicDNS suffix is a DNS search domain. No other single-label
+// name passes. An empty allow.Suffix or allow.ShortName (no tailscale, or
+// a plain 127.0.0.1 bind) means that form of match never succeeds — the
+// design's explicitly acceptable fallback.
+func webAllowedHost(host string, allow webAllow) bool {
 	h := strings.ToLower(strings.TrimSuffix(webHostWithoutPort(host), "."))
 	if h == "" {
 		return false
@@ -130,7 +134,10 @@ func webAllowedHost(host, allowSuffix string) bool {
 	if h == "localhost" || net.ParseIP(h) != nil {
 		return true
 	}
-	suffix := strings.ToLower(strings.Trim(allowSuffix, "."))
+	if !strings.Contains(h, ".") && allow.ShortName != "" && h == allow.ShortName {
+		return true
+	}
+	suffix := strings.ToLower(strings.Trim(allow.Suffix, "."))
 	if suffix == "" {
 		return false
 	}
@@ -233,11 +240,12 @@ type swWeb struct {
 
 // startSwitchboardWeb reads web.listen and stands the page up. nil, nil
 // means the page is off. An error means the page could not start — the
-// lobby shows it and runs on without one. magicDNSSuffix resolves the
-// tailnet's MagicDNS suffix for webGuard's host check (weblisten.go); its
-// own failure is not fatal to the page — the guard just falls back to IP
-// literals and localhost, same as a node with no tailscale at all.
-func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), magicDNSSuffix func() (string, error)) (*swWeb, error) {
+// lobby shows it and runs on without one. statusAllow resolves the
+// tailnet's MagicDNS suffix and this node's own short name for webGuard's
+// host check (weblisten.go); its own failure is not fatal to the page —
+// the guard just falls back to IP literals and localhost, same as a node
+// with no tailscale at all.
+func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusAllow func() (webAllow, error)) (*swWeb, error) {
 	l, on, err := parseWebListen(cfg.Web.Listen)
 	if err != nil || !on {
 		return nil, err
@@ -246,13 +254,13 @@ func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), magicDN
 	if err != nil {
 		return nil, err
 	}
-	suffix, err := magicDNSSuffix()
+	allow, err := statusAllow()
 	if err != nil {
-		teardownLogf("web: tailscale MagicDNS suffix unavailable, host check falls back to IP/localhost only: %v", err)
-		suffix = ""
+		teardownLogf("web: tailscale MagicDNS status unavailable, host check falls back to IP/localhost only: %v", err)
+		allow = webAllow{}
 	}
 	fleet := newWebFleet()
-	server, err := startWebServer(addr, webHandler(fleet, suffix))
+	server, err := startWebServer(addr, webHandler(fleet, allow))
 	if err != nil {
 		return nil, err
 	}
