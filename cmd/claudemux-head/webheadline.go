@@ -123,3 +123,81 @@ func (g *headlineGate) due(fp string, now time.Time) bool {
 	g.lastCall = now
 	return true
 }
+
+// webHeadlineWorker is the goroutine that turns fleet changes into
+// headline calls. The lobby pokes it after every publish; it decides, via
+// the gate, whether that beat is worth a call. One goroutine, one call at a
+// time: a slow API stretches the interval rather than stacking requests.
+type webHeadlineWorker struct {
+	fleet *webFleet
+	s     *Summarizer
+	gate  headlineGate
+	wake  chan struct{}
+	quit  chan struct{}
+	done  chan struct{}
+}
+
+// startHeadlineWorker returns nil when there is no summarizer (summaries
+// disabled or no key): the page then shows counts in place of a headline.
+func startHeadlineWorker(f *webFleet, s *Summarizer, interval time.Duration) *webHeadlineWorker {
+	if s == nil {
+		return nil
+	}
+	w := &webHeadlineWorker{
+		fleet: f,
+		s:     s,
+		gate:  headlineGate{interval: interval},
+		wake:  make(chan struct{}, 1),
+		quit:  make(chan struct{}),
+		done:  make(chan struct{}),
+	}
+	go w.run()
+	return w
+}
+
+// poke wakes the worker. The channel holds one pending wake, so a burst of
+// polls collapses into one look at the fleet and the caller never blocks.
+func (w *webHeadlineWorker) poke() {
+	if w == nil {
+		return
+	}
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (w *webHeadlineWorker) stop() {
+	if w == nil {
+		return
+	}
+	close(w.quit)
+	<-w.done
+}
+
+func (w *webHeadlineWorker) run() {
+	defer close(w.done)
+	for {
+		select {
+		case <-w.quit:
+			return
+		case <-w.wake:
+		}
+		sessions := w.fleet.sessions()
+		if len(sessions) == 0 {
+			continue
+		}
+		fp := webFingerprint(sessions)
+		if !w.gate.due(fp, time.Now()) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), summaryRequestTimeout)
+		text, err := w.s.Headline(ctx, sessions)
+		cancel()
+		if err != nil {
+			teardownLogf("web: headline: %v", err)
+			continue
+		}
+		w.fleet.setHeadline(webHeadline{Text: text, At: time.Now(), Fingerprint: fp})
+	}
+}

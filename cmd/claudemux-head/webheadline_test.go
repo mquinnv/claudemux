@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -81,4 +82,80 @@ func TestHeadlineGate(t *testing.T) {
 	if !zero.due("a", t0) || !zero.due("b", t0) || zero.due("b", t0) {
 		t.Error("a zero interval fires on every change and only on change")
 	}
+}
+
+func waitForHeadline(t *testing.T, f *webFleet, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if v := f.view(); v.Headline != nil && v.Headline.Text == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("headline never became %q; view = %+v", want, f.view().Headline)
+}
+
+func TestHeadlineWorkerWritesHeadlineOnPoke(t *testing.T) {
+	f := newWebFleet()
+	f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
+	d := &fakeDoer{body: headlineResponse("Fixing the build.")}
+	w := startHeadlineWorker(f, testSummarizer(d), 0)
+	defer w.stop()
+	w.poke()
+	waitForHeadline(t, f, "Fixing the build.")
+	if v := f.view(); v.Headline.Stale {
+		t.Error("a headline written from the current fleet must not be stale")
+	}
+	// Same fleet again: no second call.
+	w.poke()
+	time.Sleep(50 * time.Millisecond)
+	if d.calls != 1 {
+		t.Errorf("calls = %d, want 1 — an unchanged fleet must not spend a call", d.calls)
+	}
+}
+
+func TestHeadlineWorkerKeepsPreviousOnError(t *testing.T) {
+	f := newWebFleet()
+	f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
+	d := &fakeDoer{body: headlineResponse("First.")}
+	w := startHeadlineWorker(f, testSummarizer(d), 0)
+	defer w.stop()
+	w.poke()
+	waitForHeadline(t, f, "First.")
+
+	d.err = errors.New("api down")
+	snap := webTestSnapshot()
+	snap.Sessions[0].Summary = "opening the PR"
+	f.publish(snap, RateLimits{}, false, nil, time.Now())
+	w.poke()
+	time.Sleep(100 * time.Millisecond)
+	v := f.view()
+	if v.Headline == nil || v.Headline.Text != "First." {
+		t.Fatalf("a failed call must keep the previous headline, got %+v", v.Headline)
+	}
+	if !v.Headline.Stale {
+		t.Error("the kept headline must read as stale against the changed fleet")
+	}
+}
+
+func TestHeadlineWorkerSkipsEmptyFleet(t *testing.T) {
+	f := newWebFleet()
+	d := &fakeDoer{body: headlineResponse("Nothing.")}
+	w := startHeadlineWorker(f, testSummarizer(d), 0)
+	defer w.stop()
+	w.poke()
+	time.Sleep(50 * time.Millisecond)
+	if d.calls != 0 {
+		t.Errorf("calls = %d, want 0 — an empty fleet has nothing to headline", d.calls)
+	}
+}
+
+func TestHeadlineWorkerNilSummarizerIsInert(t *testing.T) {
+	var w *webHeadlineWorker = startHeadlineWorker(newWebFleet(), nil, 0)
+	if w != nil {
+		t.Fatal("no summarizer means no worker")
+	}
+	w.poke() // nil-safe
+	w.stop() // nil-safe
 }
