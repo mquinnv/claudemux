@@ -49,6 +49,7 @@ type Config struct {
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
 	Launch      LaunchConfig      `yaml:"launch"`
 	Teardown    TeardownConfig    `yaml:"teardown"`
+	Web         WebConfig         `yaml:"web"`
 }
 
 // HeadConfig picks which context rows the status pane draws under its state and
@@ -215,6 +216,18 @@ type TeardownConfig struct {
 	Command string `yaml:"command"`
 }
 
+// WebConfig is the switchboard's web status page (webserver.go). Listen is
+// the address the lobby binds: "" (the default) serves nothing; "host:port"
+// is passed to net.Listen; the keyword host "tailscale" is replaced by this
+// node's Tailscale IPv4 at lobby start, which is the only way the page is
+// meant to be reached. HeadlineInterval is the floor between fleet-headline
+// calls, with summary.min_interval's rules: each call bills the user's key,
+// negative is rejected, zero means no floor.
+type WebConfig struct {
+	Listen           string   `yaml:"listen"`
+	HeadlineInterval Duration `yaml:"headline_interval"`
+}
+
 func defaultConfig() Config {
 	return Config{
 		Summary: SummaryConfig{
@@ -228,6 +241,9 @@ func defaultConfig() Config {
 		},
 		Teardown: TeardownConfig{
 			Command: "/done",
+		},
+		Web: WebConfig{
+			HeadlineInterval: Duration{2 * time.Minute},
 		},
 	}
 }
@@ -386,6 +402,13 @@ func (c Config) validate() error {
 	if c.Launch.ShellSize != "" && !legalShellSize.MatchString(c.Launch.ShellSize) {
 		return fmt.Errorf("launch.shell_size is %q: must be a percentage (\"30%%\") or a column/row count (\"80\")",
 			c.Launch.ShellSize)
+	}
+	if c.Web.HeadlineInterval.Duration < 0 {
+		return fmt.Errorf("web.headline_interval is %s: a negative floor removes the rate limit on billable API calls instead of setting one; use 0 to disable it deliberately",
+			c.Web.HeadlineInterval.Duration)
+	}
+	if _, _, err := parseWebListen(c.Web.Listen); err != nil {
+		return err
 	}
 	return nil
 }
