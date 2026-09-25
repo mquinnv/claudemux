@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // webTailscaleHost is the keyword host in web.listen that means "this node's
@@ -34,4 +39,47 @@ func parseWebListen(s string) (webListen, bool, error) {
 		return webListen{}, false, fmt.Errorf("web.listen is %q: port must be a number from 1 to 65535", s)
 	}
 	return webListen{Host: host, Port: port, Tailscale: host == webTailscaleHost}, true, nil
+}
+
+// resolveWebListen turns a parsed web.listen into the address net.Listen
+// binds. Only the tailscale keyword needs resolving; tailscaleIP is a
+// parameter so tests never run the binary.
+func resolveWebListen(l webListen, tailscaleIP func() (string, error)) (string, error) {
+	if !l.Tailscale {
+		return net.JoinHostPort(l.Host, l.Port), nil
+	}
+	ip, err := tailscaleIP()
+	if err != nil {
+		return "", fmt.Errorf("web.listen %s:%s: %w", webTailscaleHost, l.Port, err)
+	}
+	return net.JoinHostPort(ip, l.Port), nil
+}
+
+// tailscaleIPv4 asks the tailscale CLI for this node's IPv4. Bounded by a
+// timeout because it runs at lobby start, before the TUI is up: a hung CLI
+// must not hang the launch.
+func tailscaleIPv4() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").Output()
+	if err != nil {
+		return "", fmt.Errorf("tailscale ip -4: %w", err)
+	}
+	return parseTailscaleIP(string(out))
+}
+
+// parseTailscaleIP takes the first non-blank line of `tailscale ip -4` and
+// insists it is an address: a stopped tailscale prints a sentence there.
+func parseTailscaleIP(out string) (string, error) {
+	for _, line := range strings.Split(out, "\n") {
+		ip := strings.TrimSpace(line)
+		if ip == "" {
+			continue
+		}
+		if net.ParseIP(ip) == nil {
+			return "", fmt.Errorf("tailscale ip -4 printed %q, not an address: is tailscale up?", ip)
+		}
+		return ip, nil
+	}
+	return "", errors.New("tailscale ip -4 printed nothing: is tailscale up?")
 }
