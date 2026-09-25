@@ -73,6 +73,10 @@ As of this writing that list must name exactly these **six** files, kept as
 siblings: `claudemux-head`, `claudemux`, `project-color-resolve.sh`,
 `claudemux-map.sh`, `claudemux-worktree.sh`, `claudemux-ask.sh`.
 
+Skills are not on this list. They are embedded in `claudemux-head`
+(`cmd/claudemux-head/skills/`) and written out by `hook ensure`, so a new or
+changed skill needs no packaging change in any channel.
+
 This matters more than a typical packaging omission: `claudemux-head hook
 ensure` resolves and validates every shipped script's source path **before
 copying any of them** (see `cmd/claudemux-head/hook.go`). One missing
