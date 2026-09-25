@@ -92,9 +92,13 @@ Queue: sessions that are waiting (per the definition above) and not snoozed,
 ordered by `_since` ascending (name as tiebreak).
 
 Snooze: if the user manually leaves an escorted session that is still waiting, that
-session is snoozed for its current waiting episode — it re-queues only when its
-`_since` changes (a new waiting episode). Without this, skipping an Idle session
-would bounce the client straight back to it on the next return to the lobby. Sessions
+session is snoozed for its current waiting episode — it re-queues when its
+`_since` changes (a new waiting episode), when the snooze TTL elapses, or as soon as
+the filtered queue is empty while snoozed waiters remain (every session busy,
+deferred, or snoozed): then every snooze is released at once and the conductor
+re-conducts through the skipped sessions, oldest first. A snooze defers to other
+waiters; it is not a veto — defer is. Without the snooze, skipping an Idle session
+would bounce the client straight back to it while others were waiting. Sessions
 with a missing or unparseable option are shown as unknown and never queued.
 
 ### 3. Lobby UI
