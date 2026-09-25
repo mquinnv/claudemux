@@ -151,7 +151,8 @@ Sending a prompt is what hands a session back and frees the conductor to carry y
 on. Commands Claude Code answers by itself — `/clear`, `/model`, `/context`,
 `/status` and the like — are not that: they leave the session waiting on you, so
 you stay where you are. Clearing a session to start fresh in it doesn't eject you
-from it.
+from it, even though `/clear` starts a new session id and the pane reads `Starting`
+for a beat while the new transcript appears — the conductor holds through that too.
 
 Every escorted arrival is announced: a small popup pulls in a locomotive and
 introduces the session you just landed in — what it's working on, its name, and

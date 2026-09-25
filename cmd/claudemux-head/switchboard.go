@@ -77,6 +77,17 @@ func isWaiting(state string) bool {
 	return state == "Idle" || state == "Asking" || state == "Tool:AskUserQuestion"
 }
 
+// isBooting reports the one published state that is neither waiting nor
+// working: the head is bound to the waiting placeholder because the pane map
+// names a session whose transcript is not on disk yet (StateWaiting). A
+// fresh launch reads this way until the first prompt, and so does every
+// `/clear`, for the beat between SessionStart and the new transcript. The
+// conductor never dispatches into it (waitingQueue asks isWaiting) and never
+// reads it as a hand-back either — see step.
+func isBooting(state string) bool {
+	return state == "Starting"
+}
+
 func (s swSnapshot) session(name string) (swSession, bool) {
 	for _, sess := range s.Sessions {
 		if sess.Name == name {
