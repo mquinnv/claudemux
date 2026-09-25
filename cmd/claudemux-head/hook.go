@@ -96,7 +96,30 @@ func siblingOfExecutable(name string) (string, error) {
 //	2 — usage error
 //	3 — settings.json exists but does not parse; NOTHING is written
 //	4 — I/O failure
+//
+// The shipped skills (skills.go) are installed last, and only when the hooks
+// got that far: a skill that cannot be written is reported as 4 but never
+// costs the hook registration, which matters far more.
 func runHookEnsure(args []string, stdout, stderr io.Writer) int {
+	rc := ensureHooks(args, stdout, stderr)
+	if rc != 0 {
+		return rc
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "claudemux: resolving home dir: %v\n", err)
+		return 4
+	}
+	if err := installSkills(filepath.Join(home, ".claude")); err != nil {
+		fmt.Fprintf(stderr, "claudemux: installing skills: %v\n", err)
+		return 4
+	}
+	return 0
+}
+
+// ensureHooks installs the hook scripts and the statusline and registers them
+// in settings.json: runHookEnsure minus the skills, with the same exit codes.
+func ensureHooks(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("hook ensure", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	scriptFlag := fs.String("script", "", "path to claudemux-map.sh; its directory is also where every other shipped script (including claudemux-worktree.sh) is resolved from, so pointing this at a lone claudemux-map.sh silently no-ops the rest (defaults to the copy beside this binary)")
@@ -323,31 +346,7 @@ func copyExecutable(src, dst string) error {
 // directory, not on the file, cannot be observed half-done by a reader, and
 // leaves any process already executing the old inode running it untouched.
 func writeExecutableAtomic(path string, blob []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	if _, err := tmp.Write(blob); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(name)
-		return err
-	}
-	// CreateTemp makes the file 0600; the mode has to be set before the
-	// rename, since the destination inherits the temp file's.
-	if err := os.Chmod(name, 0o755); err != nil {
-		os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		os.Remove(name)
-		return err
-	}
-	return nil
+	return writeAtomic(path, blob, 0o755)
 }
 
 // copyExecutableIfChanged behaves like copyExecutable but skips the write
