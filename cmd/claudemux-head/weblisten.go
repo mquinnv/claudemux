@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -85,4 +86,33 @@ func parseTailscaleIP(out string) (string, error) {
 		return ip, nil
 	}
 	return "", errors.New("tailscale ip -4 printed nothing: is tailscale up?")
+}
+
+// tailscaleMagicDNSSuffix asks the tailscale CLI for this node's MagicDNS
+// suffix, so webGuard can recognise a teammate's full node name (e.g.
+// "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net") as being on the
+// tailnet. Bounded by a timeout for the same reason tailscaleIPv4 is: it
+// runs at lobby start, before the TUI is up.
+func tailscaleMagicDNSSuffix() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
+	if err != nil {
+		return "", fmt.Errorf("tailscale status --json: %w", err)
+	}
+	return parseTailscaleStatusSuffix(string(out))
+}
+
+// parseTailscaleStatusSuffix pulls MagicDNSSuffix out of `tailscale status
+// --json`. A suffix is optional — MagicDNS can be off, in which case the
+// field is empty and webGuard's host check falls back to IP literals and
+// localhost only, the same as when tailscale is not running at all.
+func parseTailscaleStatusSuffix(jsonOut string) (string, error) {
+	var v struct {
+		MagicDNSSuffix string `json:"MagicDNSSuffix"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &v); err != nil {
+		return "", fmt.Errorf("tailscale status --json: %w", err)
+	}
+	return strings.ToLower(strings.Trim(v.MagicDNSSuffix, ".")), nil
 }

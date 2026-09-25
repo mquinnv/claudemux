@@ -11,16 +11,32 @@ import (
 	"time"
 )
 
+// webTestAllowSuffix is the MagicDNS suffix most handler tests build with,
+// so a name under it (not just loopback/IP literals) is reachable in tests
+// that want to exercise the ordinary "teammate on the tailnet" path.
+const webTestAllowSuffix = "nodes.headscale.mage.net"
+
 func webTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	f := newWebFleet()
 	f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
-	return webHandler(f)
+	return webHandler(f, webTestAllowSuffix)
+}
+
+// webTestRequest builds a request that passes webGuard by default (loopback
+// remote, localhost host), so tests that are not about the guard itself
+// don't have to think about it. Guard-specific tests set RemoteAddr/Host
+// explicitly.
+func webTestRequest(method, path string) *http.Request {
+	r := httptest.NewRequest(method, path, nil)
+	r.RemoteAddr = "127.0.0.1:9999"
+	r.Host = "localhost"
+	return r
 }
 
 func TestWebHandlerServesFleetJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
-	webTestHandler(t).ServeHTTP(rec, httptest.NewRequest("GET", "/api/fleet", nil))
+	webTestHandler(t).ServeHTTP(rec, webTestRequest("GET", "/api/fleet"))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
 	}
@@ -29,6 +45,9 @@ func TestWebHandlerServesFleetJSON(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
 	var v webFleetView
 	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
@@ -41,7 +60,7 @@ func TestWebHandlerServesFleetJSON(t *testing.T) {
 
 func TestWebHandlerServesPage(t *testing.T) {
 	rec := httptest.NewRecorder()
-	webTestHandler(t).ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	webTestHandler(t).ServeHTTP(rec, webTestRequest("GET", "/"))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -50,6 +69,12 @@ func TestWebHandlerServesPage(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != webContentSecurityPolicy {
+		t.Errorf("Content-Security-Policy = %q, want %q", got, webContentSecurityPolicy)
 	}
 	body := rec.Body.String()
 	for _, want := range []string{"<title>", "/api/fleet", "read-only", "tailnet"} {
@@ -82,7 +107,7 @@ func TestWebHandlerRejectsOtherMethodsAndPaths(t *testing.T) {
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		h.ServeHTTP(rec, webTestRequest(c.method, c.path))
 		if rec.Code != c.want {
 			t.Errorf("%s %s = %d, want %d", c.method, c.path, rec.Code, c.want)
 		}
@@ -129,7 +154,9 @@ func TestStartWebServerBindsAndStops(t *testing.T) {
 }
 
 func TestStartSwitchboardWebOffWhenUnset(t *testing.T) {
-	w, err := startSwitchboardWeb(defaultConfig(), func() (string, error) { return "100.64.0.15", nil })
+	w, err := startSwitchboardWeb(defaultConfig(),
+		func() (string, error) { return "100.64.0.15", nil },
+		func() (string, error) { return "", nil })
 	if err != nil || w != nil {
 		t.Fatalf("got %+v, %v; want nil, nil for an empty web.listen", w, err)
 	}
@@ -143,7 +170,8 @@ func TestStartSwitchboardWebBindsAndReportsResolveFailure(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Web.Listen = "127.0.0.1:0"
 	cfg.Summary.Enabled = false // no headline worker without a key
-	w, err := startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("unused") })
+	noSuffix := func() (string, error) { return "", nil }
+	w, err := startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("unused") }, noSuffix)
 	if err != nil || w == nil {
 		t.Fatalf("got %+v, %v", w, err)
 	}
@@ -161,8 +189,115 @@ func TestStartSwitchboardWebBindsAndReportsResolveFailure(t *testing.T) {
 	resp.Body.Close()
 
 	cfg.Web.Listen = "tailscale:0"
-	_, err = startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("tailscale ip -4: not running") })
+	_, err = startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("tailscale ip -4: not running") }, noSuffix)
 	if err == nil || !strings.Contains(err.Error(), "tailscale") {
 		t.Fatalf("err = %v, want a tailscale resolve failure", err)
+	}
+}
+
+// TestStartSwitchboardWebMagicDNSFailureIsNotFatal covers the design's
+// "unavailable is not fatal" rule for the MagicDNS suffix lookup: the page
+// still starts, just with the guard's host check falling back to IP
+// literals and localhost only.
+func TestStartSwitchboardWebMagicDNSFailureIsNotFatal(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Web.Listen = "127.0.0.1:0"
+	cfg.Summary.Enabled = false
+	w, err := startSwitchboardWeb(cfg,
+		func() (string, error) { return "100.64.0.15", nil },
+		func() (string, error) { return "", errors.New("tailscale status --json: exec: \"tailscale\": not found") })
+	if err != nil || w == nil {
+		t.Fatalf("a MagicDNS lookup failure must not be fatal: got %+v, %v", w, err)
+	}
+	w.stop()
+}
+
+// TestWebGuard covers webGuard end to end: a request must pass both the
+// RemoteAddr check (loopback or a Tailscale range) and the Host check (an
+// IP literal, "localhost", or a name under the tailnet's MagicDNS suffix)
+// to reach the mux at all.
+func TestWebGuard(t *testing.T) {
+	cases := []struct {
+		name        string
+		remoteAddr  string
+		host        string
+		allowSuffix string
+		want        int
+	}{
+		{"loopback remote, IP host", "127.0.0.1:5555", "127.0.0.1", "", 200},
+		{"tailscale v4 remote, magicdns host", "100.64.0.15:1234", "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net", "nodes.headscale.mage.net", 200},
+		{"same, trailing dot on the request host", "100.64.0.15:1234", "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net.", "nodes.headscale.mage.net", 200},
+		{"tailscale v6 ULA remote, localhost host", "[fd7a:115c:a1e0::f]:1234", "localhost", "", 200},
+		{"lan remote refused", "192.168.1.20:1234", "127.0.0.1", "", 403},
+		{"tailnet remote, unrecognised host refused", "100.64.0.15:1234", "evil.example.com", "nodes.headscale.mage.net", 403},
+		{"empty suffix, dns-name host refused", "127.0.0.1:5555", "some-name.example.com", "", 403},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newWebFleet()
+			f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
+			h := webHandler(f, c.allowSuffix)
+			req := httptest.NewRequest("GET", "/api/fleet", nil)
+			req.RemoteAddr = c.remoteAddr
+			req.Host = c.host
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != c.want {
+				t.Errorf("status = %d, want %d (body %s)", rec.Code, c.want, rec.Body)
+			}
+		})
+	}
+}
+
+func TestWebAllowedRemote(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:9", true},
+		{"[::1]:9", true},
+		{"[::1]", true}, // no port
+		{"100.64.0.15:1234", true},
+		{"100.127.255.254:1", true},
+		{"[fd7a:115c:a1e0::f]:1", true},
+		{"100.63.0.1:1", false},  // just outside the CGNAT /10
+		{"100.128.0.1:1", false}, // just outside the CGNAT /10
+		{"192.168.1.20:1234", false},
+		{"8.8.8.8:53", false},
+		{"not-an-addr", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := webAllowedRemote(c.addr); got != c.want {
+			t.Errorf("webAllowedRemote(%q) = %v, want %v", c.addr, got, c.want)
+		}
+	}
+}
+
+func TestWebAllowedHost(t *testing.T) {
+	cases := []struct {
+		host, suffix string
+		want         bool
+	}{
+		{"127.0.0.1", "", true},
+		{"127.0.0.1:7474", "", true},
+		{"[::1]", "", true},
+		{"[::1]:7474", "", true},
+		{"localhost", "", true},
+		{"LOCALHOST:7474", "", true},
+		{"node.nodes.headscale.mage.net", "nodes.headscale.mage.net", true},
+		{"node.nodes.headscale.mage.net.", "nodes.headscale.mage.net", true}, // trailing dot
+		{"NODE.NODES.HEADSCALE.MAGE.NET", "nodes.headscale.mage.net", true}, // case-insensitive
+		{"nodes.headscale.mage.net", "nodes.headscale.mage.net", true},      // the suffix itself
+		{"evil-nodes.headscale.mage.net", "nodes.headscale.mage.net", false},
+		{"node.nodes.headscale.mage.net.evil.com", "nodes.headscale.mage.net", false},
+		{"evil.example.com", "nodes.headscale.mage.net", false},
+		{"some-name.example.com", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		if got := webAllowedHost(c.host, c.suffix); got != c.want {
+			t.Errorf("webAllowedHost(%q, %q) = %v, want %v", c.host, c.suffix, got, c.want)
+		}
 	}
 }

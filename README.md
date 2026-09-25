@@ -276,6 +276,11 @@ including whatever Wi-Fi the laptop is on; don't. The page is plain HTTP over
 the tailnet's WireGuard tunnel, and never acts on a session — nothing on it can
 defer, jump, or type.
 
+The lobby also refuses requests from outside the tailnet's address ranges and
+from Host names it doesn't recognize, whatever address it's actually bound to
+— so a stray port-forward, or a hostile page that rebinds its own DNS to the
+node's Tailscale address, gets a 403 rather than a look at your prompts.
+
 The headline is a billable call on your key, gated the way the per-session
 summary is: it only fires when a session's state, topic, summary or blocker
 changes, and never more often than `web.headline_interval` (default `2m`). Timers

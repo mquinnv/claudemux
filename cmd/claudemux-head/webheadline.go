@@ -102,27 +102,53 @@ func (s *Summarizer) Headline(ctx context.Context, sessions []swSession) (string
 	return "", errors.New("no headline tool call in response")
 }
 
+// headlineMinRetryBackoff is the floor applied to a retry after a failed
+// call when headline_interval is 0 ("no floor"). Without it, a dead API
+// would be hammered on every poll (as often as every snapshot publish)
+// instead of on the interval a nonzero config would impose.
+const headlineMinRetryBackoff = 30 * time.Second
+
 // headlineGate decides whether a snapshot is worth a call: only when its
 // fingerprint differs from the one last called with, and not within
 // interval of that call. A change that arrives during the cooldown is not
 // lost — the fingerprint stays different, so the next poll after the
 // cooldown fires it. due records the call when it says yes.
+//
+// A failed call must not permanently mark its fingerprint as delivered —
+// onFailure clears lastFP (keeping lastCall, so the normal interval/backoff
+// still applies) so the same fingerprint becomes due again once enough time
+// has passed, instead of being silently skipped forever because it happens
+// to match what a failed attempt already "consumed".
 type headlineGate struct {
 	interval time.Duration
 	lastFP   string
 	lastCall time.Time
+	failed   bool
 }
 
 func (g *headlineGate) due(fp string, now time.Time) bool {
 	if fp == g.lastFP {
 		return false
 	}
-	if !g.lastCall.IsZero() && now.Sub(g.lastCall) < g.interval {
+	wait := g.interval
+	if g.failed && wait == 0 {
+		wait = headlineMinRetryBackoff
+	}
+	if !g.lastCall.IsZero() && now.Sub(g.lastCall) < wait {
 		return false
 	}
 	g.lastFP = fp
 	g.lastCall = now
+	g.failed = false
 	return true
+}
+
+// onFailure records that the call due() just approved did not succeed, so
+// the fingerprint it was called with becomes due again after the backoff
+// rather than being treated as already-delivered.
+func (g *headlineGate) onFailure() {
+	g.lastFP = ""
+	g.failed = true
 }
 
 // webHeadlineWorker is the goroutine that turns fleet changes into
@@ -134,7 +160,8 @@ type webHeadlineWorker struct {
 	s        *Summarizer
 	gate     headlineGate
 	wake     chan struct{}
-	quit     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 	done     chan struct{}
 	stopOnce sync.Once
 }
@@ -145,13 +172,15 @@ func startHeadlineWorker(f *webFleet, s *Summarizer, interval time.Duration) *we
 	if s == nil {
 		return nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	w := &webHeadlineWorker{
-		fleet: f,
-		s:     s,
-		gate:  headlineGate{interval: interval},
-		wake:  make(chan struct{}, 1),
-		quit:  make(chan struct{}),
-		done:  make(chan struct{}),
+		fleet:  f,
+		s:      s,
+		gate:   headlineGate{interval: interval},
+		wake:   make(chan struct{}, 1),
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 	go w.run()
 	return w
@@ -171,12 +200,15 @@ func (w *webHeadlineWorker) poke() {
 
 // stop is nil-safe and idempotent: the lobby stops the page from both its
 // quit path (a deferred call) and its restart path (an explicit call before
-// exec), and both may run.
+// exec), and both may run. Cancelling ctx (rather than only signalling the
+// select loop) also cancels any in-flight Headline call's context, since
+// each call's context is derived from it — stop() no longer has to wait out
+// summaryRequestTimeout for a call that was already in flight.
 func (w *webHeadlineWorker) stop() {
 	if w == nil {
 		return
 	}
-	w.stopOnce.Do(func() { close(w.quit) })
+	w.stopOnce.Do(func() { w.cancel() })
 	<-w.done
 }
 
@@ -184,7 +216,7 @@ func (w *webHeadlineWorker) run() {
 	defer close(w.done)
 	for {
 		select {
-		case <-w.quit:
+		case <-w.ctx.Done():
 			return
 		case <-w.wake:
 		}
@@ -196,11 +228,12 @@ func (w *webHeadlineWorker) run() {
 		if !w.gate.due(fp, time.Now()) {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), summaryRequestTimeout)
+		ctx, cancel := context.WithTimeout(w.ctx, summaryRequestTimeout)
 		text, err := w.s.Headline(ctx, sessions)
 		cancel()
 		if err != nil {
 			teardownLogf("web: headline: %v", err)
+			w.gate.onFailure()
 			continue
 		}
 		w.fleet.setHeadline(webHeadline{Text: text, At: time.Now(), Fingerprint: fp})

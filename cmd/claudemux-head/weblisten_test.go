@@ -75,6 +75,35 @@ func TestResolveWebListenTailscale(t *testing.T) {
 	}
 }
 
+func TestParseTailscaleStatusSuffix(t *testing.T) {
+	cases := []struct {
+		name    string
+		out     string
+		want    string
+		errPart string
+	}{
+		{name: "ordinary suffix", out: `{"MagicDNSSuffix":"nodes.headscale.mage.net"}`, want: "nodes.headscale.mage.net"},
+		{name: "trailing dot and mixed case", out: `{"MagicDNSSuffix":"Nodes.Headscale.Mage.Net."}`, want: "nodes.headscale.mage.net"},
+		{name: "magicdns off", out: `{"MagicDNSSuffix":""}`, want: ""},
+		{name: "field absent", out: `{"Self":{}}`, want: ""},
+		{name: "not json", out: "tailscale is stopped", errPart: "tailscale status"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseTailscaleStatusSuffix(c.out)
+			if c.errPart != "" {
+				if err == nil || !strings.Contains(err.Error(), c.errPart) {
+					t.Fatalf("err = %v, want one mentioning %q", err, c.errPart)
+				}
+				return
+			}
+			if err != nil || got != c.want {
+				t.Errorf("parseTailscaleStatusSuffix(%q) = %q, %v; want %q", c.out, got, err, c.want)
+			}
+		})
+	}
+}
+
 func TestParseTailscaleIP(t *testing.T) {
 	cases := []struct {
 		out     string

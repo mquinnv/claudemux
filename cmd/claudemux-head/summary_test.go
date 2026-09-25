@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -192,17 +194,41 @@ func TestCondenseTranscriptAssistantToolOnlyEmitsNoBlankLine(t *testing.T) {
 type fakeDoer struct {
 	body      string
 	status    int
-	err       error
+	block     bool // Do blocks on req.Context().Done() instead of returning
 	gotReq    map[string]any
 	gotHeader http.Header
 	gotURL    *url.URL
-	calls     int
+	// calls is atomic because some tests poll it from a goroutine other than
+	// the one driving the Summarizer (e.g. the headline worker's own
+	// goroutine), with no other synchronization between the write and read.
+	calls atomic.Int64
+	// errMu guards err: a couple of tests flip it from the main goroutine
+	// while the headline worker's own goroutine may be reading it in Do.
+	errMu sync.Mutex
+	err   error
+}
+
+// setErr changes the error Do returns, safe to call from any goroutine.
+func (f *fakeDoer) setErr(err error) {
+	f.errMu.Lock()
+	defer f.errMu.Unlock()
+	f.err = err
+}
+
+func (f *fakeDoer) getErr() error {
+	f.errMu.Lock()
+	defer f.errMu.Unlock()
+	return f.err
 }
 
 func (f *fakeDoer) Do(req *http.Request) (*http.Response, error) {
-	f.calls++
-	if f.err != nil {
-		return nil, f.err
+	f.calls.Add(1)
+	if f.block {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
+	if err := f.getErr(); err != nil {
+		return nil, err
 	}
 	f.gotHeader = req.Header
 	f.gotURL = req.URL
@@ -533,8 +559,8 @@ func TestNewSummarizerCapsRetriesOnCallerOptionsPath(t *testing.T) {
 	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
 		t.Fatal("Summarize() error = nil, want an error from the fake 500 responses")
 	}
-	if d.calls != 2 {
-		t.Errorf("request attempts = %d, want 2 (1 initial + WithMaxRetries(1)); the retry cap must apply on the caller-options path too", d.calls)
+	if d.calls.Load() != 2 {
+		t.Errorf("request attempts = %d, want 2 (1 initial + WithMaxRetries(1)); the retry cap must apply on the caller-options path too", d.calls.Load())
 	}
 }
 

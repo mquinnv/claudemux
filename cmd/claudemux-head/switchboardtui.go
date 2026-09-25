@@ -1564,7 +1564,7 @@ func runSwitchboard(stderr io.Writer) int {
 		return 1
 	}
 	m := newSwModel(selfPane)
-	web, werr := startSwitchboardWeb(cfg, tailscaleIPv4)
+	web, werr := startSwitchboardWeb(cfg, tailscaleIPv4, tailscaleMagicDNSSuffix)
 	if werr != nil {
 		m.webErr = werr.Error()
 	} else if web != nil {
