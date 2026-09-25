@@ -20,7 +20,7 @@ func webTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	f := newWebFleet()
 	f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
-	return webHandler(f, webTestAllowSuffix)
+	return webHandler(f, webAllow{Suffix: webTestAllowSuffix})
 }
 
 // webTestRequest builds a request that passes webGuard by default (loopback
@@ -156,7 +156,7 @@ func TestStartWebServerBindsAndStops(t *testing.T) {
 func TestStartSwitchboardWebOffWhenUnset(t *testing.T) {
 	w, err := startSwitchboardWeb(defaultConfig(),
 		func() (string, error) { return "100.64.0.15", nil },
-		func() (string, error) { return "", nil })
+		func() (webAllow, error) { return webAllow{}, nil })
 	if err != nil || w != nil {
 		t.Fatalf("got %+v, %v; want nil, nil for an empty web.listen", w, err)
 	}
@@ -170,7 +170,7 @@ func TestStartSwitchboardWebBindsAndReportsResolveFailure(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Web.Listen = "127.0.0.1:0"
 	cfg.Summary.Enabled = false // no headline worker without a key
-	noSuffix := func() (string, error) { return "", nil }
+	noSuffix := func() (webAllow, error) { return webAllow{}, nil }
 	w, err := startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("unused") }, noSuffix)
 	if err != nil || w == nil {
 		t.Fatalf("got %+v, %v", w, err)
@@ -205,7 +205,7 @@ func TestStartSwitchboardWebMagicDNSFailureIsNotFatal(t *testing.T) {
 	cfg.Summary.Enabled = false
 	w, err := startSwitchboardWeb(cfg,
 		func() (string, error) { return "100.64.0.15", nil },
-		func() (string, error) { return "", errors.New("tailscale status --json: exec: \"tailscale\": not found") })
+		func() (webAllow, error) { return webAllow{}, errors.New("tailscale status --json: exec: \"tailscale\": not found") })
 	if err != nil || w == nil {
 		t.Fatalf("a MagicDNS lookup failure must not be fatal: got %+v, %v", w, err)
 	}
@@ -218,25 +218,31 @@ func TestStartSwitchboardWebMagicDNSFailureIsNotFatal(t *testing.T) {
 // to reach the mux at all.
 func TestWebGuard(t *testing.T) {
 	cases := []struct {
-		name        string
-		remoteAddr  string
-		host        string
-		allowSuffix string
-		want        int
+		name       string
+		remoteAddr string
+		host       string
+		allow      webAllow
+		want       int
 	}{
-		{"loopback remote, IP host", "127.0.0.1:5555", "127.0.0.1", "", 200},
-		{"tailscale v4 remote, magicdns host", "100.64.0.15:1234", "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net", "nodes.headscale.mage.net", 200},
-		{"same, trailing dot on the request host", "100.64.0.15:1234", "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net.", "nodes.headscale.mage.net", 200},
-		{"tailscale v6 ULA remote, localhost host", "[fd7a:115c:a1e0::f]:1234", "localhost", "", 200},
-		{"lan remote refused", "192.168.1.20:1234", "127.0.0.1", "", 403},
-		{"tailnet remote, unrecognised host refused", "100.64.0.15:1234", "evil.example.com", "nodes.headscale.mage.net", 403},
-		{"empty suffix, dns-name host refused", "127.0.0.1:5555", "some-name.example.com", "", 403},
+		{"loopback remote, IP host", "127.0.0.1:5555", "127.0.0.1", webAllow{}, 200},
+		{"tailscale v4 remote, magicdns host", "100.64.0.15:1234", "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net"}, 200},
+		{"same, trailing dot on the request host", "100.64.0.15:1234", "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net.", webAllow{Suffix: "nodes.headscale.mage.net"}, 200},
+		{"tailscale v6 ULA remote, localhost host", "[fd7a:115c:a1e0::f]:1234", "localhost", webAllow{}, 200},
+		{"lan remote refused", "192.168.1.20:1234", "127.0.0.1", webAllow{}, 403},
+		{"tailnet remote, unrecognised host refused", "100.64.0.15:1234", "evil.example.com", webAllow{Suffix: "nodes.headscale.mage.net"}, 403},
+		{"empty suffix, dns-name host refused", "127.0.0.1:5555", "some-name.example.com", webAllow{}, 403},
+		{"bare short name, ShortName set", "100.64.0.15:1234", "michaels-claudes", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, 200},
+		{"bare short name, upper-case with port", "100.64.0.15:1234", "MICHAELS-CLAUDES:7474", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, 200},
+		{"different single-label name refused", "100.64.0.15:1234", "other-node", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, 403},
+		{"bare short name, empty ShortName refused", "100.64.0.15:1234", "michaels-claudes", webAllow{Suffix: "nodes.headscale.mage.net"}, 403},
+		{"unrecognised host still refused even with ShortName set", "100.64.0.15:1234", "evil.example.com", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, 403},
+		{"full node name under suffix still 200 with ShortName set", "100.64.0.15:1234", "michaels-claudes.nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, 200},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newWebFleet()
 			f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
-			h := webHandler(f, c.allowSuffix)
+			h := webHandler(f, c.allow)
 			req := httptest.NewRequest("GET", "/api/fleet", nil)
 			req.RemoteAddr = c.remoteAddr
 			req.Host = c.host
@@ -276,28 +282,36 @@ func TestWebAllowedRemote(t *testing.T) {
 
 func TestWebAllowedHost(t *testing.T) {
 	cases := []struct {
-		host, suffix string
-		want         bool
+		host  string
+		allow webAllow
+		want  bool
 	}{
-		{"127.0.0.1", "", true},
-		{"127.0.0.1:7474", "", true},
-		{"[::1]", "", true},
-		{"[::1]:7474", "", true},
-		{"localhost", "", true},
-		{"LOCALHOST:7474", "", true},
-		{"node.nodes.headscale.mage.net", "nodes.headscale.mage.net", true},
-		{"node.nodes.headscale.mage.net.", "nodes.headscale.mage.net", true}, // trailing dot
-		{"NODE.NODES.HEADSCALE.MAGE.NET", "nodes.headscale.mage.net", true}, // case-insensitive
-		{"nodes.headscale.mage.net", "nodes.headscale.mage.net", true},      // the suffix itself
-		{"evil-nodes.headscale.mage.net", "nodes.headscale.mage.net", false},
-		{"node.nodes.headscale.mage.net.evil.com", "nodes.headscale.mage.net", false},
-		{"evil.example.com", "nodes.headscale.mage.net", false},
-		{"some-name.example.com", "", false},
-		{"", "", false},
+		{"127.0.0.1", webAllow{}, true},
+		{"127.0.0.1:7474", webAllow{}, true},
+		{"[::1]", webAllow{}, true},
+		{"[::1]:7474", webAllow{}, true},
+		{"localhost", webAllow{}, true},
+		{"LOCALHOST:7474", webAllow{}, true},
+		{"node.nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net"}, true},
+		{"node.nodes.headscale.mage.net.", webAllow{Suffix: "nodes.headscale.mage.net"}, true}, // trailing dot
+		{"NODE.NODES.HEADSCALE.MAGE.NET", webAllow{Suffix: "nodes.headscale.mage.net"}, true},  // case-insensitive
+		{"nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net"}, true},       // the suffix itself
+		{"evil-nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net"}, false},
+		{"node.nodes.headscale.mage.net.evil.com", webAllow{Suffix: "nodes.headscale.mage.net"}, false},
+		{"evil.example.com", webAllow{Suffix: "nodes.headscale.mage.net"}, false},
+		{"some-name.example.com", webAllow{}, false},
+		{"", webAllow{}, false},
+		// The bare short name: a single-label host equal to allow.ShortName.
+		{"michaels-claudes", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, true},
+		{"MICHAELS-CLAUDES:7474", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, true},
+		{"other-node", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, false},
+		{"michaels-claudes", webAllow{Suffix: "nodes.headscale.mage.net"}, false}, // ShortName empty
+		{"michaels-claudes", webAllow{}, false},                                  // ShortName empty, no suffix either
+		{"michaels-claudes.nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, true},
 	}
 	for _, c := range cases {
-		if got := webAllowedHost(c.host, c.suffix); got != c.want {
-			t.Errorf("webAllowedHost(%q, %q) = %v, want %v", c.host, c.suffix, got, c.want)
+		if got := webAllowedHost(c.host, c.allow); got != c.want {
+			t.Errorf("webAllowedHost(%q, %+v) = %v, want %v", c.host, c.allow, got, c.want)
 		}
 	}
 }

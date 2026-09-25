@@ -88,31 +88,57 @@ func parseTailscaleIP(out string) (string, error) {
 	return "", errors.New("tailscale ip -4 printed nothing: is tailscale up?")
 }
 
-// tailscaleMagicDNSSuffix asks the tailscale CLI for this node's MagicDNS
-// suffix, so webGuard can recognise a teammate's full node name (e.g.
-// "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net") as being on the
-// tailnet. Bounded by a timeout for the same reason tailscaleIPv4 is: it
-// runs at lobby start, before the TUI is up.
-func tailscaleMagicDNSSuffix() (string, error) {
+// webAllow is what webGuard accepts as a request Host beyond IP literals
+// and localhost: names under Suffix, and the bare ShortName — the first
+// label of this node's own MagicDNS name, which a tailnet peer types
+// because the suffix is a search domain. Either may be "" (MagicDNS off,
+// or tailscale not running), which allows nothing extra.
+type webAllow struct {
+	Suffix    string
+	ShortName string
+}
+
+// tailscaleStatusAllow asks the tailscale CLI for this node's MagicDNS
+// suffix and this node's own DNS short name, so webGuard can recognise
+// both a teammate's full node name (e.g.
+// "michaelsmacbookpro2-q6uplpux.nodes.headscale.mage.net") and the bare
+// short name a teammate types because the suffix is a DNS search domain
+// (e.g. "michaels-claudes") as being on the tailnet. Bounded by a timeout
+// for the same reason tailscaleIPv4 is: it runs at lobby start, before the
+// TUI is up.
+func tailscaleStatusAllow() (webAllow, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
 	if err != nil {
-		return "", fmt.Errorf("tailscale status --json: %w", err)
+		return webAllow{}, fmt.Errorf("tailscale status --json: %w", err)
 	}
-	return parseTailscaleStatusSuffix(string(out))
+	return parseTailscaleStatus(string(out))
 }
 
-// parseTailscaleStatusSuffix pulls MagicDNSSuffix out of `tailscale status
-// --json`. A suffix is optional — MagicDNS can be off, in which case the
-// field is empty and webGuard's host check falls back to IP literals and
+// parseTailscaleStatus pulls MagicDNSSuffix and this node's own DNS short
+// name (the first label of Self.DNSName) out of `tailscale status --json`.
+// Both are optional — MagicDNS can be off, or Self.DNSName can be absent —
+// in which case webGuard's host check falls back to IP literals and
 // localhost only, the same as when tailscale is not running at all.
-func parseTailscaleStatusSuffix(jsonOut string) (string, error) {
+func parseTailscaleStatus(jsonOut string) (webAllow, error) {
 	var v struct {
 		MagicDNSSuffix string `json:"MagicDNSSuffix"`
+		Self           struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
 	}
 	if err := json.Unmarshal([]byte(jsonOut), &v); err != nil {
-		return "", fmt.Errorf("tailscale status --json: %w", err)
+		return webAllow{}, fmt.Errorf("tailscale status --json: %w", err)
 	}
-	return strings.ToLower(strings.Trim(v.MagicDNSSuffix, ".")), nil
+	allow := webAllow{Suffix: strings.ToLower(strings.Trim(v.MagicDNSSuffix, "."))}
+	name := strings.ToLower(strings.Trim(v.Self.DNSName, "."))
+	if name != "" {
+		if i := strings.Index(name, "."); i >= 0 {
+			allow.ShortName = name[:i]
+		} else {
+			allow.ShortName = name
+		}
+	}
+	return allow, nil
 }
