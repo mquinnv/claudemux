@@ -462,6 +462,21 @@ running". It clears on your next prompt or Claude's next turn.
 
 `claudemux-head hook ensure` installs and repairs all three scripts together.
 
+## The handoff skill
+
+claudemux also ships a Claude Code skill, `claudemux-handoff`, for when a session finds
+work that belongs in *another* repo. A subagent is the wrong tool there: it inherits this
+session's directory, hooks, `CLAUDE.md` and worktree. The skill has Claude launch a peer
+session rooted in the other directory (`claudemux -d -w -N <name> <dir>`), find it with
+`ListAgents`, and hand over a self-contained brief with `SendMessage`, asking to be told
+when the peer goes idle.
+
+It is installed the same way as the hooks: `hook ensure` writes it to
+`~/.claude/skills/claudemux-handoff/` on every channel, and rewrites it when an upgrade
+changes it. The skill is embedded in `claudemux-head` (source:
+`cmd/claudemux-head/skills/`), so it always matches the launcher flags it documents.
+claudemux owns that directory, and a local edit to it is replaced on the next launch.
+
 ## The statusline command and the account meters
 
 The `5h` and `wk` gauges in the head and the switchboard come from Claude Code itself.
