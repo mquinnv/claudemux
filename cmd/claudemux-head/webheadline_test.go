@@ -159,3 +159,10 @@ func TestHeadlineWorkerNilSummarizerIsInert(t *testing.T) {
 	w.poke() // nil-safe
 	w.stop() // nil-safe
 }
+
+func TestHeadlineWorkerStopIsIdempotent(t *testing.T) {
+	f := newWebFleet()
+	w := startHeadlineWorker(f, testSummarizer(&fakeDoer{body: headlineResponse("x")}), 0)
+	w.stop()
+	w.stop() // the lobby stops the page from both its quit and restart paths
+}

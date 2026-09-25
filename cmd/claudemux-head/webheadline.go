@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -129,12 +130,13 @@ func (g *headlineGate) due(fp string, now time.Time) bool {
 // the gate, whether that beat is worth a call. One goroutine, one call at a
 // time: a slow API stretches the interval rather than stacking requests.
 type webHeadlineWorker struct {
-	fleet *webFleet
-	s     *Summarizer
-	gate  headlineGate
-	wake  chan struct{}
-	quit  chan struct{}
-	done  chan struct{}
+	fleet    *webFleet
+	s        *Summarizer
+	gate     headlineGate
+	wake     chan struct{}
+	quit     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // startHeadlineWorker returns nil when there is no summarizer (summaries
@@ -167,11 +169,14 @@ func (w *webHeadlineWorker) poke() {
 	}
 }
 
+// stop is nil-safe and idempotent: the lobby stops the page from both its
+// quit path (a deferred call) and its restart path (an explicit call before
+// exec), and both may run.
 func (w *webHeadlineWorker) stop() {
 	if w == nil {
 		return
 	}
-	close(w.quit)
+	w.stopOnce.Do(func() { close(w.quit) })
 	<-w.done
 }
 

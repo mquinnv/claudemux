@@ -34,9 +34,12 @@ func parseWebListen(s string) (webListen, bool, error) {
 	if err != nil {
 		return webListen{}, false, fmt.Errorf("web.listen is %q: must be host:port, like \"tailscale:7474\" or \"127.0.0.1:7474\"", s)
 	}
+	// 0 is legal: like net.Listen, it means "let the OS pick a free port",
+	// which is how the tests (and TestStartSwitchboardWebBindsAndReportsResolveFailure
+	// in particular) bind without racing for a fixed one.
 	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return webListen{}, false, fmt.Errorf("web.listen is %q: port must be a number from 1 to 65535", s)
+	if err != nil || n < 0 || n > 65535 {
+		return webListen{}, false, fmt.Errorf("web.listen is %q: port must be a number from 0 to 65535", s)
 	}
 	return webListen{Host: host, Port: port, Tailscale: host == webTailscaleHost}, true, nil
 }

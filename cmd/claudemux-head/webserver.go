@@ -115,3 +115,48 @@ func (s *webServer) stop() {
 		}
 	})
 }
+
+// swWeb is everything the lobby owns for the page: the holder its polls
+// publish to, the worker it pokes, and the server. Built once in
+// runSwitchboard, stopped on every exit path.
+type swWeb struct {
+	fleet  *webFleet
+	worker *webHeadlineWorker
+	server *webServer
+}
+
+// startSwitchboardWeb reads web.listen and stands the page up. nil, nil
+// means the page is off. An error means the page could not start — the
+// lobby shows it and runs on without one.
+func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error)) (*swWeb, error) {
+	l, on, err := parseWebListen(cfg.Web.Listen)
+	if err != nil || !on {
+		return nil, err
+	}
+	addr, err := resolveWebListen(l, tailscaleIP)
+	if err != nil {
+		return nil, err
+	}
+	fleet := newWebFleet()
+	server, err := startWebServer(addr, webHandler(fleet))
+	if err != nil {
+		return nil, err
+	}
+	worker := startHeadlineWorker(fleet, newSummarizer(cfg.Summary), cfg.Web.HeadlineInterval.Duration)
+	return &swWeb{fleet: fleet, worker: worker, server: server}, nil
+}
+
+func (w *swWeb) addr() string {
+	if w == nil {
+		return ""
+	}
+	return w.server.addr()
+}
+
+func (w *swWeb) stop() {
+	if w == nil {
+		return
+	}
+	w.server.stop()
+	w.worker.stop()
+}

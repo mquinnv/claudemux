@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -124,5 +125,44 @@ func TestStartWebServerBindsAndStops(t *testing.T) {
 	nilServer.stop() // nil-safe
 	if _, err := http.Get("http://" + s.addr() + "/api/fleet"); err == nil {
 		t.Error("GET after stop must fail")
+	}
+}
+
+func TestStartSwitchboardWebOffWhenUnset(t *testing.T) {
+	w, err := startSwitchboardWeb(defaultConfig(), func() (string, error) { return "100.64.0.15", nil })
+	if err != nil || w != nil {
+		t.Fatalf("got %+v, %v; want nil, nil for an empty web.listen", w, err)
+	}
+	w.stop() // nil-safe
+	if w.addr() != "" {
+		t.Error("nil swWeb must have no address")
+	}
+}
+
+func TestStartSwitchboardWebBindsAndReportsResolveFailure(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Web.Listen = "127.0.0.1:0"
+	cfg.Summary.Enabled = false // no headline worker without a key
+	w, err := startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("unused") })
+	if err != nil || w == nil {
+		t.Fatalf("got %+v, %v", w, err)
+	}
+	defer w.stop()
+	if !strings.HasPrefix(w.addr(), "127.0.0.1:") {
+		t.Errorf("addr = %q", w.addr())
+	}
+	if w.worker != nil {
+		t.Error("summaries disabled must mean no headline worker")
+	}
+	resp, err := http.Get("http://" + w.addr() + "/api/fleet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	cfg.Web.Listen = "tailscale:0"
+	_, err = startSwitchboardWeb(cfg, func() (string, error) { return "", errors.New("tailscale ip -4: not running") })
+	if err == nil || !strings.Contains(err.Error(), "tailscale") {
+		t.Fatalf("err = %v, want a tailscale resolve failure", err)
 	}
 }
