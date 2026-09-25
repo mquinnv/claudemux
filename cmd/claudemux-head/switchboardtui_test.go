@@ -1847,3 +1847,35 @@ func TestSwViewShowsBadgeAndHoldsNameColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestSwSnapshotPublishesToWebFleet(t *testing.T) {
+	m := swTestModel()
+	m.web = newWebFleet()
+	next, _ := m.Update(swSnapshotMsg{snap: m.snap, at: time.Now()})
+	if v := next.(swModel).web.view(); len(v.Sessions) != 3 {
+		t.Fatalf("web fleet after a snapshot has %d sessions, want 3", len(v.Sessions))
+	}
+	// A tmux error keeps the old fleet on the page rather than blanking it.
+	next, _ = next.(swModel).Update(swSnapshotMsg{at: time.Now(), err: errors.New("tmux is wedged")})
+	if v := next.(swModel).web.view(); len(v.Sessions) != 3 {
+		t.Errorf("a failed poll must not empty the web fleet, got %d sessions", len(v.Sessions))
+	}
+}
+
+func TestSwViewShowsWebAddressOrError(t *testing.T) {
+	m := swTestModel()
+	m.webAddr = "100.64.0.15:7474"
+	if out := m.View(); !strings.Contains(out, "http://100.64.0.15:7474/") {
+		t.Errorf("title must show the page URL; got first line %q", strings.SplitN(out, "\n", 2)[0])
+	}
+	m.webAddr = ""
+	m.webErr = "listen tcp 100.64.0.15:7474: bind: address already in use"
+	out := m.View()
+	if !strings.Contains(out, "web: listen tcp") {
+		t.Errorf("title must show the web error; got first line %q", strings.SplitN(out, "\n", 2)[0])
+	}
+	next, _ := m.Update(swSnapshotMsg{snap: m.snap, at: time.Now()})
+	if !strings.Contains(next.(swModel).View(), "web: listen tcp") {
+		t.Error("the web error must survive a successful poll (unlike lastErr)")
+	}
+}

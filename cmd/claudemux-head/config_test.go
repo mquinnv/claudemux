@@ -638,3 +638,54 @@ func TestLoadConfigProjectDirsAreAbsolute(t *testing.T) {
 		t.Errorf("launch.project_dirs[0] = %q, want an absolute path", cfg.Launch.ProjectDirs[0])
 	}
 }
+
+func TestLoadConfigWebDefaultsOff(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Web.Listen != "" {
+		t.Errorf("Web.Listen = %q, want \"\" (off) by default", cfg.Web.Listen)
+	}
+	if cfg.Web.HeadlineInterval.Duration != 2*time.Minute {
+		t.Errorf("Web.HeadlineInterval = %v, want 2m", cfg.Web.HeadlineInterval.Duration)
+	}
+}
+
+func TestLoadConfigWebSectionParses(t *testing.T) {
+	writeConfig(t, "web:\n  listen: tailscale:7474\n  headline_interval: 30s\n")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Web.Listen != "tailscale:7474" {
+		t.Errorf("Web.Listen = %q", cfg.Web.Listen)
+	}
+	if cfg.Web.HeadlineInterval.Duration != 30*time.Second {
+		t.Errorf("Web.HeadlineInterval = %v, want 30s", cfg.Web.HeadlineInterval.Duration)
+	}
+}
+
+func TestLoadConfigWebBadListenIsFatal(t *testing.T) {
+	writeConfig(t, "web:\n  listen: tailscale:http\n")
+	_, err := loadConfig()
+	if err == nil || !strings.Contains(err.Error(), "web.listen") {
+		t.Fatalf("loadConfig() err = %v, want one naming web.listen", err)
+	}
+}
+
+func TestLoadConfigWebNegativeHeadlineIntervalIsFatal(t *testing.T) {
+	writeConfig(t, "web:\n  headline_interval: -1m\n")
+	_, err := loadConfig()
+	if err == nil || !strings.Contains(err.Error(), "web.headline_interval") {
+		t.Fatalf("loadConfig() err = %v, want one naming web.headline_interval", err)
+	}
+}
+
+func TestLoadConfigWebZeroHeadlineIntervalIsAllowed(t *testing.T) {
+	writeConfig(t, "web:\n  headline_interval: 0s\n")
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig() err = %v, want nil — zero is the documented opt-out", err)
+	}
+}

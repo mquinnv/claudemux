@@ -345,6 +345,16 @@ type swModel struct {
 	restore        *swRestoreOffer
 	restoreScanned bool
 	restoreArchive func(*swRestoreOffer)
+	// The web status page (webserver.go). web is the holder every snapshot
+	// is published to and headliner the worker poked after it — both nil
+	// when web.listen is unset. webAddr is the bound address for the title
+	// row; webErr is why the page could not start, kept apart from lastErr
+	// because that one is cleared by every successful poll and this one
+	// is not a poll's business.
+	web       *webFleet
+	headliner *webHeadlineWorker
+	webAddr   string
+	webErr    string
 }
 
 func newSwModel(selfPane string) swModel {
@@ -705,6 +715,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			selName = m.snap.Sessions[m.sel].Name
 		}
 		m.snap = msg.snap
+		if m.web != nil {
+			m.web.publish(m.snap, m.rateLimits, m.rateOK, m.modelWindows, msg.at)
+			m.headliner.poke()
+		}
 		// The scan needs the live fleet to exclude sessions already running
 		// again, so it waits for the first successful snapshot rather than
 		// running at startup — and runs only once per lobby.
@@ -1168,6 +1182,12 @@ func (m swModel) View() string {
 	now := time.Now()
 	var b strings.Builder
 	title := swTitleStyle.Render("claudemux switchboard") + "  " + swModeBadge(m.standby, m.cond.phase)
+	switch {
+	case m.webAddr != "":
+		title += "  " + swStatusStyle.Render("http://"+m.webAddr+"/")
+	case m.webErr != "":
+		title += "  " + swWaitStyle.Render("web: "+m.webErr)
+	}
 	if m.width > 0 {
 		title = clipLine(title, m.width)
 	}
@@ -1536,7 +1556,23 @@ func runSwitchboard(stderr io.Writer) int {
 		fmt.Fprintln(stderr, "claudemux-head switchboard must run inside tmux (start it with `claudemux switch`)")
 		return 1
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		// Same rule as the session head: a config that exists but does not
+		// parse must not be silently replaced by defaults.
+		fmt.Fprintf(stderr, "Error loading config: %v\n", err)
+		return 1
+	}
 	m := newSwModel(selfPane)
+	web, werr := startSwitchboardWeb(cfg, tailscaleIPv4, tailscaleMagicDNSSuffix)
+	if werr != nil {
+		m.webErr = werr.Error()
+	} else if web != nil {
+		m.web, m.headliner, m.webAddr = web.fleet, web.worker, web.addr()
+	}
+	// The quit path stops the page here; the restart path below stops it
+	// explicitly before exec, since a deferred call never runs past one.
+	defer web.stop()
 	// A handoff file means the process this one is replacing wrote its
 	// conductor state on the way out, seconds ago. Adopt it so the snoozes and
 	// the escort survive an upgrade; anything stale is ignored and removed by
@@ -1545,9 +1581,9 @@ func runSwitchboard(stderr io.Writer) int {
 		m.cond = c
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	final, err := p.Run()
-	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
+	final, runErr := p.Run()
+	if runErr != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", runErr)
 		return 1
 	}
 	// Same re-exec-after-Run contract as main()'s session-head path: the
@@ -1555,6 +1591,7 @@ func runSwitchboard(stderr io.Writer) int {
 	// exec leaves the pane open with the reason visible.
 	if fm, ok := final.(swModel); ok && fm.restart {
 		_ = writeConductHandoff(defaultConductHandoffPath(), fm.cond, time.Now())
+		web.stop()
 		restartSelf(stderr)
 		return 1
 	}

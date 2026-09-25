@@ -251,6 +251,52 @@ The offer is made once per boot: whatever you choose, the records move to
 never offered, and neither are sessions you closed well before the reboot —
 only the ones that stopped together, within ten minutes of the last.
 
+### Sharing the fleet on the tailnet
+
+With `web.listen` set, the lobby also serves a **web status page**: a read-only
+view of the same fleet, for teammates who want to see what you're working on
+without asking. Set it once in `config.yml`:
+
+```yaml
+web:
+  listen: tailscale:7474
+```
+
+and the lobby's title row shows the URL it bound — `http://100.64.0.15:7474/`,
+or the node's MagicDNS name on that port. The page leads with a one-sentence
+**headline** for the whole fleet (Haiku, same key and `summary.enabled` switch
+as the per-session summaries; the header shows plain counts until the first one
+lands), then the account's 5-hour and weekly gauges, then one card per session
+with what its lobby row shows: name in the project color, state and time in it,
+context %, model, topic, running summary and last prompt, with deferred sessions
+and their blockers parked at the bottom under a rule. It refreshes itself every
+three seconds and dims with "lobby not reachable" when the lobby is gone.
+
+The page is up exactly when the lobby is; closing the lobby closes it. It does
+no authentication: reachability is the tailnet's job, which is why the
+`tailscale` keyword exists — it binds the Tailscale interface only, so nothing
+off the tailnet can reach it. `web.listen: ":7474"` would bind every interface,
+including whatever Wi-Fi the laptop is on; don't. The page is plain HTTP over
+the tailnet's WireGuard tunnel, and never acts on a session — nothing on it can
+defer, jump, or type.
+
+The lobby also refuses requests from outside the tailnet's address ranges and
+from Host names it doesn't recognize, whatever address it's actually bound to
+— so a stray port-forward, or a hostile page that rebinds its own DNS to the
+node's Tailscale address, gets a 403 rather than a look at your prompts.
+
+The headline is a billable call on your key, gated the way the per-session
+summary is: it only fires when a session's state, topic, summary or blocker
+changes, and never more often than `web.headline_interval` (default `2m`). Timers
+and context percentages ticking never trigger it. The raw prompt line is shown
+on the page but never sent to the model. A call that fails keeps the previous
+headline on the page, marked as out of date until the next one succeeds.
+
+If the address can't be bound — the port is taken, or `tailscale ip -4` has
+nothing to say because tailscale is down — the lobby starts anyway and puts the
+reason in its title row where the URL would be. Fix it and restart the lobby
+(`R`).
+
 Under the title, the lobby shows the same account budget meters as the head:
 the 5-hour and weekly rate-limit gauges with their reset times (and an
 "empty in X" projection when usage is climbing), so you can see the account's
@@ -518,6 +564,10 @@ launch:
 
 teardown:
   command: /done
+
+web:
+  listen: ""
+  headline_interval: 2m
 ```
 
 - `summary.enabled` — turn the LLM summary off entirely (see **Billing** below).
@@ -646,6 +696,16 @@ teardown:
   pane when you press `x`, and the one it watches for when you type it there yourself
   (see **Tearing down a session** below). Default `/done`. Set it to `""` to skip that
   step, making `x` a gated exit-and-kill — with nothing left to watch for either.
+- `web.listen` — where the switchboard serves its web status page (see **Sharing
+  the fleet on the tailnet** above). `""` (the default) serves nothing.
+  `tailscale:7474` binds this node's Tailscale IPv4 on port 7474; any other
+  `host:port` is bound as written. A value with a missing or non-numeric port is
+  rejected at startup, by name.
+- `web.headline_interval` — the floor between fleet-headline calls, with
+  `summary.min_interval`'s rules: it bounds what the page costs, `0` means no
+  floor, negative is rejected. A call only fires when the fleet's topics,
+  summaries, states or blockers actually change, so a quiet fleet costs nothing
+  whatever this is set to.
 
 **An unknown key in `config.yml` is a startup error, not a silent no-op.** A typo like
 `sumary:` fails loudly at launch instead of quietly behaving as if you'd written nothing.
