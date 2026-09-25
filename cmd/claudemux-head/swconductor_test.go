@@ -74,14 +74,86 @@ func TestWaitingQueueDeferredAloneIsNotDispatched(t *testing.T) {
 }
 
 // The end-to-end shape of the bug this replaced: every normal waiter
-// snoozed, one deferred session waiting. The client must stay on the lobby.
+// snoozed, one deferred session waiting. The deferred session must never be
+// the destination — with the queue otherwise empty the snooze is released and
+// the client goes back to the normal waiter instead.
 func TestConductorParkedHoldsWhenOnlyDeferredWaits(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	c := newConductor()
 	c.snoozed["normal"] = swSnooze{since: time.Unix(100, 0), at: now}
 	s := snapAt("switchboard", waiting("normal", 100), deferredWaiting("blocked", 50))
+	act, ok := c.step(s, now)
+	if !ok || act.Target != "normal" {
+		t.Errorf("act = %+v ok=%v, want the released normal waiter, never the deferred one", act, ok)
+	}
+}
+
+// A deferred session that was also snoozed is still not a destination: the
+// release only ever re-queues sessions the queue would otherwise accept.
+func TestConductorParkedHoldsWhenOnlySnoozedDeferredWaits(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.snoozed["blocked"] = swSnooze{since: time.Unix(50, 0), at: now}
+	s := snapAt("switchboard", busy("work"), deferredWaiting("blocked", 50))
 	if act, ok := c.step(s, now); ok {
 		t.Errorf("dispatched %+v, want no action", act)
+	}
+}
+
+// Every session busy, deferred, or snoozed: the snoozes are released at once
+// and the conductor re-conducts through the skipped sessions, oldest first.
+// A snooze is an anti-bounce, not a veto; the veto is defer.
+func TestConductorReleasesSnoozesWhenQueueEmpties(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.snoozed["a"] = swSnooze{since: time.Unix(100, 0), at: now}
+	c.snoozed["b"] = swSnooze{since: time.Unix(200, 0), at: now}
+	s := snapAt("switchboard", waiting("b", 200), waiting("a", 100), busy("work"), deferredWaiting("blocked", 50))
+	act, ok := c.step(s, now)
+	if !ok || act.Target != "a" {
+		t.Fatalf("act = %+v ok=%v, want dispatch to the oldest released waiter", act, ok)
+	}
+	if len(c.snoozed) != 0 {
+		t.Errorf("snoozed = %v, want every snooze released", c.snoozed)
+	}
+	if c.isSnoozed(waiting("b", 200), now) {
+		t.Error("b must no longer read as snoozed on the lobby")
+	}
+}
+
+// The release applies mid-escort too: when the escortee resolves and the only
+// other waiter is one the user skipped, the conductor carries them there
+// rather than parking them on the lobby with a waiter dimmed behind them.
+func TestConductorEscortAdvancesToReleasedSnooze(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100), waiting("b", 200)), now)
+	c.snoozed["b"] = swSnooze{since: time.Unix(200, 0), at: now}
+	act, ok := c.step(snapAt("a", busy("a"), waiting("b", 200)), now)
+	if !ok || act.Target != "b" {
+		t.Errorf("act = %+v ok=%v, want the released waiter, not the lobby", act, ok)
+	}
+	if c.phase != swEscorting || c.escortee != "b" {
+		t.Errorf("phase=%v escortee=%q", c.phase, c.escortee)
+	}
+}
+
+// Skipping the only waiter and returning to the lobby brings the user
+// straight back: with nothing else to conduct to, the skip has no one to
+// yield to. Staying away from it is what defer is for.
+func TestConductorLobbyReturnReleasesSoleSnooze(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("a", 100), busy("work")), now)
+	if _, ok := c.step(snapAt("switchboard", waiting("a", 100), busy("work")), now); ok {
+		t.Fatal("the walk-away tick itself must not switch")
+	}
+	if _, ok := c.snoozed["a"]; !ok {
+		t.Fatal("walking away must snooze a")
+	}
+	act, ok := c.step(snapAt("switchboard", waiting("a", 100), busy("work")), now)
+	if !ok || act.Target != "a" {
+		t.Errorf("act = %+v ok=%v, want the sole waiter released and re-escorted", act, ok)
 	}
 }
 
@@ -240,9 +312,9 @@ func TestConductorEscortGoneSessionCountsResolved(t *testing.T) {
 func TestConductorManualLeavePausesAndSnoozes(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	c := newConductor()
-	c.step(snapAt("switchboard", waiting("a", 100)), now)
+	c.step(snapAt("switchboard", waiting("a", 100), waiting("b", 200)), now)
 	// User switched the client to some other session while a still waits.
-	if _, ok := c.step(snapAt("elsewhere", waiting("a", 100)), now); ok {
+	if _, ok := c.step(snapAt("elsewhere", waiting("a", 100), waiting("b", 200)), now); ok {
 		t.Fatal("manual navigation must not trigger a switch")
 	}
 	if c.phase != swPaused {
@@ -251,15 +323,21 @@ func TestConductorManualLeavePausesAndSnoozes(t *testing.T) {
 	if got, ok := c.snoozed["a"]; !ok || !got.since.Equal(time.Unix(100, 0)) {
 		t.Errorf("snoozed[a] = %v ok=%v", got, ok)
 	}
-	// Back at the lobby: resume. The snoozed episode must NOT re-dispatch.
-	if _, ok := c.step(snapAt("switchboard", waiting("a", 100)), now); ok {
-		t.Error("resume tick must not redispatch a snoozed session")
+	// Back at the lobby: resume. The snoozed episode yields to the other
+	// waiter; it is not the destination while anyone else is waiting.
+	if _, ok := c.step(snapAt("switchboard", waiting("a", 100), waiting("b", 200)), now); ok {
+		t.Error("resume tick must not switch")
 	}
 	if c.phase != swParked {
-		t.Errorf("phase = %v, want parked after lobby return", c.phase)
+		t.Fatalf("phase = %v, want parked after lobby return", c.phase)
 	}
-	// New waiting episode: dispatch again.
-	act, ok := c.step(snapAt("switchboard", waiting("a", 300)), now)
+	act, ok := c.step(snapAt("switchboard", waiting("a", 100), waiting("b", 200)), now)
+	if !ok || act.Target != "b" {
+		t.Errorf("snoozed a must yield to b, act=%+v ok=%v", act, ok)
+	}
+	// New waiting episode for a while escorting b: a is no longer snoozed,
+	// so once b resolves the conductor goes to a on the new episode.
+	act, ok = c.step(snapAt("b", waiting("a", 300), busy("b")), now)
 	if !ok || act.Target != "a" {
 		t.Errorf("new episode must dispatch, act=%+v ok=%v", act, ok)
 	}
@@ -575,6 +653,10 @@ func TestConductHandoffRestoredEscortSurvivesFirstTick(t *testing.T) {
 // carrying `client` in the handoff makes the first tick a no-op (see
 // TestConductHandoffRestoredEscortSurvivesFirstTick above), so the walk-away
 // below is a genuine user-initiated move and gets snoozed like any other.
+// A second waiter "y" makes the snooze observable: the next dispatch must go
+// to y, not back to x. (With x the only waiter the snooze would be released
+// on the spot — see TestConductorLobbyReturnReleasesSoleSnooze — which is
+// the intended behaviour, not the bounce this test guards against.)
 func TestConductHandoffRestoredEscortWalkAwayStillSnoozes(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	c := conductor{
@@ -592,9 +674,9 @@ func TestConductHandoffRestoredEscortWalkAwayStillSnoozes(t *testing.T) {
 		t.Fatal("handoff not readable")
 	}
 	// First tick: client still on the escortee, still waiting — a no-op.
-	restored.step(snapAt("x", waiting("x", 100)), now)
+	restored.step(snapAt("x", waiting("x", 100), waiting("y", 200)), now)
 	// The user walks back to the lobby while "x" is still waiting.
-	if _, ok := restored.step(snapAt("switchboard", waiting("x", 100)), now); ok {
+	if _, ok := restored.step(snapAt("switchboard", waiting("x", 100), waiting("y", 200)), now); ok {
 		t.Fatal("walk-away tick must not dispatch")
 	}
 	if restored.phase != swParked {
@@ -603,9 +685,10 @@ func TestConductHandoffRestoredEscortWalkAwayStillSnoozes(t *testing.T) {
 	if _, snoozed := restored.snoozed["x"]; !snoozed {
 		t.Fatal("walking away from the restored escort must snooze it")
 	}
-	// A further tick with "x" still waiting must not escort back into it.
-	if act, ok := restored.step(snapAt("switchboard", waiting("x", 100)), now); ok {
-		t.Errorf("must not bounce back into the snoozed escortee, got %+v", act)
+	// A further tick with "x" still waiting must escort to y, not back into x.
+	act, ok := restored.step(snapAt("switchboard", waiting("x", 100), waiting("y", 200)), now)
+	if !ok || act.Target != "y" {
+		t.Errorf("must go to the other waiter, not bounce back into the snoozed escortee, got %+v ok=%v", act, ok)
 	}
 }
 

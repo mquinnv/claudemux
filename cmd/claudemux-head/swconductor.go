@@ -40,7 +40,8 @@ type swSnooze struct {
 // starves it behind sessions that were never skipped. Ten minutes keeps the
 // original anti-bounce purpose (leaving a session must not ping-pong the
 // client straight back) while guaranteeing every waiting session resurfaces
-// within one sitting.
+// within one sitting. It is the outer bound only: releaseSnoozes lets every
+// snooze go the moment nothing else is left to conduct to.
 const swSnoozeTTL = 10 * time.Minute
 
 type conductor struct {
@@ -48,10 +49,11 @@ type conductor struct {
 	client   string
 	escortee string
 	// snoozed maps session -> the waiting episode the user deliberately
-	// walked away from, and when. That episode never re-queues until the
-	// snooze expires; a new episode (different Since) un-snoozes it
-	// immediately. Without this, skipping an Idle session would bounce the
-	// client straight back to it from the lobby.
+	// walked away from, and when. That episode does not re-queue while any
+	// other session is waiting to be conducted to; a new episode (different
+	// Since), the TTL, or the queue running dry (releaseSnoozes) un-snoozes
+	// it. Without this, skipping an Idle session would bounce the client
+	// straight back to it from the lobby while others were waiting.
 	snoozed map[string]swSnooze
 	// Paused-session observation. The user navigated somewhere themselves;
 	// swPaused's contract is "never fight the user" — but Michael's actual
@@ -160,6 +162,26 @@ func (c *conductor) pruneSnoozes(s swSnapshot, now time.Time) {
 	}
 }
 
+// releaseSnoozes lets every snooze go when the snooze filter is all that
+// stands between the conductor and an empty queue: every session is busy,
+// deferred, or snoozed. A snooze is an anti-bounce, not a veto — it says
+// "someone else first", and once there is no one else the skipped sessions
+// are conducted through again, oldest first. The veto is defer: a user who
+// wants to stay out of a session marks it, and the release never re-queues a
+// deferred session (the unfiltered queue excludes them). Returns the queue
+// to dispatch from, which is the released one when a release happened.
+func (c *conductor) releaseSnoozes(s swSnapshot, now time.Time, queue []swSession) []swSession {
+	if len(queue) > 0 || len(c.snoozed) == 0 {
+		return queue
+	}
+	released := s.waitingQueue(nil, now)
+	if len(released) == 0 {
+		return queue
+	}
+	c.snoozed = map[string]swSnooze{}
+	return released
+}
+
 // clearPaused forgets the paused-session observation; called on every path
 // that leaves swPaused so a later pause at the same session cannot inherit a
 // stale hand-back.
@@ -198,7 +220,7 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 		return swAction{}, false
 	}
 	cur := s.Clients[c.client]
-	queue := s.waitingQueue(c.snoozed, now)
+	queue := c.releaseSnoozes(s, now, s.waitingQueue(c.snoozed, now))
 
 	switch c.phase {
 	case swParked:

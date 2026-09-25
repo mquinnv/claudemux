@@ -182,7 +182,10 @@ reset the tab to the terminal default.
 To **skip** a session you don't want to answer right now, jump back to the lobby —
 `claudemux switch` binds `prefix + S` to do exactly that (unless you've bound
 `prefix + S` yourself, in which case it's left alone). The skipped session is
-snoozed and the conductor carries you to the next waiting one.
+snoozed and the conductor carries you to the next waiting one. A snooze only
+says "someone else first": the moment every session is busy, deferred, or
+snoozed, all snoozes are released and the conductor carries you back through
+the skipped sessions, oldest first. To stay out of a session, defer it.
 
 **Deferring a session** is different from a snooze: it says this session is waiting on
 something outside claudemux — a review, a build, another person — and the conductor
