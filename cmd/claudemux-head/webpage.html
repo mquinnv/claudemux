@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claudemux fleet</title>
+<style>
+  :root {
+    --bg: #fafafa; --fg: #1a1a1a; --dim: #6b6b6b; --card: #ffffff; --line: #e3e3e3;
+    --wait: #d97706; --busy: #2563eb; --defer: #7c3aed; --bar: #e5e7eb; --fill: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111214; --fg: #e8e8e8; --dim: #9a9a9a; --card: #1b1c1f; --line: #2a2b2f;
+      --wait: #f59e0b; --busy: #60a5fa; --defer: #a78bfa; --bar: #2a2b2f; --fill: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 880px; margin-inline: auto;
+  }
+  body.offline { opacity: .55; }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  #headline { font-size: 18px; margin: 8px 0 2px; }
+  #headline-meta, .meta, footer { color: var(--dim); font-size: 13px; }
+  #headline-meta.stale { color: var(--wait); }
+  .gauges { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 12px; }
+  .gauge { flex: 1 1 200px; }
+  .gauge .label { font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; }
+  .bar { height: 6px; background: var(--bar); border-radius: 3px; overflow: hidden; margin-top: 3px; }
+  .bar > div { height: 100%; background: var(--fill); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 10px;
+  }
+  .card.waiting { border-left: 4px solid var(--wait); }
+  .card.deferred { border-left: 4px solid var(--defer); }
+  .row { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
+  .name { font-weight: 600; text-shadow: 0 0 1px rgba(0,0,0,.35); }
+  .state { color: var(--busy); }
+  .waiting .state { color: var(--wait); }
+  .badge {
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 1px 6px;
+    border-radius: 4px; background: var(--defer); color: #fff;
+  }
+  .topic { font-weight: 600; margin-top: 4px; }
+  .detail { color: var(--dim); margin-top: 2px; overflow-wrap: anywhere; }
+  .rule { color: var(--dim); font-size: 12px; text-align: center; margin: 14px 0 8px; }
+  #empty { color: var(--dim); }
+  footer { margin-top: 24px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>claudemux fleet</h1>
+  <div id="headline">loading…</div>
+  <div id="headline-meta"></div>
+  <div class="gauges" id="gauges"></div>
+</header>
+<main id="fleet"></main>
+<div id="empty" hidden>no claudemux sessions</div>
+<footer>read-only · reachable on the tailnet only · served by claudemux</footer>
+<script>
+(function () {
+  'use strict';
+  var POLL_MS = 3000;
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+
+  function ago(iso, now) {
+    if (!iso) return '';
+    var s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+    if (s < 60) return s + 's';
+    var m = Math.round(s / 60);
+    if (m < 60) return m + 'm';
+    var h = Math.floor(m / 60);
+    return h + 'h' + (m % 60 ? (m % 60) + 'm' : '');
+  }
+
+  function until(iso, now) {
+    if (!iso) return '';
+    var s = Math.max(0, Math.round((Date.parse(iso) - now) / 1000));
+    var h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    if (h >= 24) return Math.floor(h / 24) + 'd' + (h % 24) + 'h';
+    return h ? h + 'h' + (m ? m + 'm' : '') : m + 'm';
+  }
+
+  function gauge(label, w, now) {
+    var g = el('div', 'gauge');
+    var lab = el('div', 'label');
+    lab.appendChild(el('span', null, label + ' ' + w.used_pct + '%'));
+    if (w.resets_at) lab.appendChild(el('span', null, 'resets in ' + until(w.resets_at, now)));
+    var bar = el('div', 'bar');
+    var fill = el('div');
+    fill.style.width = Math.min(100, Math.max(0, w.used_pct)) + '%';
+    bar.appendChild(fill);
+    g.appendChild(lab);
+    g.appendChild(bar);
+    return g;
+  }
+
+  function card(s, now) {
+    var c = el('div', 'card' + (s.waiting ? ' waiting' : '') + (s.deferred ? ' deferred' : ''));
+    var row = el('div', 'row');
+    var name = el('span', 'name', (s.emoji ? s.emoji + ' ' : '') + s.name);
+    if (s.color) name.style.color = s.color;
+    row.appendChild(name);
+    if (s.deferred) row.appendChild(el('span', 'badge', 'DEFER'));
+    var st = s.state + (s.since ? ' · ' + ago(s.since, now) : '');
+    row.appendChild(el('span', 'state', st));
+    if (typeof s.context_pct === 'number') row.appendChild(el('span', 'meta', 'ctx ' + s.context_pct + '%'));
+    if (s.model) row.appendChild(el('span', 'meta', s.model));
+    c.appendChild(row);
+    if (s.topic) c.appendChild(el('div', 'topic', s.topic));
+    if (s.deferred && s.defer_reason) c.appendChild(el('div', 'detail', '◆ ' + s.defer_reason));
+    if (s.summary) c.appendChild(el('div', 'detail', s.summary));
+    if (s.prompt) c.appendChild(el('div', 'detail', '▌ ' + s.prompt));
+    return c;
+  }
+
+  function render(v) {
+    var now = Date.now();
+    var head = document.getElementById('headline');
+    var meta = document.getElementById('headline-meta');
+    var counts = v.counts.sessions + ' session' + (v.counts.sessions === 1 ? '' : 's') +
+      ' · ' + v.counts.waiting + ' waiting' + (v.counts.deferred ? ' · ' + v.counts.deferred + ' deferred' : '');
+    if (v.headline && v.headline.text) {
+      head.textContent = v.headline.text;
+      meta.textContent = counts + ' · headline ' + ago(v.headline.at, now) + ' ago' + (v.headline.stale ? ' · updating' : '');
+      meta.className = v.headline.stale ? 'stale' : '';
+    } else {
+      head.textContent = counts;
+      meta.textContent = '';
+      meta.className = '';
+    }
+
+    var gauges = document.getElementById('gauges');
+    gauges.replaceChildren();
+    if (v.budget) {
+      gauges.appendChild(gauge('5h', v.budget.five_hour, now));
+      gauges.appendChild(gauge('week', v.budget.weekly, now));
+      (v.budget.models || []).forEach(function (m) { gauges.appendChild(gauge(m.name, m, now)); });
+    }
+
+    var fleet = document.getElementById('fleet');
+    fleet.replaceChildren();
+    var ruled = false;
+    v.sessions.forEach(function (s) {
+      if (s.deferred && !ruled) { fleet.appendChild(el('div', 'rule', '─ deferred ─')); ruled = true; }
+      fleet.appendChild(card(s, now));
+    });
+    document.getElementById('empty').hidden = v.sessions.length > 0;
+  }
+
+  function poll() {
+    fetch('/api/fleet', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (v) { document.body.classList.remove('offline'); render(v); })
+      .catch(function () {
+        document.body.classList.add('offline');
+        document.getElementById('headline-meta').textContent = 'lobby not reachable';
+      })
+      .then(function () { setTimeout(poll, POLL_MS); });
+  }
+  poll();
+})();
+</script>
+</body>
+</html>
