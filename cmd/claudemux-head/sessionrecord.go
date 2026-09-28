@@ -36,6 +36,12 @@ type sessionRecord struct {
 	State       string `json:"state"`
 	Topic       string `json:"topic,omitempty"`
 	LastSeen    int64  `json:"last_seen"`
+	// Deferred and DeferReason carry the session's defer mark and blocker
+	// (deferpub.go). Those live as tmux session options, which die with the
+	// tmux server, so the record is the only copy a reboot leaves behind —
+	// restore sets them again on the relaunched session.
+	Deferred    bool   `json:"deferred,omitempty"`
+	DeferReason string `json:"defer_reason,omitempty"`
 }
 
 // loadedRecord pairs a record with the file it came from, so the lobby can

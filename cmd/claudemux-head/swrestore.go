@@ -203,6 +203,17 @@ func swRestoreOneCmd(l lostSession) tea.Cmd {
 			}
 			return swRestoreStepMsg{name: name, err: err}
 		}
+		if l.Rec.Deferred {
+			// The defer mark died with the old tmux server; put it back on
+			// the relaunched session. The trailing colon makes tmux resolve
+			// a session, as swDeferTarget explains.
+			dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer dcancel()
+			args := deferArgs(name+":", true, l.Rec.DeferReason)
+			if err := exec.CommandContext(dctx, "tmux", args...).Run(); err != nil {
+				return swRestoreStepMsg{name: name, err: fmt.Errorf("restored, but defer not reapplied: %w", err)}
+			}
+		}
 		return swRestoreStepMsg{name: name}
 	}
 }
