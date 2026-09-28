@@ -159,6 +159,9 @@ type model struct {
 	// transition with a new anchored Since (Idle -> busy blip -> Idle)
 	// still republishes @claudemux_state_since.
 	publishedSince time.Time
+	// publishedStay is the #stay mark of the last state publish (see
+	// stayMarkerOption), part of the same guard.
+	publishedStay bool
 
 	// publishedContext/-Summary/-Prompt/-Model are the last-published info
 	// option values (context as integer percent; -1 = never published, since 0
@@ -2154,7 +2157,7 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	if c := m.statusChip(now); c != "" {
 		leftParts = append(leftParts, c)
 	}
-	if c := conductChip(m.conductRawFor(now), now); c != "" {
+	if c := conductChipFor(m.conductRawFor(now), now, m.stayingTurn()); c != "" {
 		leftParts = append(leftParts, c)
 	}
 	if c := m.deferChipText(); c != "" {
@@ -2454,7 +2457,7 @@ func renderStateLine(m model, now time.Time) string {
 	if c := m.statusChip(now); c != "" {
 		parts = append(parts, c)
 	}
-	if c := conductChip(m.conductRawFor(now), now); c != "" {
+	if c := conductChipFor(m.conductRawFor(now), now, m.stayingTurn()); c != "" {
 		parts = append(parts, c)
 	}
 	if c := m.deferChipText(); c != "" {

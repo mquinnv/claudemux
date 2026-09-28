@@ -85,32 +85,39 @@ func publishedStateKind(v string) (StateKind, bool) {
 	return StateIdle, false
 }
 
-// statePublishArgs builds one tmux invocation setting both options. `;` is a
-// single argv element: tmux treats it as a command separator, so both options
-// land in one subprocess. `-t` takes the pane id; tmux resolves the owning
-// session for session-scoped options. ok=false outside tmux (selfPane empty)
-// or with nothing to say.
-func statePublishArgs(selfPane, value string, since time.Time) ([]string, bool) {
+// statePublishArgs builds one tmux invocation setting the state, its since,
+// and the #stay mark (set to "1", or unset). `;` is a single argv element:
+// tmux treats it as a command separator, so all three options land in one
+// subprocess — which is what lets the lobby never see a busy state without
+// the stay mark that came with it (see stayMarkerOption). `-t` takes the pane
+// id; tmux resolves the owning session for session-scoped options. ok=false
+// outside tmux (selfPane empty) or with nothing to say.
+func statePublishArgs(selfPane, value string, since time.Time, stay bool) ([]string, bool) {
 	if selfPane == "" || value == "" {
 		return nil, false
 	}
-	return []string{
+	args := []string{
 		"set-option", "-t", selfPane, statePublishOption, value,
 		";",
 		"set-option", "-t", selfPane, statePublishSinceOption, strconv.FormatInt(since.Unix(), 10),
-	}, true
+		";",
+	}
+	if stay {
+		return append(args, "set-option", "-t", selfPane, stayMarkerOption, "1"), true
+	}
+	return append(args, "set-option", "-t", selfPane, "-u", stayMarkerOption), true
 }
 
 // publishStateCmd returns a tea.Cmd publishing s, or nil when there is nothing
 // to do. Fire-and-forget with a hard deadline, like renameTabCmd: a wedged
 // tmux must never block the TUI, and a failed publish just leaves the previous
 // value for the next transition to overwrite.
-func publishStateCmd(selfPane string, s State, now time.Time) tea.Cmd {
+func publishStateCmd(selfPane string, s State, now time.Time, stay bool) tea.Cmd {
 	since := s.Since
 	if since.IsZero() {
 		since = now
 	}
-	args, ok := statePublishArgs(selfPane, statePublishValue(s), since)
+	args, ok := statePublishArgs(selfPane, statePublishValue(s), since, stay)
 	if !ok {
 		return nil
 	}
@@ -131,14 +138,20 @@ func publishStateCmd(selfPane string, s State, now time.Time) tea.Cmd {
 // starves the session. Anchored-only, because an unanchored Since is a
 // now-fallback that differs every tick — republishing on it would set a tmux
 // option once a second for every session with an empty transcript.
+//
+// A change in the #stay mark alone also republishes (a prompt queued mid-turn
+// can flip it under an unchanged busy state), always together with the state
+// so the two can never be read apart.
 func (m *model) maybePublishState(now time.Time) tea.Cmd {
 	v := statePublishValue(m.state)
-	if v == m.publishedState && (!m.state.Anchored || m.state.Since.Equal(m.publishedSince)) {
+	stay := stayMarked(m.lastTyped)
+	if v == m.publishedState && stay == m.publishedStay && (!m.state.Anchored || m.state.Since.Equal(m.publishedSince)) {
 		return nil
 	}
 	m.publishedState = v
 	m.publishedSince = m.state.Since
-	return publishStateCmd(m.selfPane, m.state, now)
+	m.publishedStay = stay
+	return publishStateCmd(m.selfPane, m.state, now, stay)
 }
 
 // Companion options to @claudemux_state: coarse per-session facts the lobby

@@ -210,6 +210,15 @@ var (
 // blank and indistinguishable: there is no process to report on, and a chip
 // that outlived its lobby would be describing nobody.
 func conductChip(raw string, now time.Time) string {
+	return conductChipFor(raw, now, false)
+}
+
+// conductChipFor is conductChip for a session that may be running a #stay
+// turn (staying: see stayingIn). While conducting, such a turn reads
+// "⏸ #stay" in the standby hue — this turn will not carry you away — which
+// is also the confirmation that the marker was recognized. Standby and a
+// dead lobby render exactly as conductChip.
+func conductChipFor(raw string, now time.Time, staying bool) string {
 	mode, ok := parseConductValue(raw, now)
 	if !ok {
 		return ""
@@ -217,5 +226,15 @@ func conductChip(raw string, now time.Time) string {
 	if !conductOn(mode) {
 		return stayChipStyle.Render("⏸ stay")
 	}
+	if staying {
+		return stayChipStyle.Render("⏸ #stay")
+	}
 	return conductChipStyle.Render("⏵ conduct")
+}
+
+// stayingTurn reports whether this session is busy on a #stay-marked prompt —
+// the head-side twin of the conductor's stayingIn, fed the same values the
+// head publishes so the chip and the lobby cannot disagree.
+func (m *model) stayingTurn() bool {
+	return stayingIn(swSession{State: statePublishValue(m.state), Stay: stayMarked(m.lastTyped)})
 }

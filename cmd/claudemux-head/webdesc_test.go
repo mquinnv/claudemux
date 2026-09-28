@@ -22,11 +22,20 @@ func TestProjectDeclaredDescription(t *testing.T) {
 }
 
 func TestBuildSwSnapshotReadsDescription(t *testing.T) {
-	sess := "api\tIdle\t1754700000\t37\t\t\t\t\t\t\t\tBackend for the storefront\n"
+	sess := "api\tIdle\t1754700000\t37\t\t\t\t\t\t\t\t\tBackend for the storefront\n"
 	panes := "api\t%1\tclaudemux-head\tbuild\n"
 	snap := buildSwSnapshot(sess, panes, "", "")
 	if len(snap.Sessions) != 1 || snap.Sessions[0].Description != "Backend for the storefront" {
 		t.Fatalf("sessions = %+v, want api with its description", snap.Sessions)
+	}
+}
+
+func TestBuildSwSnapshotReadsStayAndDescription(t *testing.T) {
+	sess := "api\tThinking\t1754700000\t37\t\t\t\t\t\t\t\t1\tBackend for the storefront\n"
+	panes := "api\t%1\tclaudemux-head\tbuild\n"
+	snap := buildSwSnapshot(sess, panes, "", "")
+	if len(snap.Sessions) != 1 || !snap.Sessions[0].Stay || snap.Sessions[0].Description != "Backend for the storefront" {
+		t.Fatalf("sessions = %+v, want api staying with its description", snap.Sessions)
 	}
 }
 

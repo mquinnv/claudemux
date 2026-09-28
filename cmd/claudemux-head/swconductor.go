@@ -199,6 +199,14 @@ func soleSession(s swSnapshot, name string) bool {
 	return len(s.Sessions) == 1 && s.Sessions[0].Name == name
 }
 
+// stayingIn reports whether sess is busy on a turn its human started with a
+// #stay-marked prompt (see staymark.go). Waiting and booting sessions never
+// are: the mark lingers until the next typed prompt, but it only says
+// something about the turn it started.
+func stayingIn(sess swSession) bool {
+	return sess.Stay && !isWaiting(sess.State) && !isBooting(sess.State)
+}
+
 // holdingSole reports whether the conductor is sitting on the fleet's only
 // session with its turn over — the state step() enters instead of returning
 // the client to a lobby with nothing in it. Derived rather than stored so
@@ -280,6 +288,14 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 		if ok && isBooting(sess.State) && !deferredHere {
 			return swAction{}, false
 		}
+		// A #stay-marked prompt hands the session to Claude without handing
+		// the human on: they asked to stay for this turn. Hold exactly as for a
+		// waiting escortee — the walk-away branch above still parks them if
+		// they leave, and the next unmarked prompt clears the mark and moves
+		// them on through the branch below. A defer still wins.
+		if ok && stayingIn(sess) && !deferredHere {
+			return swAction{}, false
+		}
 		if !ok || !isWaiting(sess.State) || deferredHere {
 			if len(queue) > 0 {
 				c.escortee = queue[0].Name
@@ -346,6 +362,13 @@ func (c *conductor) step(s swSnapshot, now time.Time) (swAction, bool) {
 		if ok && isBooting(sess.State) {
 			break
 		}
+		// Likewise a #stay turn: the user asked not to be moved for it, so
+		// it is not the hand-back edge. Skipping (rather than recording
+		// not-waiting) keeps the waiting seen before it, so the next unmarked
+		// prompt still latches the hand-back.
+		if ok && stayingIn(sess) {
+			break
+		}
 		if c.pausedCurWaiting && !curWaiting {
 			c.pausedHandedBack = true
 		}
@@ -388,6 +411,9 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	case swPaused:
 		return "paused — you navigated away; finish there or return here to resume"
 	case swEscorting:
+		if sess, ok := s.session(c.escortee); ok && stayingIn(sess) {
+			return fmt.Sprintf("staying on %s (#stay) · %d waiting%s", c.escortee, n, suffix)
+		}
 		if c.holdingSole(s) {
 			return "holding — only session in the fleet"
 		}
