@@ -5,16 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claudemux fleet</title>
 <style>
+  /* --defer-badge is the terminal's deferred color (ANSI 256 "45", see
+     swDeferStyle in deferpub.go); --defer is a darker cyan for light-mode text. */
   :root {
     --bg: #fafafa; --fg: #1a1a1a; --dim: #6b6b6b; --card: #ffffff; --line: #e3e3e3;
-    --wait: #d97706; --busy: #2563eb; --defer: #7c3aed; --bar: #e5e7eb; --fill: #2563eb;
-    --hover: #f3f4f6; --defer-bg: #f5f3ff; --defer-line: #ddd6fe; --defer-hover: #ede9fe;
+    --wait: #d97706; --busy: #2563eb; --defer: #0e7490; --defer-badge: #00d7ff; --defer-ink: #080808; --bar: #e5e7eb; --fill: #2563eb;
+    --hover: #f3f4f6; --defer-bg: #ecfeff; --defer-line: #a5f3fc; --defer-hover: #cffafe;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111214; --fg: #e8e8e8; --dim: #9a9a9a; --card: #1b1c1f; --line: #2a2b2f;
-      --wait: #f59e0b; --busy: #60a5fa; --defer: #a78bfa; --bar: #2a2b2f; --fill: #60a5fa;
-      --hover: #222327; --defer-bg: #1d1a2a; --defer-line: #3b3358; --defer-hover: #262138;
+      --wait: #f59e0b; --busy: #60a5fa; --defer: #00d7ff; --bar: #2a2b2f; --fill: #60a5fa;
+      --hover: #222327; --defer-bg: #0b1f25; --defer-line: #164e5a; --defer-hover: #10303a;
     }
   }
   * { box-sizing: border-box; }
@@ -67,7 +69,7 @@
   }
   .deferred h2 {
     margin: 0; padding: 7px 10px; font-size: 12px; font-weight: 700; letter-spacing: .08em;
-    text-transform: uppercase; color: #fff; background: var(--defer);
+    text-transform: uppercase; color: var(--defer-ink); background: var(--defer-badge);
   }
   .deferred h2 .n { font-weight: 500; opacity: .85; margin-left: 6px; }
   .deferred .fleet th { color: var(--defer); border-bottom-color: var(--defer-line); }
