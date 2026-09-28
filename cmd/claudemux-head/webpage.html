@@ -60,7 +60,8 @@
   .dim { color: var(--dim); }
   .topic { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
   .sub { color: var(--dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
-  .desc { font-style: italic; }
+  .desc { font-style: italic; white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
+  .ico { display: inline-block; margin-right: .35em; }
   .panel {
     background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
   }
@@ -166,7 +167,9 @@
   }
 
   function nameCell(s) {
-    var n = el('span', 'name', (s.emoji ? s.emoji + ' ' : '') + s.name);
+    var n = el('span', 'name');
+    if (s.emoji) n.appendChild(el('span', 'ico', s.emoji));
+    n.appendChild(document.createTextNode(s.name));
     if (s.color) n.style.color = s.color;
     var c = td('', n, s.name + (s.description ? '\n' + s.description : ''));
     if (s.description) c.appendChild(el('div', 'sub desc', s.description));
@@ -205,7 +208,10 @@
   function activeRow(s, now) {
     var r = el('tr', s.waiting ? 'waiting' : '');
     r.appendChild(nameCell(s));
-    r.appendChild(td('', el('span', 'state', (s.state_emoji ? s.state_emoji + ' ' : '') + s.state), s.state));
+    var st = el('span', 'state');
+    if (s.state_emoji) st.appendChild(el('span', 'ico', s.state_emoji));
+    st.appendChild(document.createTextNode(s.state));
+    r.appendChild(td('', st, s.state));
     r.appendChild(td('num dim', ago(s.since, now)));
     var ctx = td('num opt', typeof s.context_pct === 'number' ? s.context_pct + '%' : '');
     if (s.context_color) ctx.style.color = s.context_color;
