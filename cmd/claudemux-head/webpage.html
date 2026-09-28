@@ -8,47 +8,85 @@
   :root {
     --bg: #fafafa; --fg: #1a1a1a; --dim: #6b6b6b; --card: #ffffff; --line: #e3e3e3;
     --wait: #d97706; --busy: #2563eb; --defer: #7c3aed; --bar: #e5e7eb; --fill: #2563eb;
+    --hover: #f3f4f6; --defer-bg: #f5f3ff; --defer-line: #ddd6fe; --defer-hover: #ede9fe;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111214; --fg: #e8e8e8; --dim: #9a9a9a; --card: #1b1c1f; --line: #2a2b2f;
       --wait: #f59e0b; --busy: #60a5fa; --defer: #a78bfa; --bar: #2a2b2f; --fill: #60a5fa;
+      --hover: #222327; --defer-bg: #1d1a2a; --defer-line: #3b3358; --defer-hover: #262138;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
     font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    max-width: 880px; margin-inline: auto;
+    max-width: 1100px; margin-inline: auto;
   }
   body.offline { opacity: .55; }
-  header { margin-bottom: 20px; }
+  header { margin-bottom: 14px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
   #headline { font-size: 18px; margin: 8px 0 2px; overflow-wrap: anywhere; }
   #headline-meta, .meta, footer { color: var(--dim); font-size: 13px; }
   #headline-meta.stale { color: var(--wait); }
-  .gauges { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 12px; }
+  .gauges { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
   .gauge { flex: 1 1 200px; }
   .gauge .label { font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; }
   .bar { height: 6px; background: var(--bar); border-radius: 3px; overflow: hidden; margin-top: 3px; }
   .bar > div { height: 100%; background: var(--fill); }
-  .card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-    padding: 10px 12px; margin-bottom: 10px;
+  table.fleet { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px; }
+  .fleet th {
+    text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--dim); padding: 4px 8px; border-bottom: 1px solid var(--line);
   }
-  .card.waiting { border-left: 4px solid var(--wait); }
-  .card.deferred { border-left: 4px solid var(--defer); }
-  .row { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
-  .name { font-weight: 600; text-shadow: 0 0 1px rgba(0,0,0,.35); overflow-wrap: anywhere; }
+  .fleet td {
+    padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fleet tbody tr:hover { background: var(--hover); }
+  .fleet .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .fleet .c-name { width: 24%; }
+  .fleet .c-state { width: 13%; }
+  .fleet .c-age { width: 6%; }
+  .fleet .c-ctx { width: 6%; }
+  .fleet .c-model { width: 10%; }
+  .fleet .c-reason { width: 30%; }
+  .name { font-weight: 600; text-shadow: 0 0 1px rgba(0,0,0,.35); }
   .state { color: var(--busy); }
-  .waiting .state { color: var(--wait); }
-  .badge {
-    font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 1px 6px;
-    border-radius: 4px; background: var(--defer); color: #fff;
+  tr.waiting td:first-child { box-shadow: inset 3px 0 0 var(--wait); }
+  tr.waiting .state { color: var(--wait); font-weight: 600; }
+  .dim { color: var(--dim); }
+  .topic { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+  .sub { color: var(--dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+  .panel {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
   }
-  .topic { font-weight: 600; margin-top: 4px; overflow-wrap: anywhere; }
-  .detail { color: var(--dim); margin-top: 2px; overflow-wrap: anywhere; }
-  .rule { color: var(--dim); font-size: 12px; text-align: center; margin: 14px 0 8px; }
+  section.deferred {
+    margin-top: 22px; border: 1px solid var(--defer-line); border-radius: 8px;
+    background: var(--defer-bg); overflow: hidden;
+  }
+  .deferred h2 {
+    margin: 0; padding: 7px 10px; font-size: 12px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: #fff; background: var(--defer);
+  }
+  .deferred h2 .n { font-weight: 500; opacity: .85; margin-left: 6px; }
+  .deferred .fleet th { color: var(--defer); border-bottom-color: var(--defer-line); }
+  .deferred .fleet td { border-bottom-color: var(--defer-line); }
+  .deferred .fleet tbody tr:last-child td { border-bottom: 0; }
+  .deferred .fleet tbody tr:hover { background: var(--defer-hover); }
+  .deferred .name { opacity: .8; }
+  .reason { color: var(--defer); font-weight: 500; }
+  .m-topic { display: none; }
+  @media (max-width: 640px) {
+    .fleet .opt, .fleet .c-topic, .fleet td.topic-cell { display: none; }
+    .m-topic { display: block; }
+    .fleet td { padding: 5px 6px; }
+    .fleet td.reason { white-space: normal; overflow-wrap: anywhere; }
+    .fleet .c-name { width: 50%; }
+    .fleet .c-state { width: 32%; }
+    .fleet .c-reason { width: 34%; }
+    .fleet .c-age { width: 16%; }
+  }
   #empty { color: var(--dim); }
   footer { margin-top: 24px; text-align: center; }
 </style>
@@ -61,6 +99,7 @@
   <div class="gauges" id="gauges"></div>
 </header>
 <main id="fleet"></main>
+<div id="deferred"></div>
 <div id="empty" hidden>no claudemux sessions</div>
 <footer>read-only · reachable on the tailnet only · served by claudemux</footer>
 <script>
@@ -115,23 +154,67 @@
     return g;
   }
 
-  function card(s, now) {
-    var c = el('div', 'card' + (s.waiting ? ' waiting' : '') + (s.deferred ? ' deferred' : ''));
-    var row = el('div', 'row');
-    var name = el('span', 'name', (s.emoji ? s.emoji + ' ' : '') + s.name);
-    if (s.color) name.style.color = s.color;
-    row.appendChild(name);
-    if (s.deferred) row.appendChild(el('span', 'badge', 'DEFER'));
-    var st = s.state + (s.since ? ' · ' + ago(s.since, now) : '');
-    row.appendChild(el('span', 'state', st));
-    if (typeof s.context_pct === 'number') row.appendChild(el('span', 'meta', 'ctx ' + s.context_pct + '%'));
-    if (s.model) row.appendChild(el('span', 'meta', s.model));
-    c.appendChild(row);
-    if (s.topic) c.appendChild(el('div', 'topic', s.topic));
-    if (s.deferred && s.defer_reason) c.appendChild(el('div', 'detail', '◆ ' + s.defer_reason));
-    if (s.summary) c.appendChild(el('div', 'detail', s.summary));
-    if (s.prompt) c.appendChild(el('div', 'detail', '▌ ' + s.prompt));
+  function td(cls, child, title) {
+    var c = el('td', cls);
+    if (typeof child === 'string') c.textContent = child; else if (child) c.appendChild(child);
+    if (title) c.title = title;
     return c;
+  }
+
+  function nameCell(s) {
+    var n = el('span', 'name', (s.emoji ? s.emoji + ' ' : '') + s.name);
+    if (s.color) n.style.color = s.color;
+    var c = td('', n, s.name);
+    // Phones drop the topic column; the topic rides under the name instead.
+    if (s.topic) c.appendChild(el('div', 'sub m-topic', s.topic));
+    return c;
+  }
+
+  // topicCell packs the topic and one detail line into a single two-line
+  // cell; everything is ellipsized to keep rows short, with the full text
+  // on hover.
+  function topicCell(s, detail) {
+    var c = el('td', 'topic-cell');
+    var lines = [];
+    if (s.topic) { c.appendChild(el('div', 'topic', s.topic)); lines.push(s.topic); }
+    if (detail) { c.appendChild(el('div', 'sub', detail)); lines.push(detail); }
+    if (s.prompt && detail !== s.prompt) lines.push('\u258c ' + s.prompt);
+    if (!lines.length) c.appendChild(el('span', 'dim', '\u2014'));
+    c.title = lines.join('\n');
+    return c;
+  }
+
+  function table(cols) {
+    var t = el('table', 'fleet');
+    var hr = el('tr');
+    // Widths live on the header cells (table-layout: fixed reads the first
+    // row), so hiding an optional column on a phone drops its width too.
+    cols.forEach(function (c) {
+      hr.appendChild(el('th', c.cls + (c.num ? ' num' : '') + (c.opt ? ' opt' : ''), c.label));
+    });
+    var th = el('thead'); th.appendChild(hr);
+    t.appendChild(th); t.appendChild(el('tbody'));
+    return t;
+  }
+
+  function activeRow(s, now) {
+    var r = el('tr', s.waiting ? 'waiting' : '');
+    r.appendChild(nameCell(s));
+    r.appendChild(td('', el('span', 'state', s.state), s.state));
+    r.appendChild(td('num dim', ago(s.since, now)));
+    r.appendChild(td('num opt', typeof s.context_pct === 'number' ? s.context_pct + '%' : ''));
+    r.appendChild(td('opt dim', s.model || '', s.model));
+    r.appendChild(topicCell(s, s.summary || (s.prompt ? '\u258c ' + s.prompt : '')));
+    return r;
+  }
+
+  function deferredRow(s, now) {
+    var r = el('tr');
+    r.appendChild(nameCell(s));
+    r.appendChild(td('reason', s.defer_reason || '\u2014', s.defer_reason));
+    r.appendChild(td('num dim', ago(s.since, now)));
+    r.appendChild(topicCell(s, s.summary));
+    return r;
   }
 
   function render(v) {
@@ -169,13 +252,37 @@
     // flash every three seconds.
     document.getElementById('gauges').replaceChildren(gaugesFrag);
 
+    var active = v.sessions.filter(function (s) { return !s.deferred; });
+    var parked = v.sessions.filter(function (s) { return s.deferred; });
+
     var fleetFrag = document.createDocumentFragment();
-    var ruled = false;
-    v.sessions.forEach(function (s) {
-      if (s.deferred && !ruled) { fleetFrag.appendChild(el('div', 'rule', '─ deferred ─')); ruled = true; }
-      fleetFrag.appendChild(card(s, now));
-    });
+    if (active.length) {
+      var at = table([
+        { cls: 'c-name', label: 'session' }, { cls: 'c-state', label: 'state' },
+        { cls: 'c-age', label: 'for', num: true }, { cls: 'c-ctx', label: 'ctx', num: true, opt: true },
+        { cls: 'c-model', label: 'model', opt: true }, { cls: 'c-topic', label: 'topic' }
+      ]);
+      active.forEach(function (s) { at.tBodies[0].appendChild(activeRow(s, now)); });
+      var panel = el('div', 'panel'); panel.appendChild(at);
+      fleetFrag.appendChild(panel);
+    }
     document.getElementById('fleet').replaceChildren(fleetFrag);
+
+    var defFrag = document.createDocumentFragment();
+    if (parked.length) {
+      var sec = el('section', 'deferred');
+      var h = el('h2', null, '\u25c6 deferred');
+      h.appendChild(el('span', 'n', String(parked.length)));
+      sec.appendChild(h);
+      var dt = table([
+        { cls: 'c-name', label: 'session' }, { cls: 'c-reason', label: 'waiting on' },
+        { cls: 'c-age', label: 'for', num: true }, { cls: 'c-topic', label: 'topic' }
+      ]);
+      parked.forEach(function (s) { dt.tBodies[0].appendChild(deferredRow(s, now)); });
+      sec.appendChild(dt);
+      defFrag.appendChild(sec);
+    }
+    document.getElementById('deferred').replaceChildren(defFrag);
     document.getElementById('empty').hidden = v.sessions.length > 0;
   }
 
