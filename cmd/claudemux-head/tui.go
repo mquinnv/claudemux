@@ -2598,8 +2598,14 @@ func shortModel(m string) string {
 	}
 	m = strings.TrimPrefix(m, "claude-")
 	parts := strings.Split(m, "-")
-	if len(parts) >= 3 && allDigits(parts[1]) && allDigits(parts[2]) {
+	// A date stamp (8 digits) is never a minor version: "opus-5-20260101"
+	// is major-only, not "opus 5.20260101".
+	isMinor := func(s string) bool { return allDigits(s) && len(s) < 8 }
+	if len(parts) >= 3 && allDigits(parts[1]) && isMinor(parts[2]) {
 		return parts[0] + " " + parts[1] + "." + parts[2] + suffix
+	}
+	if len(parts) >= 2 && allDigits(parts[1]) {
+		return parts[0] + " " + parts[1] + suffix
 	}
 	return m + suffix
 }

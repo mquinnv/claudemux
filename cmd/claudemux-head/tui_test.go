@@ -227,6 +227,9 @@ func TestShortModel(t *testing.T) {
 		{"claude-opus-4-7[1m]", "opus 4.7 1M"},
 		{"claude-sonnet-4-6", "sonnet 4.6"},
 		{"claude-haiku-4-5-20251001", "haiku 4.5"},
+		{"claude-opus-5", "opus 5"},
+		{"claude-opus-5[1m]", "opus 5 1M"},
+		{"claude-opus-5-20260101", "opus 5"},
 		{"", "—"},
 		{"unknown-model", "unknown-model"},
 	}
