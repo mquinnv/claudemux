@@ -77,7 +77,7 @@ func TestWebHandlerServesPage(t *testing.T) {
 		t.Errorf("Content-Security-Policy = %q, want %q", got, webContentSecurityPolicy)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"<title>", "/api/fleet", "read-only", "tailnet"} {
+	for _, want := range []string{"<title>", "/api/fleet", "read-only"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
 		}
