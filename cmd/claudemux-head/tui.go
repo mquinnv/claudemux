@@ -152,6 +152,7 @@ type model struct {
 	recordName      string
 	lastRecordAt    time.Time
 	lastRecordState string
+	lastRecordDefer string
 
 	// publishedSince is the Since of the last publish. Paired with
 	// publishedState in maybePublishState's guard so a value-identical
@@ -1468,6 +1469,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.recordDue(now) {
 			m.lastRecordAt = now
 			m.lastRecordState = statePublishValue(m.state)
+			m.lastRecordDefer = m.recordDeferKey()
 			cmds = append(cmds, writeRecordCmd(m.selfPane, sessionRecordDir(), m.sessionRecordFor(now)))
 		}
 		if m.shouldAutoRestart(now) {

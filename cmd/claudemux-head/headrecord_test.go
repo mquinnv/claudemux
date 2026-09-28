@@ -171,3 +171,38 @@ func TestParseSessionNamePath(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionRecordCarriesDefer: the defer mark lives only on the tmux
+// session, so the record must carry it for restore to put it back.
+func TestSessionRecordCarriesDefer(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := model{sessionID: "abc", workDir: "/p/x", deferRaw: "1", deferReason: " waiting on\tJean "}
+	r := m.sessionRecordFor(now)
+	if !r.Deferred || r.DeferReason != "waiting on Jean" {
+		t.Errorf("deferred record = %v %q, want true %q", r.Deferred, r.DeferReason, "waiting on Jean")
+	}
+	m.deferRaw = ""
+	if r := m.sessionRecordFor(now); r.Deferred || r.DeferReason != "" {
+		t.Errorf("undeferred record = %v %q, want false \"\"", r.Deferred, r.DeferReason)
+	}
+}
+
+// TestRecordDueOnDeferChange: toggling defer (or retyping the blocker)
+// writes the record at once rather than waiting out the interval.
+func TestRecordDueOnDeferChange(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := model{selfPane: "%1", sessionID: "abc", lastRecordAt: now}
+	m.lastRecordState = statePublishValue(m.state)
+	if m.recordDue(now.Add(time.Second)) {
+		t.Fatal("due with nothing changed")
+	}
+	m.deferRaw, m.deferReason = "1", "CI"
+	if !m.recordDue(now.Add(time.Second)) {
+		t.Fatal("not due after defer set")
+	}
+	m.lastRecordDefer = m.recordDeferKey()
+	m.deferReason = "review"
+	if !m.recordDue(now.Add(time.Second)) {
+		t.Fatal("not due after blocker changed")
+	}
+}

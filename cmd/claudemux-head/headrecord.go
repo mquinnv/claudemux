@@ -24,8 +24,9 @@ type recordWrittenMsg struct{ name string }
 // recordDue reports whether a heartbeat should be written now: inside tmux,
 // bound to a session that can be resumed, not tearing down (a write racing
 // the teardown's delete would bring the record back), and either the
-// interval has passed or the published state changed — so a record never
-// says Idle about a session that died mid-turn a few seconds later.
+// interval has passed or the published state or defer mark changed — so a
+// record never says Idle about a session that died mid-turn a few seconds
+// later, nor loses a blocker typed just before a reboot.
 func (m model) recordDue(now time.Time) bool {
 	if m.selfPane == "" || m.sessionID == "" || m.teardown != teardownIdle {
 		return false
@@ -33,19 +34,33 @@ func (m model) recordDue(now time.Time) bool {
 	if m.lastRecordAt.IsZero() || now.Sub(m.lastRecordAt) >= sessionRecordInterval {
 		return true
 	}
-	return statePublishValue(m.state) != m.lastRecordState
+	return statePublishValue(m.state) != m.lastRecordState || m.recordDeferKey() != m.lastRecordDefer
+}
+
+// recordDeferKey is the defer mark and blocker as one comparable value, for
+// recordDue's change check.
+func (m model) recordDeferKey() string {
+	if m.deferRaw != "1" {
+		return ""
+	}
+	return "1\t" + sanitizeDeferReason(m.deferReason)
 }
 
 // sessionRecordFor builds the record from what the head knows. The session
 // name and launch dir come from tmux, in writeRecordCmd, off the Update loop.
 func (m model) sessionRecordFor(now time.Time) sessionRecord {
-	return sessionRecord{
+	r := sessionRecord{
 		SessionID: m.sessionID,
 		ClaudeCwd: claudeCwdFor(m.sessionCwd, m.workDir, m.jsonlPath),
 		State:     statePublishValue(m.state),
 		Topic:     m.summary.Topic,
 		LastSeen:  now.Unix(),
 	}
+	if m.deferRaw == "1" {
+		r.Deferred = true
+		r.DeferReason = sanitizeDeferReason(m.deferReason)
+	}
+	return r
 }
 
 // claudeCwdFor picks the directory restore should pass as `-C`: the one
