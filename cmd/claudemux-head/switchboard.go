@@ -37,6 +37,9 @@ type swSession struct {
 	// a tmux user option can hold anything, so it is guarded here the way
 	// swNameStyle guards Color. Published once at start, like Color.
 	Emoji string
+	// Description is the project's one-liner (@claudemux_description), ""
+	// when none is declared or the head predates the option.
+	Description string
 	// ClaudePane is the tmux pane id running claude, "" when the session has
 	// none. The lobby previews this pane rather than the session's active one:
 	// a session left focused on its shell would preview a shell prompt, and
@@ -154,7 +157,9 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 11 || f[0] == "" {
+		// 12 fields in production; the description is last and optional so a
+		// listing without it (older fixtures) still parses.
+		if (len(f) != 11 && len(f) != 12) || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
@@ -163,6 +168,9 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1", DeferReason: f[9]}
 		if validProjectEmoji(f[10]) {
 			sess.Emoji = f[10]
+		}
+		if len(f) == 12 {
+			sess.Description = f[11]
 		}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {

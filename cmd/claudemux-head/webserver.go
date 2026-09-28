@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -39,13 +40,14 @@ const (
 // tailnet's MagicDNS suffix and this node's own short name (weblisten.go);
 // see webGuard.
 func webHandler(f *webFleet, allow webAllow) http.Handler {
+	page := renderWebPage(f.title)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
-		_, _ = w.Write(webPageHTML)
+		_, _ = w.Write(page)
 	})
 	mux.HandleFunc("GET /api/fleet", func(w http.ResponseWriter, r *http.Request) {
 		// Headers go on before the marshal so an error response still
@@ -63,6 +65,19 @@ func webHandler(f *webFleet, allow webAllow) http.Handler {
 		_, _ = w.Write(body)
 	})
 	return webRecover(webGuard(mux, allow))
+}
+
+// renderWebPage puts the configured title into the embedded page's <title>
+// and heading, escaped, once at startup — so the page never flashes the
+// default before a poll lands.
+func renderWebPage(title string) []byte {
+	if title == "" || title == defaultWebTitle {
+		return webPageHTML
+	}
+	esc := html.EscapeString(title)
+	s := strings.Replace(string(webPageHTML), "<title>"+defaultWebTitle+"</title>", "<title>"+esc+"</title>", 1)
+	s = strings.Replace(s, "<h1>"+defaultWebTitle+"</h1>", "<h1>"+esc+"</h1>", 1)
+	return []byte(s)
 }
 
 // webTailscaleCGNAT and webTailscaleULA are the two address ranges Tailscale
@@ -260,10 +275,15 @@ func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusA
 		allow = webAllow{}
 	}
 	fleet := newWebFleet()
+	if t := strings.TrimSpace(cfg.Web.Title); t != "" {
+		fleet.title = t
+	}
+	fleet.privacy = newWebPrivacy(cfg.Web.HidePrivateOrgs)
 	server, err := startWebServer(addr, webHandler(fleet, allow))
 	if err != nil {
 		return nil, err
 	}
+	fleet.privacy.start()
 	worker := startHeadlineWorker(fleet, newSummarizer(cfg.Summary), cfg.Web.HeadlineInterval.Duration)
 	return &swWeb{fleet: fleet, worker: worker, server: server}, nil
 }
@@ -281,4 +301,5 @@ func (w *swWeb) stop() {
 	}
 	w.server.stop()
 	w.worker.stop()
+	w.fleet.privacy.stop()
 }

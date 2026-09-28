@@ -103,6 +103,24 @@ func projectDeclaredEmoji(configPath string) string {
 	return e
 }
 
+// projectDeclaredDescription reads the `description:` field from a project
+// config file, whitespace-collapsed and bounded like every other published
+// option value, or "" when the file is absent, unparseable or declares none.
+// Same contract as projectDeclaredEmoji.
+func projectDeclaredDescription(configPath string) string {
+	b, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Description string `yaml:"description"`
+	}
+	if err := yaml.Unmarshal(b, &meta); err != nil {
+		return ""
+	}
+	return sanitizeOptionValue(meta.Description)
+}
+
 // badgedTab puts the project emoji in front of a window label. It returns the
 // label unchanged when there is no emoji, and "" when there is no label — a
 // window renamed to a bare emoji is worse than one left alone, the same reason

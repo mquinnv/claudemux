@@ -19,6 +19,10 @@ name: my-project
 # (🛠️ ⚙️ 🍽️) jitter in tmux+iTerm2 and are ignored. Omit for no badge.
 # emoji: 🧵
 
+# One line saying what this project is. The switchboard's web status page
+# prints it under the session name. Omit for none.
+# description: Terminal multiplexer for a fleet of Claude sessions
+
 # Auto-worktree override for this project. `true` opts in even when
 # launch.auto_worktree is off globally (the default-branch heuristic still
 # applies); `false` exempts this project. Omit to follow the global setting.

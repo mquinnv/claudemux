@@ -223,9 +223,16 @@ type TeardownConfig struct {
 // meant to be reached. HeadlineInterval is the floor between fleet-headline
 // calls, with summary.min_interval's rules: each call bills the user's key,
 // negative is rejected, zero means no floor.
+//
+// Title is the page's heading and browser-tab title ("" keeps
+// "claudemux fleet"). HidePrivateOrgs lists GitHub owners whose PRIVATE
+// repos' sessions are left off the page entirely — public repos of the same
+// owner still show (webprivacy.go).
 type WebConfig struct {
 	Listen           string   `yaml:"listen"`
 	HeadlineInterval Duration `yaml:"headline_interval"`
+	Title            string   `yaml:"title"`
+	HidePrivateOrgs  []string `yaml:"hide_private_orgs"`
 }
 
 func defaultConfig() Config {

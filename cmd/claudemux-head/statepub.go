@@ -164,6 +164,11 @@ const (
 	// file that does not change under a running session, and the lobby never
 	// reads the filesystem.
 	infoEmojiOption = "@claudemux_emoji"
+
+	// infoDescriptionOption carries the project's one-line `description:`
+	// (.claudemux.yml), published once at start like the badge. The web status
+	// page prints it under the session name.
+	infoDescriptionOption = "@claudemux_description"
 )
 
 // infoValueMaxRunes bounds published summary/prompt text. 120 comfortably

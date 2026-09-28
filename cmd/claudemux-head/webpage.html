@@ -23,7 +23,7 @@
   body {
     margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
     font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    max-width: 1100px; margin-inline: auto;
+    max-width: 1400px; margin-inline: auto;
   }
   body.offline { opacity: .55; }
   header { margin-bottom: 14px; }
@@ -47,12 +47,12 @@
   }
   .fleet tbody tr:hover { background: var(--hover); }
   .fleet .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .fleet .c-name { width: 24%; }
-  .fleet .c-state { width: 13%; }
-  .fleet .c-age { width: 6%; }
-  .fleet .c-ctx { width: 6%; }
-  .fleet .c-model { width: 10%; }
-  .fleet .c-reason { width: 30%; }
+  .fleet .c-name { width: 16%; }
+  .fleet .c-state { width: 12%; }
+  .fleet .c-age { width: 72px; }
+  .fleet .c-ctx { width: 56px; }
+  .fleet .c-model { width: 96px; }
+  .fleet .c-reason { width: 28%; }
   .name { font-weight: 600; text-shadow: 0 0 1px rgba(0,0,0,.35); }
   .state { color: var(--busy); }
   tr.waiting td:first-child { box-shadow: inset 3px 0 0 var(--wait); }
@@ -60,6 +60,7 @@
   .dim { color: var(--dim); }
   .topic { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
   .sub { color: var(--dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+  .desc { font-style: italic; }
   .panel {
     background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
   }
@@ -150,6 +151,7 @@
     var bar = el('div', 'bar');
     var fill = el('div');
     fill.style.width = Math.min(100, Math.max(0, w.used_pct)) + '%';
+    if (w.color) fill.style.background = w.color;
     bar.appendChild(fill);
     g.appendChild(lab);
     g.appendChild(bar);
@@ -166,7 +168,8 @@
   function nameCell(s) {
     var n = el('span', 'name', (s.emoji ? s.emoji + ' ' : '') + s.name);
     if (s.color) n.style.color = s.color;
-    var c = td('', n, s.name);
+    var c = td('', n, s.name + (s.description ? '\n' + s.description : ''));
+    if (s.description) c.appendChild(el('div', 'sub desc', s.description));
     // Phones drop the topic column; the topic rides under the name instead.
     if (s.topic) c.appendChild(el('div', 'sub m-topic', s.topic));
     return c;
@@ -202,9 +205,11 @@
   function activeRow(s, now) {
     var r = el('tr', s.waiting ? 'waiting' : '');
     r.appendChild(nameCell(s));
-    r.appendChild(td('', el('span', 'state', s.state), s.state));
+    r.appendChild(td('', el('span', 'state', (s.state_emoji ? s.state_emoji + ' ' : '') + s.state), s.state));
     r.appendChild(td('num dim', ago(s.since, now)));
-    r.appendChild(td('num opt', typeof s.context_pct === 'number' ? s.context_pct + '%' : ''));
+    var ctx = td('num opt', typeof s.context_pct === 'number' ? s.context_pct + '%' : '');
+    if (s.context_color) ctx.style.color = s.context_color;
+    r.appendChild(ctx);
     r.appendChild(td('opt dim', s.model || '', s.model));
     r.appendChild(topicCell(s, s.summary || (s.prompt ? '\u258c ' + s.prompt : '')));
     return r;

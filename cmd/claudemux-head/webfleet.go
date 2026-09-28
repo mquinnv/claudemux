@@ -31,12 +31,22 @@ type webFleet struct {
 	windows  []ModelWindow
 	taken    time.Time
 	headline webHeadline
+
+	// title is the page's heading (web.title); privacy drops sessions the
+	// page must not show (web.hide_private_orgs). Both are set once at
+	// construction and never change.
+	title   string
+	privacy *webPrivacy
 }
 
-func newWebFleet() *webFleet { return &webFleet{} }
+func newWebFleet() *webFleet { return &webFleet{title: defaultWebTitle} }
 
 // publish replaces the fleet facts. Only the lobby's Update calls it.
 func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time) {
+	// Filtered here, before anything reads it, so hidden sessions reach
+	// neither the page, its counts, nor the headline model's prompt. snap is
+	// a copy; reassigning its slice leaves the lobby's own untouched.
+	snap.Sessions = w.privacy.visible(snap.Sessions)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.snap = snap
@@ -90,15 +100,19 @@ type webCounts struct {
 	Deferred int `json:"deferred"`
 }
 
+// Color is the terminal's gauge color for the window (paceColor), so the
+// page's bars band green/yellow/red exactly as the lobby's meters do.
 type webWindow struct {
 	UsedPct  int    `json:"used_pct"`
 	ResetsAt string `json:"resets_at,omitempty"`
+	Color    string `json:"color"`
 }
 
 type webModelWindow struct {
 	Name     string `json:"name"`
 	UsedPct  int    `json:"used_pct"`
 	ResetsAt string `json:"resets_at,omitempty"`
+	Color    string `json:"color"`
 }
 
 type webBudget struct {
@@ -111,17 +125,32 @@ type webSession struct {
 	Name        string `json:"name"`
 	Color       string `json:"color,omitempty"`
 	Emoji       string `json:"emoji,omitempty"`
+	Description string `json:"description,omitempty"`
 	State       string `json:"state"`
+	StateEmoji  string `json:"state_emoji,omitempty"`
 	StateRaw    string `json:"state_raw"`
 	Waiting     bool   `json:"waiting"`
 	Since       string `json:"since,omitempty"`
 	ContextPct  *int   `json:"context_pct,omitempty"`
+	CtxColor    string `json:"context_color,omitempty"`
 	Model       string `json:"model,omitempty"`
 	Topic       string `json:"topic,omitempty"`
 	Summary     string `json:"summary,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
 	Deferred    bool   `json:"deferred"`
 	DeferReason string `json:"defer_reason,omitempty"`
+}
+
+// defaultWebTitle is the page heading when web.title is unset.
+const defaultWebTitle = "claudemux fleet"
+
+// webModelName is the model as the lobby's rows print it ("opus 5.5"), ""
+// when unknown rather than shortModel's em-dash placeholder.
+func webModelName(m string) string {
+	if m == "" {
+		return ""
+	}
+	return shortModel(m)
 }
 
 func webTime(t time.Time) string {
@@ -145,24 +174,30 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 	v := webFleetView{TakenAt: webTime(taken), Sessions: []webSession{}}
 	for _, s := range snap.Sessions {
 		ws := webSession{
-			Name:     s.Name,
-			Emoji:    s.Emoji,
-			State:    webStateWord(s.State),
-			StateRaw: s.State,
-			Waiting:  isWaiting(s.State),
-			Since:    webTime(s.Since),
-			Model:    s.Model,
-			Topic:    s.Topic,
-			Summary:  s.Summary,
-			Prompt:   s.Prompt,
-			Deferred: s.Deferred,
+			Name:        s.Name,
+			Emoji:       s.Emoji,
+			Description: s.Description,
+			State:       webStateWord(s.State),
+			StateRaw:    s.State,
+			Waiting:     isWaiting(s.State),
+			Since:       webTime(s.Since),
+			Model:       webModelName(s.Model),
+			Topic:       s.Topic,
+			Summary:     s.Summary,
+			Prompt:      s.Prompt,
+			Deferred:    s.Deferred,
 		}
 		if isHex6(s.Color) {
 			ws.Color = "#" + s.Color
 		}
+		// The lobby row's action symbol (bell, brain, wrench...), unpadded.
+		if k, ok := publishedStateKind(s.State); ok {
+			ws.StateEmoji = strings.TrimSpace(stateEmoji(k))
+		}
 		if s.Context >= 0 {
 			pct := s.Context
 			ws.ContextPct = &pct
+			ws.CtxColor = thresholdColor(float64(pct))
 		}
 		if s.Deferred {
 			ws.DeferReason = sanitizeDeferReason(s.DeferReason)
@@ -177,12 +212,19 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 		}
 	}
 	if rlOK {
+		now := taken
+		if now.IsZero() {
+			now = time.Now()
+		}
 		b := &webBudget{
-			FiveHour: webWindow{UsedPct: rl.FiveHour.UsedPercent, ResetsAt: webTime(rl.FiveHour.ResetsAt)},
-			Weekly:   webWindow{UsedPct: rl.SevenDay.UsedPercent, ResetsAt: webTime(rl.SevenDay.ResetsAt)},
+			FiveHour: webWindow{UsedPct: rl.FiveHour.UsedPercent, ResetsAt: webTime(rl.FiveHour.ResetsAt),
+				Color: paceColor(rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt, fiveHourWindow, now)},
+			Weekly: webWindow{UsedPct: rl.SevenDay.UsedPercent, ResetsAt: webTime(rl.SevenDay.ResetsAt),
+				Color: paceColor(rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt, weekWindow, now)},
 		}
 		for _, mw := range windows {
-			b.Models = append(b.Models, webModelWindow{Name: mw.Name, UsedPct: mw.UsedPercent, ResetsAt: webTime(mw.ResetsAt)})
+			b.Models = append(b.Models, webModelWindow{Name: mw.Name, UsedPct: mw.UsedPercent, ResetsAt: webTime(mw.ResetsAt),
+				Color: paceColor(mw.UsedPercent, mw.ResetsAt, weekWindow, now)})
 		}
 		v.Budget = b
 	}

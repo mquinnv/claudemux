@@ -269,11 +269,30 @@ suffix a search domain; the guard accepts only this node's own short name as
 a bare host, not any other single-label name. The page leads with a one-sentence
 **headline** for the whole fleet (Haiku, same key and `summary.enabled` switch
 as the per-session summaries; the header shows plain counts until the first one
-lands), then the account's 5-hour and weekly gauges, then one card per session
-with what its lobby row shows: name in the project color, state and time in it,
-context %, model, topic, running summary and last prompt, with deferred sessions
-and their blockers parked at the bottom under a rule. It refreshes itself every
-three seconds and dims with "lobby not reachable" when the lobby is gone.
+lands), then the account's 5-hour and weekly gauges, colored exactly as the
+lobby's meters are, then a compact table with one row per session: name in the
+project color with the project's `description:` under it, the action emoji and
+state, time in it, context %, model, and topic with the running summary (or last
+prompt) under it. Deferred sessions sit in a separate cyan panel below, with
+the blocker each is waiting on. It refreshes itself every three seconds and dims
+with "lobby not reachable" when the lobby is gone.
+
+Two more `web:` keys shape what teammates see:
+
+```yaml
+web:
+  listen: tailscale:7474
+  title: What Michael is Working On   # heading and tab title (default "claudemux fleet")
+  hide_private_orgs: [mquinnv]         # keep these owners' PRIVATE repos off the page
+```
+
+`hide_private_orgs` leaves a session off the page — rows, counts and the
+headline alike — when its directory's `origin` is a private GitHub repo owned by
+one of the listed owners. That owner's public repos, and everyone else's repos,
+still show. Privacy is asked of GitHub's API anonymously, where a private repo
+answers exactly like a missing one, so no token is needed; answers are cached
+for an hour. It fails closed: a session stays hidden until its repo has been
+confirmed public, and a lookup that errors hides it and tries again.
 
 The page is up exactly when the lobby is; closing the lobby closes it. It does
 no authentication: reachability is the tailnet's job, which is why the
@@ -719,6 +738,11 @@ web:
   `tailscale:7474` binds this node's Tailscale IPv4 on port 7474; any other
   `host:port` is bound as written. A value with a missing or non-numeric port is
   rejected at startup, by name.
+- `web.title` — the web status page's heading and browser-tab title. Default
+  `claudemux fleet`.
+- `web.hide_private_orgs` — GitHub owners whose private repos' sessions are left
+  off the web status page (see **Sharing the fleet on the tailnet** above).
+  Default empty: every session shows.
 - `web.headline_interval` — the floor between fleet-headline calls, with
   `summary.min_interval`'s rules: it bounds what the page costs, `0` means no
   floor, negative is rejected. A call only fires when the fleet's topics,
@@ -738,6 +762,7 @@ launch it in. See [`.claudemux.yml.example`](.claudemux.yml.example) for the ful
 color: blue          # tmux status-bar / iTerm2 tab color
 name: my-project      # passed to `claude -n`
 emoji: 🧵             # this project's badge (optional)
+description: Terminal multiplexer for a fleet of Claude sessions  # one line, shown on the web page (optional)
 worktree: true        # opt this project in/out of the auto-worktree marker (optional)
 shell_size: 40%       # how big this project's shell pane is (optional)
 shell_command: gh-hud --repo mquinnv/claudemux  # run it in that pane (optional)

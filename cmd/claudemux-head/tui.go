@@ -427,7 +427,10 @@ type model struct {
 	// change under a running session. projectEmoji is "" when none is declared
 	// or the value is rejected (see validProjectEmoji).
 	projectEmoji string
-	projectName  string
+	// projectDescription is the config's `description:`, published once at
+	// start as @claudemux_description for the web status page.
+	projectDescription string
+	projectName        string
 
 	// worktreePending records that bin/claudemux marked this session as wanting
 	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
@@ -541,6 +544,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.mainCheckout = mainCheckoutFor(wd)
 		cfg := projectConfigPath(wd)
 		m.projectEmoji = projectDeclaredEmoji(cfg)
+		m.projectDescription = projectDeclaredDescription(cfg)
 		m.projectName = projectDeclaredName(cfg)
 	}
 	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
@@ -894,6 +898,9 @@ func (m model) Init() tea.Cmd {
 	// after its project dropped `emoji:` must overwrite the old value, the
 	// reason publishOptionCmd never skips "".
 	if c := publishOptionCmd(m.selfPane, infoEmojiOption, m.projectEmoji); c != nil {
+		cmds = append(cmds, c)
+	}
+	if c := publishOptionCmd(m.selfPane, infoDescriptionOption, m.projectDescription); c != nil {
 		cmds = append(cmds, c)
 	}
 	// The seed call goes out exactly when newModel held the in-flight flag
