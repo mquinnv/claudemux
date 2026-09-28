@@ -54,7 +54,7 @@ func TestStatePublishValueWaitingIsNotEscortable(t *testing.T) {
 
 func TestStatePublishArgs(t *testing.T) {
 	since := time.Unix(1754700000, 0)
-	args, ok := statePublishArgs("%3", "Idle", since)
+	args, ok := statePublishArgs("%3", "Idle", since, false)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -62,6 +62,27 @@ func TestStatePublishArgs(t *testing.T) {
 		"set-option", "-t", "%3", "@claudemux_state", "Idle",
 		";",
 		"set-option", "-t", "%3", "@claudemux_state_since", "1754700000",
+		";",
+		"set-option", "-t", "%3", "-u", "@claudemux_stay",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("got %v, want %v", args, want)
+	}
+}
+
+// The #stay mark rides in the same tmux invocation as the state it explains,
+// so no lobby poll can read the busy state without it.
+func TestStatePublishArgsCarriesStay(t *testing.T) {
+	args, ok := statePublishArgs("%3", "Thinking", time.Unix(1754700000, 0), true)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	want := []string{
+		"set-option", "-t", "%3", "@claudemux_state", "Thinking",
+		";",
+		"set-option", "-t", "%3", "@claudemux_state_since", "1754700000",
+		";",
+		"set-option", "-t", "%3", "@claudemux_stay", "1",
 	}
 	if !reflect.DeepEqual(args, want) {
 		t.Errorf("got %v, want %v", args, want)
@@ -69,16 +90,16 @@ func TestStatePublishArgs(t *testing.T) {
 }
 
 func TestStatePublishArgsSkips(t *testing.T) {
-	if _, ok := statePublishArgs("", "Idle", time.Now()); ok {
+	if _, ok := statePublishArgs("", "Idle", time.Now(), false); ok {
 		t.Error("outside tmux (empty selfPane) must not publish")
 	}
-	if _, ok := statePublishArgs("%3", "", time.Now()); ok {
+	if _, ok := statePublishArgs("%3", "", time.Now(), false); ok {
 		t.Error("empty value must not publish")
 	}
 }
 
 func TestPublishStateCmdNilWhenUnpublishable(t *testing.T) {
-	if cmd := publishStateCmd("", State{Kind: StateIdle}, time.Now()); cmd != nil {
+	if cmd := publishStateCmd("", State{Kind: StateIdle}, time.Now(), false); cmd != nil {
 		t.Error("expected nil cmd outside tmux")
 	}
 }

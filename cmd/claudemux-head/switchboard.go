@@ -55,6 +55,12 @@ type swSession struct {
 	// session was deferred, "" when none was given. Shown on the row's detail
 	// line only while Deferred is set.
 	DeferReason string
+	// Stay mirrors @claudemux_stay: the session's newest typed prompt carried
+	// the #stay marker (see staymark.go), so the turn it started is not a
+	// hand-back — the conductor keeps the human here while it runs. It only
+	// means anything while the session is busy; the head clears it with the
+	// next unmarked prompt.
+	Stay bool
 }
 
 type swSnapshot struct {
@@ -112,7 +118,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -154,13 +160,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 11 || f[0] == "" {
+		if len(f) != 12 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
 			continue
 		}
-		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1", DeferReason: f[9]}
+		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1", DeferReason: f[9], Stay: f[11] == "1"}
 		if validProjectEmoji(f[10]) {
 			sess.Emoji = f[10]
 		}
