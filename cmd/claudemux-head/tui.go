@@ -141,6 +141,10 @@ type model struct {
 	// markers. Tests point it at a temp dir; "" disables the override.
 	askDir string
 
+	// permit tracks whether the claude pane has confirmed the permission
+	// dialog the hook's marker (same dir) announced — see permit.go.
+	permit permitWatch
+
 	// publishedState is the last @claudemux_state value pushed to tmux, so the
 	// poll loop republishes only on change — one subprocess per transition,
 	// not per tick.
@@ -582,6 +586,8 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	bgCount, bgOldest := m.bg.outstanding(now)
 	m.state = classifyState(m.allEvents, bgCount, bgOldest, m.bg.unsure(), now)
 	m.state = askOverride(m.state, m.allEvents, askMarkerTime(m.askDir, m.sessionID))
+	permit := readPermitMarker(m.askDir, m.sessionID)
+	m.state = permitOverride(m.state, permit, m.permit.confirmed(permit))
 	if !m.waitingSince.IsZero() {
 		// Waiting mode: no transcript exists yet, so classifyState's empty-ring
 		// "Idle" is a lie — nothing is waiting on the human, Claude is booting.
@@ -1485,6 +1491,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		now := time.Time(msg)
+		// The verdict lands in m.permit and is read by the next poll's
+		// recompute, so a dialog shows (and clears) within about two ticks.
+		if permit := readPermitMarker(m.askDir, m.sessionID); m.permit.probeDue(permit, m.claudePane, now) {
+			m.permit.probing = true
+			cmds = append(cmds, permitProbeCmd(m.claudePane, permit.At))
+		}
 		if c := m.maybePublishClosing(); c != nil {
 			cmds = append(cmds, c)
 		}
@@ -1647,6 +1659,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.issueSummarize(), allPub)
 		}
 		return m, allPub
+
+	case permitProbeMsg:
+		m.permit.observe(msg.at, msg.up, msg.ok)
+		return m, nil
 
 	case summarizerMsg:
 		m.acquiringKey = false

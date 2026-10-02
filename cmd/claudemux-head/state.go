@@ -274,7 +274,10 @@ func (s State) Label() string {
 	case StateTool:
 		return "Tool: " + s.ToolName
 	case StateAwaiting:
-		return "Awaiting"
+		if s.ToolName == "" {
+			return "Permission"
+		}
+		return "Permission: " + s.ToolName
 	case StateError:
 		return "Error"
 	case StateCompacting:

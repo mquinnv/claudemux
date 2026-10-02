@@ -496,6 +496,15 @@ exactly the wrong verdict for the one session that most needs your attention. Wi
 hook, the head shows **Asking**, and the switchboard marks the session as waiting (dot,
 highlight, auto-escort) just like an idle one.
 
+The same hook covers permission dialogs ("Do you want to proceed?"). Those fail the other
+way round: the tool call is already in the transcript, so a session waiting on your
+keypress reads as **Tool: …** — busy — for as long as the dialog sits there. The hook
+marks the moment a dialog is requested, and the head then checks the `claude` pane for the
+dialog itself, because nothing tells it when you answer: an approved command just starts
+running. While the dialog is on screen the head shows **Permission: _tool_**, and the
+switchboard shows **Awaiting** and treats the session as waiting. A dialog is picked up,
+and cleared, within a couple of seconds.
+
 Two caveats. An Esc'd question can keep reading as **Asking** until you send the next
 prompt — nothing flushes to the transcript on Esc, so there's no signal available to clear
 the marker any sooner; this is inherent to what Claude Code exposes, not a bug in the

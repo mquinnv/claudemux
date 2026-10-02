@@ -49,13 +49,16 @@ type hookScript struct {
 // one, Claude Code runs this hook on EVERY tool call of EVERY session on the
 // machine, blocking each PreToolUse call on a bash+jq spawn just to discover
 // the tool isn't AskUserQuestion. UserPromptSubmit has no matcher — matchers
-// only apply to tool-call events.
+// only apply to tool-call events. PermissionRequest takes a tool-name matcher
+// too but deliberately has none: it fires only when a permission dialog is
+// about to open, which is rare and is the event itself, whatever the tool.
 var hookScripts = []hookScript{
 	{name: "claudemux-map.sh", events: []hookEvent{{event: "SessionStart"}, {event: "UserPromptSubmit"}}},
 	{name: "claudemux-worktree.sh", events: []hookEvent{{event: "UserPromptSubmit"}}},
 	{name: "claudemux-ask.sh", events: []hookEvent{
 		{event: "PreToolUse", matcher: "AskUserQuestion"},
 		{event: "PostToolUse", matcher: "AskUserQuestion"},
+		{event: "PermissionRequest"},
 		{event: "UserPromptSubmit"},
 	}},
 }

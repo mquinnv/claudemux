@@ -473,6 +473,16 @@ func TestHookEnsureRegistersAllScripts(t *testing.T) {
 		}
 	}
 
+	// PermissionRequest fires only when a dialog is about to open, so it needs
+	// no matcher to stay cheap — and must not have one: every tool's dialog
+	// blocks the session the same way.
+	perm := hookCommands(t, settings, "PermissionRequest")
+	if len(perm) != 1 || filepath.Base(perm[0]) != "claudemux-ask.sh" {
+		t.Errorf("PermissionRequest = %v, want only claudemux-ask.sh", perm)
+	} else if matcher, hasKey := hookGroupMatcher(t, settings, "PermissionRequest", perm[0]); hasKey {
+		t.Errorf("PermissionRequest claudemux-ask.sh has matcher %q, want no matcher key", matcher)
+	}
+
 	// UserPromptSubmit is not a tool-call event: none of the three scripts'
 	// entries there may carry a matcher key, empty or otherwise.
 	for _, c := range ups {

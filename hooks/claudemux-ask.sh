@@ -19,8 +19,18 @@
 # check below is defense in depth (e.g. a hand-edited settings.json), not the
 # primary filter.
 #
+# PermissionRequest covers the other dialog that blocks on the human: "Do you
+# want to proceed?" for any tool. There the tool_use IS already in the
+# transcript and reads as a tool that is running. The event fires only when a
+# dialog is about to open, so it needs no matcher. It writes a second marker,
+# <session_id>.permit.json, naming the tool. Nothing here removes that marker
+# when the dialog is answered — no hook fires on approval — so the head
+# confirms against the claude pane that the dialog is still up (permit.go);
+# the marker only tells it when to look. UserPromptSubmit clears it.
+#
 # MUST stay silent on stdout: UserPromptSubmit stdout is injected into the
-# model's context.
+# model's context, and JSON on PermissionRequest's stdout can answer the
+# dialog.
 set -euo pipefail
 
 # No sibling pane can be reading this session's marker outside tmux — same
@@ -55,6 +65,7 @@ case "$session_id" in
 esac
 
 f="$dir/$session_id.json"
+permit="$dir/$session_id.permit.json"
 
 case "$event" in
 PreToolUse)
@@ -70,8 +81,16 @@ PostToolUse)
     [ "$tool" = "AskUserQuestion" ] || exit 0
     rm -f "$f"
     ;;
+PermissionRequest)
+    # AskUserQuestion has its own marker above; one dialog, one name.
+    [ "$tool" != "AskUserQuestion" ] || exit 0
+    mkdir -p "$dir"
+    tmp="$permit.tmp.$$"
+    jq -n --arg sid "$session_id" --arg tool "$tool" '{session_id: $sid, tool_name: $tool}' > "$tmp"
+    mv "$tmp" "$permit"
+    ;;
 UserPromptSubmit)
-    rm -f "$f"
+    rm -f "$f" "$permit"
     ;;
 esac
 

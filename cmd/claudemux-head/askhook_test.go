@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // askHookPath locates hooks/claudemux-ask.sh relative to this test file, so
@@ -211,5 +212,82 @@ func TestAskHookNoJQOnPathExitsSilently(t *testing.T) {
 	}
 	if _, err := os.Stat(askMarkerPath(home, "sess-1")); err == nil {
 		t.Error("marker written despite jq missing from PATH")
+	}
+}
+
+func permitMarkerPath(home, session string) string {
+	return filepath.Join(home, ".claude", "claudemux", "asking", session+".permit.json")
+}
+
+// PermissionRequest fires when a permission dialog is about to open. It is the
+// only hook that does: the tool_use is already in the transcript by then and
+// reads as a tool that is running, so without this marker a session blocked on
+// "Do you want to proceed?" is indistinguishable from one that is working.
+func TestAskHookWritesPermitMarkerOnPermissionRequest(t *testing.T) {
+	requireJQ(t)
+	home := t.TempDir()
+	out := runAskHook(t, home,
+		`{"hook_event_name":"PermissionRequest","tool_name":"mcp__betterstack__chart_alert_help","session_id":"sess-1"}`)
+	// Stdout here is a contract with Claude Code: JSON on it can ALLOW the
+	// call. This hook only observes.
+	if out != "" {
+		t.Errorf("hook spoke on stdout: %q", out)
+	}
+	data, err := os.ReadFile(permitMarkerPath(home, "sess-1"))
+	if err != nil {
+		t.Fatalf("permit marker not written: %v", err)
+	}
+	if !strings.Contains(string(data), `"mcp__betterstack__chart_alert_help"`) {
+		t.Errorf("permit marker %s does not name the tool", data)
+	}
+	if _, err := os.Stat(askMarkerPath(home, "sess-1")); err == nil {
+		t.Error("a permission dialog wrote the AskUserQuestion marker")
+	}
+}
+
+// AskUserQuestion already has its own marker from PreToolUse; a second one
+// would have the head choose between two names for one dialog.
+func TestAskHookPermissionRequestForQuestionIsIgnored(t *testing.T) {
+	requireJQ(t)
+	home := t.TempDir()
+	runAskHook(t, home,
+		`{"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","session_id":"sess-1"}`)
+	if _, err := os.Stat(permitMarkerPath(home, "sess-1")); err == nil {
+		t.Error("permit marker written for AskUserQuestion")
+	}
+}
+
+func TestAskHookUserPromptSubmitRemovesPermitMarker(t *testing.T) {
+	requireJQ(t)
+	home := t.TempDir()
+	runAskHook(t, home,
+		`{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"sess-1"}`)
+	runAskHook(t, home,
+		`{"hook_event_name":"UserPromptSubmit","session_id":"sess-1"}`)
+	if _, err := os.Stat(permitMarkerPath(home, "sess-1")); err == nil {
+		t.Error("permit marker survived a new prompt (UserPromptSubmit)")
+	}
+}
+
+// Each dialog must restamp the marker: the head tells one dialog from the next
+// by the marker's mtime.
+func TestAskHookPermissionRequestRestampsMarker(t *testing.T) {
+	requireJQ(t)
+	home := t.TempDir()
+	runAskHook(t, home,
+		`{"hook_event_name":"PermissionRequest","tool_name":"Bash","session_id":"sess-1"}`)
+	path := permitMarkerPath(home, "sess-1")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	runAskHook(t, home,
+		`{"hook_event_name":"PermissionRequest","tool_name":"Edit","session_id":"sess-1"}`)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().After(old) {
+		t.Error("a second dialog did not restamp the marker")
 	}
 }

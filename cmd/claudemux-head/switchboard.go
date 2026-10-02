@@ -83,13 +83,14 @@ type swSnapshot struct {
 }
 
 // isWaiting reports whether a published state means "paused waiting on
-// input": Claude's turn ended, or an AskUserQuestion is pending. Exact-match
-// on statePublishValue strings — anything unknown is not waiting.
+// input": Claude's turn ended, an AskUserQuestion is pending, or a permission
+// dialog is up ("Awaiting"). Exact-match on statePublishValue strings —
+// anything unknown is not waiting.
 // "Tool:AskUserQuestion" stays for heads older than the Asking state, which
 // could publish it in the brief window after a question flushed. "Unsure:N"
 // is deliberately absent: it is Idle the head no longer trusts.
 func isWaiting(state string) bool {
-	return state == "Idle" || state == "Asking" || state == "Tool:AskUserQuestion"
+	return state == "Idle" || state == "Asking" || state == "Awaiting" || state == "Tool:AskUserQuestion"
 }
 
 // isBooting reports the one published state that is neither waiting nor
