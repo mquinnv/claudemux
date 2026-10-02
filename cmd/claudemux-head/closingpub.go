@@ -115,17 +115,63 @@ func closingText(v string) string {
 	return "⏻ closing"
 }
 
-// swCloseStyle and swBadgeCloseStyle are the closing hue — ANSI 256 "204", a
-// rose that is none of the lobby's other signals: waiting orange (214), busy
-// blue (39), deferred cyan (45), conducting green (35).
+// swCloseStyle is the closing hue — ANSI 256 "204", a rose that is none of
+// the lobby's other signals: waiting orange (214), busy blue (39), deferred
+// cyan (45), conducting green (35).
+var swCloseStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("204"))
+
+// The closing badge comes in three looks, one per thing the row is telling
+// the human about the teardown:
+//
+//   - running: the wrap-up is still working (or claude is exiting). Rose
+//     text on a dark chip — on its way, nothing to do.
+//   - waiting: the wrap-up stopped to ask (its single confirmation) or
+//     ended with the gate still shut. The waiting orange, filled, because
+//     the session is waiting on the human exactly as an Idle row is.
+//   - ready: the gate is open (or `X` armed the direct kill); one more key
+//     in the head ends the session. Filled rose.
 var (
-	swCloseStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("204"))
-	swBadgeCloseStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("204"))
+	swBadgeCloseRunStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("204")).Background(lipgloss.Color("236"))
+	swBadgeCloseWaitStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("214"))
+	swBadgeCloseReadyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("204"))
 )
 
-// swCloseBadgeText is the lobby row's CLOSE badge, leading separator space
-// included. Deliberately the same width as swDeferBadgeText, so the two share
-// one reserve in swTopicW.
-func swCloseBadgeText() string {
-	return " " + swBadgeCloseStyle.Render(" CLOSE ")
+// swCloseBadgeLabelW is the widest badge label ("CONFIRM"); every label is
+// padded to it so the badge is one width whatever the phase, and swTopicW's
+// reserve (swCloseBadgeW) holds for all of them.
+const swCloseBadgeLabelW = 7
+
+// swCloseBadgeLabel picks a closing row's badge from its published phase and
+// its published state. The phase alone cannot say whether a wrap-up is still
+// running or has stopped to ask for its confirmation — the head publishes
+// "wrapup" for both — but the row's state can: a wrap-up turn that is
+// waiting is waiting on the human.
+func swCloseBadgeLabel(closing, state string) (string, lipgloss.Style) {
+	switch closing {
+	case "wrapup":
+		if isWaiting(state) {
+			return "CONFIRM", swBadgeCloseWaitStyle
+		}
+		return "/DONE", swBadgeCloseRunStyle
+	case "blocked":
+		return "BLOCKED", swBadgeCloseWaitStyle
+	case "ready":
+		return "READY", swBadgeCloseReadyStyle
+	case "direct":
+		return "KILL?", swBadgeCloseReadyStyle
+	case "exiting":
+		return "EXITING", swBadgeCloseRunStyle
+	}
+	return "CLOSE", swBadgeCloseReadyStyle
 }
+
+// swCloseBadgeText is the lobby row's closing badge, leading separator space
+// included, for a session with the given phase and state.
+func swCloseBadgeText(closing, state string) string {
+	label, style := swCloseBadgeLabel(closing, state)
+	return " " + style.Render(" "+swPad(label, swCloseBadgeLabelW)+" ")
+}
+
+// swCloseBadgeW is every closing badge's display width (see
+// swCloseBadgeLabelW), for swTopicW's reserve.
+var swCloseBadgeW = lipgloss.Width(swCloseBadgeText("", ""))

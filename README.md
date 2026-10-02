@@ -238,7 +238,10 @@ press `d` again.
 **Closing sessions** get a list of their own too. A session whose teardown is in flight
 — you typed `/done` in it, pressed `x` or `X` in its status pane, or it is sitting at
 `⏻ press x to tear down` — moves under a `─ closing ─` rule, between the working fleet
-and the deferred rows, with a ` CLOSE ` badge and the teardown's phase leading its
+and the deferred rows, with a badge that says where the teardown stands — ` /DONE `
+while the wrap-up is still working, ` CONFIRM ` (orange) once it stops to ask you,
+` BLOCKED ` if it ended with the gate shut, ` READY ` when one more `x` tears it down
+(` KILL? ` for an armed `X`, ` EXITING ` on the way out) — and the teardown's phase leading its
 second line (`⏻ wrapping up…`, `⏻ wrap-up blocked`, `⏻ press x to tear down`, …). The
 status line counts them (`· 2 closing`). This is a listing change only: a closing
 session that is waiting is waiting on *you* — the wrap-up's confirmation, the final

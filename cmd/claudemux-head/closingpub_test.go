@@ -218,7 +218,7 @@ func TestSwModelViewDrawsClosingDividerAndBadge(t *testing.T) {
 	if !strings.Contains(lines[web-1], swClosingDividerLabel) {
 		t.Errorf("line above the first closing row = %q, want the closing divider", lines[web-1])
 	}
-	if !strings.Contains(lines[web], "CLOSE") {
+	if !strings.Contains(lines[web], "READY") {
 		t.Errorf("closing row lacks its badge: %q", lines[web])
 	}
 	if !strings.Contains(lines[web+1], "press x to tear down") {
@@ -227,7 +227,7 @@ func TestSwModelViewDrawsClosingDividerAndBadge(t *testing.T) {
 	if !strings.Contains(lines[scratch-1], swDividerLabel) {
 		t.Errorf("line above the first deferred row = %q, want the deferred divider", lines[scratch-1])
 	}
-	if strings.Contains(lines[row("api")], "CLOSE") {
+	if strings.Contains(lines[row("api")], "READY") {
 		t.Error("an active row must not carry the closing badge")
 	}
 }
@@ -263,11 +263,11 @@ func TestSwModelViewBothDividersCountedInListBudget(t *testing.T) {
 // exactly as DEFER is, so a narrow pane clips the topic and not the badge.
 func TestSwModelViewClosingBadgeSurvivesNarrowPane(t *testing.T) {
 	m := swTestModel()
-	m.width = swRowChromeW + swTopicColMinW + lipgloss.Width(swCloseBadgeText())
+	m.width = swRowChromeW + swTopicColMinW + swCloseBadgeW
 	m.snap.Sessions = []swSession{
 		{Name: "api", State: "Idle", Context: 37, Topic: "a long topic that will be clipped", Model: "claude-opus-4-7", Closing: "ready"},
 	}
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "CLOSE") {
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "READY") {
 		t.Errorf("badge clipped at width %d:\n%s", m.width, view)
 	}
 }
@@ -347,6 +347,34 @@ func TestWebPageRendersClosingSection(t *testing.T) {
 	for _, want := range []string{`id="closing"`, "closingRow", "s.closing_label", "v.counts.closing"} {
 		if !strings.Contains(string(webPageHTML), want) {
 			t.Errorf("webpage.html lacks %q", want)
+		}
+	}
+}
+
+// The closing badge tells running, waiting-on-you and ready apart, and every
+// variant is the one width swTopicW reserved for.
+func TestSwCloseBadgeByPhase(t *testing.T) {
+	cases := []struct {
+		closing, state, want string
+		style                lipgloss.Style
+	}{
+		{"wrapup", "Busy", "/DONE", swBadgeCloseRunStyle},
+		{"wrapup", "Tool:Bash", "/DONE", swBadgeCloseRunStyle},
+		{"wrapup", "Awaiting", "CONFIRM", swBadgeCloseWaitStyle},
+		{"wrapup", "Tool:AskUserQuestion", "CONFIRM", swBadgeCloseWaitStyle},
+		{"blocked", "Idle", "BLOCKED", swBadgeCloseWaitStyle},
+		{"ready", "Idle", "READY", swBadgeCloseReadyStyle},
+		{"direct", "Busy", "KILL?", swBadgeCloseReadyStyle},
+		{"exiting", "Idle", "EXITING", swBadgeCloseRunStyle},
+		{"from-a-newer-head", "Idle", "CLOSE", swBadgeCloseReadyStyle},
+	}
+	for _, c := range cases {
+		label, style := swCloseBadgeLabel(c.closing, c.state)
+		if label != c.want || style.GetBackground() != c.style.GetBackground() {
+			t.Errorf("swCloseBadgeLabel(%q, %q) = %q, want %q in its style", c.closing, c.state, label, c.want)
+		}
+		if w := lipgloss.Width(swCloseBadgeText(c.closing, c.state)); w != swCloseBadgeW {
+			t.Errorf("badge for %q/%q is %d wide, want %d", c.closing, c.state, w, swCloseBadgeW)
 		}
 	}
 }

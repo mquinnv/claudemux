@@ -1253,7 +1253,7 @@ func (m swModel) View() string {
 	// reserve covers both badges: a row wears at most one, and the wider.
 	reserve := 0
 	if anyBadge {
-		reserve = max(lipgloss.Width(swDeferBadgeText()), lipgloss.Width(swCloseBadgeText()))
+		reserve = max(lipgloss.Width(swDeferBadgeText()), swCloseBadgeW)
 	}
 	topicW := swTopicW(m.width, reserve)
 
@@ -1303,11 +1303,11 @@ func (m swModel) View() string {
 		name := swNameStyle(sess.Color, i == m.sel).
 			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
 		// The badge names the group the row is listed in (swGroupOf), so a
-		// session that is both closing and deferred wears CLOSE.
+		// session that is both closing and deferred wears the closing badge.
 		badge := ""
 		switch swGroupOf(sess) {
 		case swGroupClosing:
-			badge = swCloseBadgeText()
+			badge = swCloseBadgeText(sess.Closing, sess.State)
 		case swGroupDeferred:
 			badge = swDeferBadgeText()
 		}
