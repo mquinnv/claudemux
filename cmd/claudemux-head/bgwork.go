@@ -8,21 +8,22 @@ import (
 	"time"
 )
 
-// Tracking work a session launched and then stopped waiting on: async agents
-// and background shells. Both resolve their tool_use at LAUNCH, so the main
+// Tracking work a session launched and then stopped waiting on: async agents,
+// background shells and monitors. All resolve their tool_use at LAUNCH, so the main
 // thread's turn ends and classifyState would otherwise call the session Idle —
 // which isWaiting reads as "waiting on the human", sending the switchboard's
 // conductor into a session that is busy.
 //
 // Whether a launch happened is decided by the harness's own record on the
-// tool_result entry — Event.BgTaskID, Event.BgAgentID and
-// Event.BgQueuedAgentID, read from the top-level `toolUseResult` — never by
-// the result's text. That covers all five ways background work starts: a
+// tool_result entry — Event.BgTaskID, Event.BgAgentID, Event.BgQueuedAgentID
+// and Event.BgMonitorID, read from the top-level `toolUseResult` — never by
+// the result's text. That covers all six ways background work starts: a
 // backgrounded shell, an async agent, a forked background skill, a SendMessage
-// that RESUMES a stopped agent, and a SendMessage the harness only QUEUED,
-// which sets an agent running again after its previous run has already
-// notified (see extractLaunch for each record's shape). Completions are
-// recognized by the notification that carries the same id back. See
+// that RESUMES a stopped agent, a SendMessage the harness only QUEUED, which
+// sets an agent running again after its previous run has already notified,
+// and a Monitor (see extractLaunch for each record's shape). Completions are
+// recognized by the notification that carries the same id back, except a
+// Monitor's streamed events, which share its id (see bgStatusRe). See
 // docs/superpowers/specs/2026-08-11-background-work-state-design.md for the
 // verified event shapes.
 //
@@ -66,6 +67,10 @@ type bgLaunch struct {
 	// looks like. Such a launch counts only while the agent's own transcript
 	// proves it — no spawn grace, since the file is already there.
 	Queued bool
+	// Monitor marks a Monitor launch, which ends at Timeout (zero for a
+	// persistent monitor) rather than at either cap below.
+	Monitor bool
+	Timeout time.Duration
 }
 
 // bgLaunches returns the background work this event started. An entry
@@ -81,8 +86,23 @@ func bgLaunches(e Event) []bgLaunch {
 	if e.BgQueuedAgentID != "" {
 		ids = append(ids, bgLaunch{ID: e.BgQueuedAgentID, Agent: true, Queued: true})
 	}
+	if e.BgMonitorID != "" {
+		ids = append(ids, bgLaunch{ID: e.BgMonitorID, Monitor: true, Timeout: e.BgMonitorTimeout})
+	}
 	return ids
 }
+
+// bgStatusRe and bgMonitorExpiredRe tell a task's last notification from a
+// Monitor's streamed events, which arrive under the same id while it runs.
+// Across this machine's transcripts on 2026-10-02, every notification that
+// ends a task carries a <status> (3886 of them), including the "stream ended"
+// that closes a Monitor. The 366 streamed events carry an <event> and no
+// <status>. The one event that ends a monitor is its expiry notice (10
+// observed), which says so in the event text.
+var (
+	bgStatusRe         = regexp.MustCompile(`<status>[^<>]*</status>`)
+	bgMonitorExpiredRe = regexp.MustCompile(`<event>\[Monitor expired`)
+)
 
 // bgCompletions returns the ids this event reports as finished. Both delivery
 // forms count: the queue-operation that lands the moment the task ends, and the
@@ -94,6 +114,9 @@ func bgCompletions(e Event) []string {
 	for _, text := range []string{e.QueueText, e.UserText} {
 		if !strings.HasPrefix(strings.TrimSpace(text), bgNotificationPrefix) {
 			continue
+		}
+		if !bgStatusRe.MatchString(text) && !bgMonitorExpiredRe.MatchString(text) {
+			continue // a Monitor event: the monitor is still running
 		}
 		if m := bgTaskIDRe.FindStringSubmatch(text); m != nil {
 			ids = append(ids, m[1])
@@ -127,6 +150,14 @@ const (
 	bgAgentSpawnGrace = 2 * time.Minute
 )
 
+// A Monitor states its own lifetime on the launch record and the harness ends
+// it there, so that is its expiry. The shell cap is the wrong one, because a
+// monitor routinely outlives it (timeouts up to an hour are common).
+// bgMonitorGrace covers the gap between the harness ending it and the notice
+// landing. A persistent monitor has no timeout and runs until the session
+// ends, so it falls back to bgAgentMaxAge.
+const bgMonitorGrace = 2 * time.Minute
+
 // bgTask is one tracked launch: when it started and which expiry regime
 // applies to it.
 type bgTask struct {
@@ -136,6 +167,10 @@ type bgTask struct {
 	// queued SendMessage rather than a launch record, so it never gets the
 	// spawn grace.
 	queued bool
+	// monitor and timeout are bgLaunch.Monitor and bgLaunch.Timeout carried
+	// forward.
+	monitor bool
+	timeout time.Duration
 }
 
 // bgTracker holds the background tasks a session has launched and not yet
@@ -219,7 +254,7 @@ func (b *bgTracker) observe(events []Event, now time.Time) {
 			if _, tracked := b.tasks[l.ID]; tracked && l.Queued {
 				continue
 			}
-			task := bgTask{at: at, agent: l.Agent, queued: l.Queued}
+			task := bgTask{at: at, agent: l.Agent, queued: l.Queued, monitor: l.Monitor, timeout: l.Timeout}
 			// A launch the head never once saw alive is history, not news: a
 			// seed replaying an 8-hour-old shell that never notified must not
 			// be counted, because it would expire on the very next poll and
@@ -268,6 +303,12 @@ func (b *bgTracker) unsure() int {
 // constants for the regime rationale. The os.Stat here runs per outstanding
 // agent per poll (~1/s), a handful of stats at most.
 func (b *bgTracker) alive(id string, task bgTask, now time.Time) bool {
+	if task.monitor {
+		if task.timeout == 0 {
+			return now.Sub(task.at) <= bgAgentMaxAge
+		}
+		return now.Sub(task.at) <= task.timeout+bgMonitorGrace
+	}
 	if !task.agent {
 		return now.Sub(task.at) <= bgShellMaxAge
 	}

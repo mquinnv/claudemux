@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // commandNameRe and commandArgsRe extract the inner text of the tags Claude Code
@@ -119,6 +120,11 @@ type Event struct {
 	// not one of this session's agents. It is kept apart from BgAgentID so
 	// bgTracker can hold it to a stricter liveness test. See extractLaunch.
 	BgQueuedAgentID string
+	// BgMonitorID is the task id of a Monitor the harness started, and
+	// BgMonitorTimeout the lifetime it gave that monitor. Zero means a
+	// persistent monitor, which has no timeout. See extractLaunch.
+	BgMonitorID      string
+	BgMonitorTimeout time.Duration
 	// ContinuedIn is the successor session id from a `continued-in` record —
 	// the harness's note that this transcript is finished and the
 	// conversation carries on in <continuedInSessionId>.jsonl (a park into a
@@ -361,6 +367,9 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 		Pin              struct {
 			ID string `json:"id"`
 		} `json:"pin"`
+		TaskID     string `json:"taskId"`
+		TimeoutMs  *int64 `json:"timeoutMs"`
+		Persistent bool   `json:"persistent"`
 	}
 	if json.Unmarshal(toolUseResult, &res) != nil {
 		return
@@ -407,6 +416,18 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 	// a recently-written transcript, and anything else has no file to find.
 	if ev.BgAgentID == "" && res.Success && res.Pin.ID != "" {
 		ev.BgQueuedAgentID = res.Pin.ID
+	}
+	// A Monitor launch writes `{taskId, timeoutMs, persistent}` and nothing
+	// else — all 35 Monitor launches on this machine as of 2026-10-02 (see
+	// testdata/launch-monitor.jsonl). Missing it is what made a session
+	// streaming a monitor's events publish Idle between them. timeoutMs is
+	// required as well as taskId so that some other tool's `taskId` cannot
+	// read as a monitor; a persistent monitor writes timeoutMs 0.
+	if res.TaskID != "" && res.TimeoutMs != nil {
+		ev.BgMonitorID = res.TaskID
+		if !res.Persistent {
+			ev.BgMonitorTimeout = time.Duration(*res.TimeoutMs) * time.Millisecond
+		}
 	}
 }
 
