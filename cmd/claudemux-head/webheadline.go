@@ -24,9 +24,9 @@ const (
 
 const headlineSystemPrompt = `You write the one-line headline for a status page that shows every live coding session one engineer is running with Claude Code.
 
-You are given the sessions: each has a name, a state (Idle means it is waiting on the engineer; Thinking or Tool:* means Claude is working), what the session is for, what it is doing right now, and whether it is deferred (blocked on something outside the sessions) and on what.
+You are given the sessions: each has a name, a state (Idle means it is waiting on the engineer; Thinking or Tool:* means Claude is working), what the session is for, what it is doing right now, whether it is deferred (blocked on something outside the sessions) and on what, and whether it is closing (its work is finished and the session is being wrapped up and shut down).
 
-Report one sentence, present tense, under 140 characters, that says what the engineer is working on overall and what, if anything, is waiting on them or blocked. Name the work, not the tool. Do not list every session. Do not start with "The engineer" or "Michael". No preamble, no quotes.`
+Report one sentence, present tense, under 140 characters, that says what the engineer is working on overall and what, if anything, is waiting on them or blocked. A closing session is finished work, not work in progress: leave it out unless nothing else is running. Name the work, not the tool. Do not list every session. Do not start with "The engineer" or "Michael". No preamble, no quotes.`
 
 // buildHeadlinePrompt is the user message: one line per session, lobby
 // order, no prompts. The raw prompt is the one field that can carry a
@@ -41,6 +41,9 @@ func buildHeadlinePrompt(sessions []swSession) string {
 		}
 		if s.Summary != "" {
 			fmt.Fprintf(&b, " — now: %s", s.Summary)
+		}
+		if s.Closing != "" {
+			b.WriteString(" — closing")
 		}
 		if s.Deferred {
 			b.WriteString(" — deferred")

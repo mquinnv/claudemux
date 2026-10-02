@@ -162,6 +162,9 @@ type model struct {
 	// publishedStay is the #stay mark of the last state publish (see
 	// stayMarkerOption), part of the same guard.
 	publishedStay bool
+	// publishedClosing is the last @claudemux_closing value pushed to tmux
+	// (closingPublishValue), "" when the option is unset.
+	publishedClosing string
 
 	// publishedContext/-Summary/-Prompt/-Model are the last-published info
 	// option values (context as integer percent; -1 = never published, since 0
@@ -906,6 +909,12 @@ func (m model) Init() tea.Cmd {
 	if c := publishOptionCmd(m.selfPane, infoDescriptionOption, m.projectDescription); c != nil {
 		cmds = append(cmds, c)
 	}
+	// A head always starts with no teardown in flight, so whatever a previous
+	// head left in the closing mark is stale: without this, a session whose
+	// head restarted mid-wrap-up would sit in the lobby's closing list forever.
+	if c := publishClosingCmd(m.selfPane, ""); c != nil {
+		cmds = append(cmds, c)
+	}
 	// The seed call goes out exactly when newModel held the in-flight flag
 	// for it: a summarizer exists, a real session is bound (not waiting
 	// mode), and its transcript has something to describe. Keying on the
@@ -1476,6 +1485,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		now := time.Time(msg)
+		if c := m.maybePublishClosing(); c != nil {
+			cmds = append(cmds, c)
+		}
 		if m.recordDue(now) {
 			m.lastRecordAt = now
 			m.lastRecordState = statePublishValue(m.state)

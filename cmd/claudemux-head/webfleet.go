@@ -98,6 +98,7 @@ type webCounts struct {
 	Sessions int `json:"sessions"`
 	Waiting  int `json:"waiting"`
 	Deferred int `json:"deferred"`
+	Closing  int `json:"closing"`
 }
 
 // Color is the terminal's gauge color for the window (paceColor), so the
@@ -139,6 +140,11 @@ type webSession struct {
 	Prompt      string `json:"prompt,omitempty"`
 	Deferred    bool   `json:"deferred"`
 	DeferReason string `json:"defer_reason,omitempty"`
+	// Closing is the head's teardown phase (closingPublishValue), omitted when
+	// the session is not closing; ClosingLabel is that phase as the page
+	// prints it.
+	Closing      string `json:"closing,omitempty"`
+	ClosingLabel string `json:"closing_label,omitempty"`
 }
 
 // defaultWebTitle is the page heading when web.title is unset.
@@ -186,6 +192,10 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 			Summary:     s.Summary,
 			Prompt:      s.Prompt,
 			Deferred:    s.Deferred,
+			Closing:     s.Closing,
+			// The lobby's wording without its ⏻ glyph: the page's closing
+			// section already carries one in its heading.
+			ClosingLabel: strings.TrimPrefix(closingText(s.Closing), "⏻ "),
 		}
 		if isHex6(s.Color) {
 			ws.Color = "#" + s.Color
@@ -207,7 +217,12 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 		if ws.Waiting {
 			v.Counts.Waiting++
 		}
-		if s.Deferred {
+		// One list each, as the lobby groups them (swGroupOf): a session that
+		// is both closing and deferred is counted where it is shown.
+		switch swGroupOf(s) {
+		case swGroupClosing:
+			v.Counts.Closing++
+		case swGroupDeferred:
 			v.Counts.Deferred++
 		}
 	}
@@ -241,7 +256,9 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 // webFingerprint hashes what the headline is written from — the facts that
 // describe what the fleet is DOING. Timers, context percentages and the raw
 // prompt are left out on purpose: they move constantly, and each move must
-// not look like a reason for another billable call.
+// not look like a reason for another billable call. For the same reason a
+// closing session contributes the fact that it is closing and not its phase,
+// which steps through several values on the way out.
 func webFingerprint(sessions []swSession) string {
 	var b strings.Builder
 	for _, s := range sessions {
@@ -249,7 +266,11 @@ func webFingerprint(sessions []swSession) string {
 		if s.Deferred {
 			reason = "deferred:" + sanitizeDeferReason(s.DeferReason)
 		}
-		b.WriteString(strings.Join([]string{s.Name, webStateWord(s.State), s.Topic, s.Summary, reason}, "\x1f"))
+		closing := ""
+		if s.Closing != "" {
+			closing = "closing"
+		}
+		b.WriteString(strings.Join([]string{s.Name, webStateWord(s.State), s.Topic, s.Summary, reason, closing}, "\x1f"))
 		b.WriteString("\x1e")
 	}
 	sum := sha256.Sum256([]byte(b.String()))

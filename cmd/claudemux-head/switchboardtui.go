@@ -470,7 +470,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}")
+			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -1076,49 +1076,64 @@ func swSessionRows(sess swSession) int {
 	return 1
 }
 
-// swDividerLabel is the divider's own text, rule segment included. The rule
-// character is part of it deliberately: the status line already ends in
-// "· N deferred", and the word alone would not tell the two apart.
-const swDividerLabel = "─ deferred "
+// swDividerLabel and swClosingDividerLabel are the dividers' own text, rule
+// segment included. The rule character is part of each deliberately: the
+// status line already ends in "· N closing · N deferred", and the words alone
+// would not tell a divider from that.
+const (
+	swDividerLabel        = "─ deferred "
+	swClosingDividerLabel = "─ closing "
+)
 
-// swDividerIndex is the index of the row the deferred divider is drawn above
-// — the first deferred session — or -1 when there is none to draw. A fleet
-// with nothing deferred has no boundary; a fleet with nothing but deferred
-// sessions has one at the very top, where a rule would separate them from
-// nothing at all, so both cases return -1.
+// swDividerAt is the label of the divider drawn above row i, "" when there is
+// none. A divider marks where the closing or the deferred group begins — but
+// only below another group: one that opens the list would separate its rows
+// from nothing at all, and a fleet with a single group has no boundary.
 //
-// Derived from the list rather than assumed: the divider marks wherever the
-// deferred run actually starts, so a snapshot that somehow arrived unsorted
-// still draws the rule in a place that means something.
-func swDividerIndex(sessions []swSession) int {
-	for i, sess := range sessions {
-		if sess.Deferred {
-			if i == 0 {
-				return -1
-			}
-			return i
-		}
+// Derived from the neighbouring rows rather than assumed from the sort: the
+// rule marks wherever a group actually starts, so a snapshot that somehow
+// arrived unsorted still draws its rules in places that mean something.
+func swDividerAt(sessions []swSession, i int) string {
+	if i <= 0 || i >= len(sessions) {
+		return ""
 	}
-	return -1
+	g := swGroupOf(sessions[i])
+	if g == swGroupOf(sessions[i-1]) {
+		return ""
+	}
+	switch g {
+	case swGroupClosing:
+		return swClosingDividerLabel
+	case swGroupDeferred:
+		return swDividerLabel
+	}
+	return ""
 }
 
-// swDividerLine renders that boundary: a labelled rule spanning the pane, in
-// the defer hue the badge and marker already use.
-func swDividerLine(width int) string {
-	body := " " + swDividerLabel
+// swDividerLine renders a boundary: a labelled rule spanning the pane, in the
+// hue its group's badge already uses.
+func swDividerLine(label string, width int) string {
+	body := " " + label
 	if pad := width - lipgloss.Width(body); pad > 0 {
 		body += strings.Repeat("─", pad)
+	}
+	if label == swClosingDividerLabel {
+		return swCloseStyle.Render(body)
 	}
 	return swDeferStyle.Render(body)
 }
 
-// swDetailLine is a row's styled second line, unclipped: the defer blocker
-// first, then the summary, then the prompt, joined by " · " and omitting
-// whichever are empty; "" when all three are. The blocker leads because
-// clipLine truncates from the right — on a narrow lobby it is the summary
-// that gives way, not the one thing saying why the session is parked.
+// swDetailLine is a row's styled second line, unclipped: the teardown phase
+// first, then the defer blocker, then the summary, then the prompt, joined by
+// " · " and omitting whichever are empty; "" when all are. The phase and the
+// blocker lead because clipLine truncates from the right — on a narrow lobby
+// it is the summary that gives way, not the one thing saying why the session
+// is listed where it is.
 func swDetailLine(sess swSession) string {
 	var parts []string
+	if phase := closingText(sess.Closing); phase != "" {
+		parts = append(parts, swCloseStyle.Render(phase))
+	}
 	if sess.Deferred {
 		if reason := sanitizeDeferReason(sess.DeferReason); reason != "" {
 			parts = append(parts, swDeferStyle.Render("◆ "+reason))
@@ -1222,33 +1237,33 @@ func (m swModel) View() string {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
 
-	anyDeferred := false
+	anyBadge := false
 	for _, sess := range m.snap.Sessions {
-		if sess.Deferred {
-			anyDeferred = true
+		if sess.Deferred || sess.Closing != "" {
+			anyBadge = true
 		}
 	}
 	lay, start, end := m.listWindow()
 
 	// One width for the whole render, so the topic column is a column. The
 	// badge's width is reserved whenever ANY session in the fleet is
-	// deferred, not just on that session's own row — every row must agree on
-	// topicW, so a per-row reserve would shear the grid the same way an
-	// unreserved one truncates the badge (see swTopicW).
+	// deferred or closing, not just on that session's own row — every row
+	// must agree on topicW, so a per-row reserve would shear the grid the
+	// same way an unreserved one truncates the badge (see swTopicW). One
+	// reserve covers both badges: a row wears at most one, and the wider.
 	reserve := 0
-	if anyDeferred {
-		reserve = lipgloss.Width(swDeferBadgeText())
+	if anyBadge {
+		reserve = max(lipgloss.Width(swDeferBadgeText()), lipgloss.Width(swCloseBadgeText()))
 	}
 	topicW := swTopicW(m.width, reserve)
 
-	divider := swDividerIndex(m.snap.Sessions)
 	for i := start; i < end; i++ {
 		sess := m.snap.Sessions[i]
-		// The rule goes above the first deferred row even when the window
+		// The rule goes above a group's first row even when the window
 		// opens on it — scrolled to the bottom of a long fleet, that is the
 		// one place the boundary still needs saying.
-		if i == divider {
-			rule := swDividerLine(m.width)
+		if label := swDividerAt(m.snap.Sessions, i); label != "" {
+			rule := swDividerLine(label, m.width)
 			if m.width > 0 {
 				rule = clipLine(rule, m.width)
 			}
@@ -1287,8 +1302,13 @@ func (m swModel) View() string {
 		// cells.
 		name := swNameStyle(sess.Color, i == m.sel).
 			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
+		// The badge names the group the row is listed in (swGroupOf), so a
+		// session that is both closing and deferred wears CLOSE.
 		badge := ""
-		if sess.Deferred {
+		switch swGroupOf(sess) {
+		case swGroupClosing:
+			badge = swCloseBadgeText()
+		case swGroupDeferred:
 			badge = swDeferBadgeText()
 		}
 		line := fmt.Sprintf(" %s %s %s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
@@ -1438,14 +1458,13 @@ func (m swModel) View() string {
 // footer lines, where no key could reach it.
 func (m swModel) listWindow() (lay swLayout, start, end int) {
 	want := 0
-	divider := swDividerIndex(m.snap.Sessions)
 	rows := make([]int, len(m.snap.Sessions))
 	for i, sess := range m.snap.Sessions {
 		rows[i] = swSessionRows(sess)
-		// The divider rides on the row it sits above, so it is budgeted
+		// A divider rides on the row it sits above, so it is budgeted
 		// wherever that row is: View draws it whenever that row is drawn, and
 		// an unbudgeted line here would push the bottom of the pane off.
-		if i == divider {
+		if swDividerAt(m.snap.Sessions, i) != "" {
 			rows[i]++
 		}
 		want += rows[i]

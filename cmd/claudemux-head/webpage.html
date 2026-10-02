@@ -6,17 +6,21 @@
 <title>claudemux fleet</title>
 <style>
   /* --defer-badge is the terminal's deferred color (ANSI 256 "45", see
-     swDeferStyle in deferpub.go); --defer is a darker cyan for light-mode text. */
+     swDeferStyle in deferpub.go); --defer is a darker cyan for light-mode text.
+     --close-badge is likewise the terminal's closing color (ANSI 256 "204",
+     swCloseStyle in closingpub.go), with --close its darker light-mode text. */
   :root {
     --bg: #fafafa; --fg: #1a1a1a; --dim: #6b6b6b; --card: #ffffff; --line: #e3e3e3;
     --wait: #d97706; --busy: #2563eb; --defer: #0e7490; --defer-badge: #00d7ff; --defer-ink: #080808; --bar: #e5e7eb; --fill: #2563eb;
     --hover: #f3f4f6; --defer-bg: #ecfeff; --defer-line: #a5f3fc; --defer-hover: #cffafe;
+    --close: #be123c; --close-badge: #ff5f87; --close-bg: #fff1f2; --close-line: #fecdd3; --close-hover: #ffe4e6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111214; --fg: #e8e8e8; --dim: #9a9a9a; --card: #1b1c1f; --line: #2a2b2f;
       --wait: #f59e0b; --busy: #60a5fa; --defer: #00d7ff; --bar: #2a2b2f; --fill: #60a5fa;
       --hover: #222327; --defer-bg: #0b1f25; --defer-line: #164e5a; --defer-hover: #10303a;
+      --close: #ff5f87; --close-bg: #25101a; --close-line: #5a1630; --close-hover: #3a1022;
     }
   }
   * { box-sizing: border-box; }
@@ -80,6 +84,14 @@
   .deferred .fleet tbody tr:hover { background: var(--defer-hover); }
   .deferred .name { opacity: .8; }
   .reason { color: var(--defer); font-weight: 500; }
+  /* The closing section reuses the deferred one's shape and overrides only
+     its hue, so the two lists cannot drift apart in layout. */
+  section.closing { border-color: var(--close-line); background: var(--close-bg); }
+  .closing h2 { background: var(--close-badge); }
+  .closing .fleet th { color: var(--close); border-bottom-color: var(--close-line); }
+  .closing .fleet td { border-bottom-color: var(--close-line); }
+  .closing .fleet tbody tr:hover { background: var(--close-hover); }
+  .closing .reason { color: var(--close); }
   .m-topic { display: none; }
   @media (max-width: 640px) {
     .fleet .opt, .fleet .c-topic, .fleet td.topic-cell { display: none; }
@@ -103,6 +115,7 @@
   <div class="gauges" id="gauges"></div>
 </header>
 <main id="fleet"></main>
+<div id="closing"></div>
 <div id="deferred"></div>
 <div id="empty" hidden>no claudemux sessions</div>
 <footer>read-only · served by claudemux</footer>
@@ -230,12 +243,45 @@
     return r;
   }
 
+  // A closing row says how far the teardown has got where a deferred row
+  // says what it is blocked on; a waiting one keeps its orange edge, since
+  // the conductor still brings the engineer to it.
+  function closingRow(s, now) {
+    var r = el('tr', s.waiting ? 'waiting' : '');
+    r.appendChild(nameCell(s));
+    r.appendChild(td('reason', s.closing_label || 'closing', s.closing_label));
+    r.appendChild(td('num dim', ago(s.since, now)));
+    r.appendChild(topicCell(s, s.summary));
+    return r;
+  }
+
+  // parkedSection is one of the lists under the active table: a tinted
+  // panel with a counted heading. cls 'deferred' carries the shape; an
+  // extra class re-tints it.
+  function parkedSection(cls, title, colLabel, rows, rowFn, now) {
+    var frag = document.createDocumentFragment();
+    if (!rows.length) return frag;
+    var sec = el('section', cls);
+    var h = el('h2', null, title);
+    h.appendChild(el('span', 'n', String(rows.length)));
+    sec.appendChild(h);
+    var t = table([
+      { cls: 'c-name', label: 'session' }, { cls: 'c-reason', label: colLabel },
+      { cls: 'c-age', label: 'for', num: true }, { cls: 'c-topic', label: 'topic' }
+    ]);
+    rows.forEach(function (s) { t.tBodies[0].appendChild(rowFn(s, now)); });
+    sec.appendChild(t);
+    frag.appendChild(sec);
+    return frag;
+  }
+
   function render(v) {
     var now = Date.now();
     var head = document.getElementById('headline');
     var meta = document.getElementById('headline-meta');
     var counts = v.counts.sessions + ' session' + (v.counts.sessions === 1 ? '' : 's') +
-      ' · ' + v.counts.waiting + ' waiting' + (v.counts.deferred ? ' · ' + v.counts.deferred + ' deferred' : '');
+      ' · ' + v.counts.waiting + ' waiting' + (v.counts.closing ? ' · ' + v.counts.closing + ' closing' : '') +
+      (v.counts.deferred ? ' · ' + v.counts.deferred + ' deferred' : '');
     var metaParts = [];
     var headlineStale = false;
     if (v.headline && v.headline.text) {
@@ -265,8 +311,11 @@
     // flash every three seconds.
     document.getElementById('gauges').replaceChildren(gaugesFrag);
 
-    var active = v.sessions.filter(function (s) { return !s.deferred; });
-    var parked = v.sessions.filter(function (s) { return s.deferred; });
+    // Three lists, as the lobby groups them: closing wins over deferred for
+    // a session that is both (swGroupOf in switchboard.go).
+    var closing = v.sessions.filter(function (s) { return !!s.closing; });
+    var parked = v.sessions.filter(function (s) { return s.deferred && !s.closing; });
+    var active = v.sessions.filter(function (s) { return !s.deferred && !s.closing; });
 
     var fleetFrag = document.createDocumentFragment();
     if (active.length) {
@@ -281,21 +330,10 @@
     }
     document.getElementById('fleet').replaceChildren(fleetFrag);
 
-    var defFrag = document.createDocumentFragment();
-    if (parked.length) {
-      var sec = el('section', 'deferred');
-      var h = el('h2', null, '\u25c6 deferred');
-      h.appendChild(el('span', 'n', String(parked.length)));
-      sec.appendChild(h);
-      var dt = table([
-        { cls: 'c-name', label: 'session' }, { cls: 'c-reason', label: 'waiting on' },
-        { cls: 'c-age', label: 'for', num: true }, { cls: 'c-topic', label: 'topic' }
-      ]);
-      parked.forEach(function (s) { dt.tBodies[0].appendChild(deferredRow(s, now)); });
-      sec.appendChild(dt);
-      defFrag.appendChild(sec);
-    }
-    document.getElementById('deferred').replaceChildren(defFrag);
+    document.getElementById('closing').replaceChildren(
+      parkedSection('deferred closing', '\u23fb closing', 'teardown', closing, closingRow, now));
+    document.getElementById('deferred').replaceChildren(
+      parkedSection('deferred', '\u25c6 deferred', 'waiting on', parked, deferredRow, now));
     document.getElementById('empty').hidden = v.sessions.length > 0;
   }
 

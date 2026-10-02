@@ -235,6 +235,17 @@ the top. The session's own status pane shows a
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.
 
+**Closing sessions** get a list of their own too. A session whose teardown is in flight
+— you typed `/done` in it, pressed `x` or `X` in its status pane, or it is sitting at
+`⏻ press x to tear down` — moves under a `─ closing ─` rule, between the working fleet
+and the deferred rows, with a ` CLOSE ` badge and the teardown's phase leading its
+second line (`⏻ wrapping up…`, `⏻ wrap-up blocked`, `⏻ press x to tear down`, …). The
+status line counts them (`· 2 closing`). This is a listing change only: a closing
+session that is waiting is waiting on *you* — the wrap-up's confirmation, the final
+`x`, a blocked gate — so the conductor still carries you to it in its turn. Cancelling
+the teardown (`esc`) puts the row back in the fleet. A session that is both closing
+and deferred is listed as closing.
+
 The lobby is a dispatch point: whenever you're parked there and something waits,
 you get carried to it. To sit and watch the fleet instead, press `Space` — it
 toggles **standby**, which keeps the states live but never dispatches, until you
@@ -289,8 +300,9 @@ lands), then the account's 5-hour and weekly gauges, colored exactly as the
 lobby's meters are, then a compact table with one row per session: name in the
 project color with the project's `description:` under it, the action emoji and
 state, time in it, context %, model, and topic with the running summary (or last
-prompt) under it. Deferred sessions sit in a separate cyan panel below, with
-the blocker each is waiting on. It refreshes itself every three seconds and dims
+prompt) under it. Sessions being torn down sit in a separate rose panel below,
+with how far each teardown has got, and deferred sessions in a cyan panel under
+that, with the blocker each is waiting on. It refreshes itself every three seconds and dims
 with "lobby not reachable" when the lobby is gone.
 
 Two more `web:` keys shape what teammates see:
