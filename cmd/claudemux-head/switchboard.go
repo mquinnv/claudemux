@@ -64,13 +64,19 @@ type swSession struct {
 	// means anything while the session is busy; the head clears it with the
 	// next unmarked prompt.
 	Stay bool
+	// Closing mirrors @claudemux_closing: the head's teardown phase (see
+	// closingpub.go), "" when the session is not on its way out. It moves the
+	// row to the closing group and nothing else — the conductor still drives
+	// the client here, since a closing session that waits is waiting on the
+	// human.
+	Closing string
 }
 
 type swSnapshot struct {
 	// Sessions holds live claudemux sessions — those with a claudemux-head
 	// pane — excluding the lobby itself (whose own pane also runs this
-	// binary), in list-sessions order with the deferred ones parked at the
-	// end (see swSortSessions).
+	// binary), in list-sessions order with the closing and then the deferred
+	// ones parked at the end (see swSortSessions).
 	Sessions []swSession
 	Lobby    string            // session owning selfPane; "" if not found
 	Clients  map[string]string // client name -> session it is attached to
@@ -121,7 +127,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay} #{@claudemux_description} #{@claudemux_closing}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -163,10 +169,10 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		// 13 fields in production: the stay mark is field 12 and the project
-		// description the last. The description is optional so a 12-field
-		// listing (older fixtures) still parses.
-		if (len(f) != 12 && len(f) != 13) || f[0] == "" {
+		// 14 fields in production: the stay mark is field 12, the project
+		// description 13 and the closing mark the last. The trailing two are
+		// optional so 12- and 13-field listings (older fixtures) still parse.
+		if len(f) < 12 || len(f) > 14 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
@@ -176,8 +182,11 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if validProjectEmoji(f[10]) {
 			sess.Emoji = f[10]
 		}
-		if len(f) == 13 {
+		if len(f) >= 13 {
 			sess.Description = f[12]
+		}
+		if len(f) == 14 {
+			sess.Closing = f[13]
 		}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {
@@ -202,7 +211,7 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		snap.Sessions = append(snap.Sessions, sess)
 	}
 
-	// Deferred sessions sink to the bottom of the fleet — see swSortSessions.
+	// Closing and deferred sessions sink below the rest — see swSortSessions.
 	swSortSessions(snap.Sessions)
 
 	for _, line := range strings.Split(clientOut, "\n") {
@@ -215,18 +224,46 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 	return snap
 }
 
-// swSortSessions parks the deferred sessions below the rest, in place. The
-// sort is stable: within each group the fleet keeps tmux's list-sessions
-// order, which is the order the lobby has always shown, so setting a defer
-// moves that one row and leaves every other row where the user last saw it.
+// swGroup is which of the lobby's lists a session is shown in.
+type swGroup int
+
+const (
+	// swGroupActive: sessions doing, or waiting to do, work.
+	swGroupActive swGroup = iota
+	// swGroupClosing: a teardown is in flight (see closingpub.go).
+	swGroupClosing
+	// swGroupDeferred: blocked on something outside claudemux.
+	swGroupDeferred
+)
+
+// swGroupOf places a session. Closing wins over deferred: a session can be
+// both (a deferred one whose wrap-up was started), and the teardown is the
+// newer act and the one that says where the session is headed.
+func swGroupOf(sess swSession) swGroup {
+	switch {
+	case sess.Closing != "":
+		return swGroupClosing
+	case sess.Deferred:
+		return swGroupDeferred
+	}
+	return swGroupActive
+}
+
+// swSortSessions orders the fleet into its groups, in place: active, then
+// closing, then deferred. Closing sits above deferred because it needs the
+// human sooner — a confirmation, a final keypress — where a deferred session
+// by definition needs nothing yet. The sort is stable: within each group the
+// fleet keeps tmux's list-sessions order, which is the order the lobby has
+// always shown, so a session changing group moves that one row and leaves
+// every other row where the user last saw it.
 //
 // Sorting here rather than in the TUI keeps one order for the whole lobby:
 // every index the model holds — the selection, the scroll window, the row
 // the keys act on — means the same session as the row on screen. The
-// conductor is indifferent to it (waitingQueue sorts its own queue by Since
-// and drops deferred sessions entirely), so this is a display order only.
+// conductor is indifferent to it (waitingQueue sorts its own queue by Since),
+// so this is a display order only.
 func swSortSessions(sessions []swSession) {
 	sort.SliceStable(sessions, func(i, j int) bool {
-		return !sessions[i].Deferred && sessions[j].Deferred
+		return swGroupOf(sessions[i]) < swGroupOf(sessions[j])
 	})
 }

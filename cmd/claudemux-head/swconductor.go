@@ -392,7 +392,7 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 	// render or two. This keeps the suffix exactly matching what
 	// waitingQueue excluded at this instant.
 	suffix := ""
-	z, d := 0, 0
+	z, d, cl := 0, 0, 0
 	for _, sess := range s.Sessions {
 		if c.isSnoozed(sess, now) {
 			z++
@@ -400,9 +400,18 @@ func (c *conductor) statusLine(s swSnapshot, now time.Time) string {
 		if sess.Deferred && isWaiting(sess.State) {
 			d++
 		}
+		// Every closing session, busy or not: unlike the two counts above this
+		// one explains nothing about the queue (closing sessions are still
+		// conducted), it says how many rows sit under the closing divider.
+		if sess.Closing != "" {
+			cl++
+		}
 	}
 	if z > 0 {
 		suffix = fmt.Sprintf(" · %d snoozed", z)
+	}
+	if cl > 0 {
+		suffix += fmt.Sprintf(" · %d closing", cl)
 	}
 	if d > 0 {
 		suffix += fmt.Sprintf(" · %d deferred", d)
