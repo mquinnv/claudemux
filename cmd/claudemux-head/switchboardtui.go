@@ -1086,18 +1086,26 @@ const (
 )
 
 // swDividerAt is the label of the divider drawn above row i, "" when there is
-// none. A divider marks where the closing or the deferred group begins — but
-// only below another group: one that opens the list would separate its rows
-// from nothing at all, and a fleet with a single group has no boundary.
+// none. A divider marks where the closing or the deferred group begins. The
+// closing one is drawn even when its group opens the list: closing the last
+// running session must not silently drop the word saying what its row is
+// doing. A deferred group that opens the list still goes unlabelled — it has
+// nothing above it to be divided from, and each row carries its defer badge.
 //
 // Derived from the neighbouring rows rather than assumed from the sort: the
 // rule marks wherever a group actually starts, so a snapshot that somehow
 // arrived unsorted still draws its rules in places that mean something.
 func swDividerAt(sessions []swSession, i int) string {
-	if i <= 0 || i >= len(sessions) {
+	if i < 0 || i >= len(sessions) {
 		return ""
 	}
 	g := swGroupOf(sessions[i])
+	if i == 0 {
+		if g == swGroupClosing {
+			return swClosingDividerLabel
+		}
+		return ""
+	}
 	if g == swGroupOf(sessions[i-1]) {
 		return ""
 	}
