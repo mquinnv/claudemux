@@ -23,12 +23,17 @@ A subagent inherits this session's cwd, hooks, CLAUDE.md, memory scope and workt
 
 1. **Launch.** The flags are documented in the header of the launcher (`$(command -v claudemux)`), which ships with this skill:
    ```bash
-   claudemux -d -w -N <descriptive-name> /absolute/path/to/dir
+   claudemux -n -d -w /absolute/path/to/dir
    ```
+   - `-n`: always create a new session, never attach to a busy one. It is named after the directory, like every other session in the switchboard (`phenix`, or `phenix-2` when one exists). Don't name it after the task: `-w` already names the worktree and branch after it.
    - `-d`: detached. It prints the tmux session name and returns, so the user stays here.
    - `-w`: mark the session as wanting a worktree. It creates one, named after the task, when your brief arrives as its first prompt. Drop `-w` if the directory is not a git repo.
-   - `-N <name>`: an exact, descriptive tmux name (e.g. `phenix-utm-source-fix`). It always creates a new session and fails if the name is taken, so it never lands in a busy one. On a clash, pick another name.
-2. **Discover:** call `ListAgents` once. The peer's agent name is **not** the `-N` tmux name. It is the project's configured name, or Claude's default for the directory (e.g. `phenix-k3`), and it appears within seconds. If another session in that directory is already listed, call `ListAgents` once *before* launching as well, and take the row whose `[ref]` is new. If the peer is missing, run `tmux capture-pane -p -t <tmux-name>` (it may be waiting on 1Password or a trust prompt), then list once more. If it still isn't there, tell the user. Never loop.
+   - Don't use `-N <name>`. It exists so the switchboard's reboot restore can bring a session back under its old name, and a task name shows up there as a strange project name.
+2. **Discover:** if another session in that directory is already running, call `ListAgents` once *before* launching, so you can tell the new `-2` sibling from it. After launching, call `ListAgents` once. The peer's agent name need not match the tmux name. It is the project's configured name, or Claude's default for the directory (e.g. `phenix-k3`), and it appears within seconds. Take the row whose `[ref]` is new. If the peer is missing, run `tmux capture-pane -p -t <tmux-name>:` (the trailing colon makes tmux read it as a session name, not a window in your own session), then list once more:
+   - **Folder trust:** in a directory Claude has never opened, the peer sits on the "trust this folder" prompt and won't be listed until it is answered. Tell the user to answer it in that pane. Don't answer it yourself with `tmux send-keys`; trusting a folder is the user's decision.
+   - **1Password:** a desktop prompt the user must approve.
+
+   If it still isn't there, tell the user. Never loop.
 3. **Brief:** `SendMessage` with `to:` the bare agent name (add its ` [ref]` only if the listing shows duplicate names), `notify_when_idle: true`, and the brief below.
 
 ## The brief (the peer's entire knowledge)
