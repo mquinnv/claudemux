@@ -21,7 +21,7 @@ redacted before it's committed:
   tool_use/tool_result pair), so relationships between fields survive
   redaction even though the values don't.
 - **Exempt from replacement — kept exactly as captured:** `backgroundTaskId`,
-  `agentId` and `resumedAgentId` values (and the `pin` object echoing the
+  `agentId`, `resumedAgentId` and Monitor `taskId` values (and the `pin` object echoing the
   same id, which for a queued `SendMessage` is the only place the id
   appears). They're opaque, non-identifying strings, and the tests assert
   against them by exact value (see below), so changing one means updating the
@@ -34,8 +34,8 @@ and asserts on the result — never a fixture read as raw bytes. A fixture
 must stay a single tool_use event followed by its tool_result event
 (`bgFixture` hard-asserts exactly 2 events, one `tool_use` and one
 `tool_result`), and the `toolUseResult.backgroundTaskId` /
-`toolUseResult.agentId` / `toolUseResult.resumedAgentId` / `toolUseResult.pin.id`
-the launch registers under must keep matching the `wantID` hardcoded in
+`toolUseResult.agentId` / `toolUseResult.resumedAgentId` / `toolUseResult.pin.id` /
+`toolUseResult.taskId` the launch registers under must keep matching the `wantID` hardcoded in
 `TestBgTrackerRegistersRealTranscriptLaunches` and
 `TestBgTrackerRegistersRecoveredLaunches`. Everything else in a fixture
 (prompt text, tool input, telemetry) is free to redact or shorten, since

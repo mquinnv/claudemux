@@ -181,6 +181,34 @@ func bgTouchAgentFile(t *testing.T, dir, id string, mtime time.Time) {
 	}
 }
 
+// bgMonitorResult is the harness record on a Monitor launch's tool_result.
+func bgMonitorResult(id string, timeoutMs int, persistent bool) map[string]any {
+	return map[string]any{"taskId": id, "timeoutMs": timeoutMs, "persistent": persistent}
+}
+
+// bgMonitorLaunch is one complete Monitor launch: the tool_use, then its
+// acknowledgement carrying the harness's taskId/timeoutMs record.
+func bgMonitorLaunch(t *testing.T, id, ts string, timeoutMs int, persistent bool) []Event {
+	t.Helper()
+	use := "toolu_" + id
+	return bgParse(t,
+		bgToolUseLine(t, use, "Monitor", ts, map[string]any{
+			"command": "bash watch.sh", "description": "job progress", "timeout_ms": timeoutMs,
+		}),
+		bgResultLine(t, use, "Monitor started (task "+id+", expires in 30m unless the source ends first).",
+			ts, bgMonitorResult(id, timeoutMs, persistent)),
+	)
+}
+
+// bgMonitorEvent is one streamed Monitor event as the harness delivers it: a
+// task-notification under the monitor's own id, with an <event> and no
+// <status> — the monitor is still running.
+func bgMonitorEvent(id, event string) Event {
+	return Event{Type: "user", UserText: "<task-notification>\n<task-id>" + id + "</task-id>\n" +
+		"<summary>Monitor event: \"job progress\"</summary>\n<event>" + event + "</event>\n" +
+		"If this event is something the user would act on now, send a PushNotification.\n</task-notification>"}
+}
+
 func bgDoneEvent(id string) Event {
 	return Event{Type: "queue-operation", QueueText: "<task-notification>\n<task-id>" + id + "</task-id>\n<status>completed</status>"}
 }
@@ -273,6 +301,7 @@ func TestBgTrackerRegistersRealTranscriptLaunches(t *testing.T) {
 		{"launch-skill-fork.jsonl", "aaba848fe04645123"},
 		{"launch-agent-resume.jsonl", "aad446f291008f662"},
 		{"launch-agent-queued.jsonl", "aae6f316ac814766f"},
+		{"launch-monitor.jsonl", "bxtsitwyy"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
@@ -651,6 +680,33 @@ func TestBgCompletions(t *testing.T) {
 		}
 	})
 
+	// A Monitor streams each event as a task-notification under its own id.
+	// Only the end of the stream finishes it; an event is news from work that
+	// is still running.
+	t.Run("monitor event is not a completion", func(t *testing.T) {
+		if got := bgCompletions(bgMonitorEvent("bxtsitwyy", "[phenix] dump")); len(got) != 0 {
+			t.Errorf("bgCompletions = %q, want none: the monitor is still running", got)
+		}
+	})
+
+	t.Run("monitor stream end is a completion", func(t *testing.T) {
+		ended := "<task-notification>\n<task-id>bxtsitwyy</task-id>\n<tool-use-id>toolu_01W</tool-use-id>\n" +
+			"<output-file>/tmp/x/tasks/bxtsitwyy.output</output-file>\n<status>completed</status>\n" +
+			"<summary>Monitor \"job progress\" stream ended</summary>\n</task-notification>"
+		if got := bgCompletions(Event{Type: "user", UserText: ended}); len(got) != 1 || got[0] != "bxtsitwyy" {
+			t.Errorf("bgCompletions = %q, want [bxtsitwyy]", got)
+		}
+	})
+
+	// The expiry notice is the one event that ends the monitor; it carries no
+	// <status> of its own.
+	t.Run("monitor expiry notice is a completion", func(t *testing.T) {
+		expired := bgMonitorEvent("bxtsitwyy", "[Monitor expired after 30m with no events delivered. Re-arm it if you still need the watch.]")
+		if got := bgCompletions(expired); len(got) != 1 || got[0] != "bxtsitwyy" {
+			t.Errorf("bgCompletions = %q, want [bxtsitwyy]", got)
+		}
+	})
+
 	t.Run("notification without a task id", func(t *testing.T) {
 		if got := bgCompletions(Event{Type: "user", UserText: "<task-notification>\n<status>failed</status>"}); len(got) != 0 {
 			t.Errorf("bgCompletions = %q, want none", got)
@@ -703,6 +759,54 @@ func TestBgTrackerExpiresStaleLaunches(t *testing.T) {
 	}
 }
 
+// The remix-2 bug (2026-10-02): a session waiting on a Monitor read Idle while
+// its pane said "1 monitor still running". The monitor's events must not
+// retire it — each one wakes the session for a short turn and the Stop that
+// follows is not a wait on the human.
+func TestBgMonitorCountsThroughItsEvents(t *testing.T) {
+	now := time.Date(2026, 10, 2, 23, 21, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe(bgMonitorLaunch(t, "bxtsitwyy", "2026-10-02T23:20:56Z", 1800000, false), now)
+	b.observe([]Event{bgMonitorEvent("bxtsitwyy", "pod phase: Running"), bgMonitorEvent("bxtsitwyy", "[phenix] dump")}, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Fatalf("outstanding = %d, want 1: a monitor that is still streaming is running work", n)
+	}
+	b.observe([]Event{bgDoneEvent("bxtsitwyy")}, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d, want 0 once the stream ends", n)
+	}
+}
+
+// A monitor states its own lifetime, which routinely exceeds the shell cap
+// (up to an hour in this machine's transcripts). The harness ends it at that
+// timeout, so that — not the shell cap — is when the head stops counting it.
+func TestBgMonitorFollowsItsOwnTimeout(t *testing.T) {
+	start := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe(bgMonitorLaunch(t, "bmon", "2026-10-02T10:00:00Z", 3600000, false), start)
+	if n, _ := b.outstanding(start.Add(45 * time.Minute)); n != 1 {
+		t.Errorf("outstanding at 45m = %d, want 1: a 60-minute monitor outlives the shell cap", n)
+	}
+	if n, _ := b.outstanding(start.Add(65 * time.Minute)); n != 0 {
+		t.Errorf("outstanding at 65m = %d, want 0: the harness has ended the monitor by now", n)
+	}
+}
+
+// A persistent monitor has no timeout (timeoutMs 0) and runs until the
+// session ends, so it follows the agents' hard cap rather than expiring at
+// once.
+func TestBgMonitorPersistentUsesTheHardCap(t *testing.T) {
+	start := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	b := newBgTracker()
+	b.observe(bgMonitorLaunch(t, "bmon", "2026-10-02T10:00:00Z", 0, true), start)
+	if n, _ := b.outstanding(start.Add(3 * time.Hour)); n != 1 {
+		t.Errorf("outstanding at 3h = %d, want 1: a persistent monitor has no timeout", n)
+	}
+	if n, _ := b.outstanding(start.Add(bgAgentMaxAge + time.Minute)); n != 0 {
+		t.Errorf("outstanding past the hard cap = %d, want 0", n)
+	}
+}
+
 // A typed prompt does NOT retire running work. The old wipe made a session
 // with four running agents read Idle the moment the human typed once, and
 // the conductor then treated it as waiting. Completions retire tasks;
@@ -726,7 +830,7 @@ func TestBgTrackerNotificationRetiresOnlyItsOwnTask(t *testing.T) {
 		bgShellLaunch(t, "aaa", "2026-08-11T10:00:00Z"),
 		bgShellLaunch(t, "bbb", "2026-08-11T10:00:00Z")...,
 	), now)
-	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>"}}, now)
+	b.observe([]Event{{Type: "user", UserText: "<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>"}}, now)
 	if n, _ := b.outstanding(now); n != 1 {
 		t.Errorf("outstanding = %d, want 1: the notification retires its own task, not the set", n)
 	}
