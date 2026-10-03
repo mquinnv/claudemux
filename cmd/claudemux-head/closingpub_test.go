@@ -155,11 +155,14 @@ func TestSwDividerAt(t *testing.T) {
 			t.Errorf("swDividerAt(fleet, %d) = %q, want %q", i, got, want[i])
 		}
 	}
-	// A group that opens the list has nothing above it to be divided from,
-	// but the group after it still does.
+	// A closing group that opens the list keeps its label: closing the last
+	// running session must not drop the word saying what its row is doing.
 	noActive := fleet[1:]
-	if got := swDividerAt(noActive, 0); got != "" {
-		t.Errorf("a closing group at the top needs no divider, got %q", got)
+	if got := swDividerAt(noActive, 0); got != swClosingDividerLabel {
+		t.Errorf("a closing group at the top keeps its divider, got %q", got)
+	}
+	if got := swDividerAt(noActive, 1); got != "" {
+		t.Errorf("the closing divider is drawn once, got %q at row 1", got)
 	}
 	if got := swDividerAt(noActive, 2); got != swDividerLabel {
 		t.Errorf("deferred after closing still needs its divider, got %q", got)
