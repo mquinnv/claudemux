@@ -21,7 +21,8 @@
 #   -d   Detached: create (or find) the session, print its name to stdout, and
 #        exit instead of attaching. For callers already inside tmux — the
 #        switchboard's `n` key runs `claudemux -n -d <query>` and then
-#        switch-clients to the printed name.
+#        switch-clients to the printed name. When run from a Claude pane, the
+#        new session is stamped @claudemux_parent (the caller's session name).
 #   -w   Mark this session as wanting a worktree regardless of config or repo
 #        state.
 #   -W   Never mark this session, whatever the config says.
@@ -859,6 +860,25 @@ session_title_name() {
   printf '%s' "${name//#/##}"
 }
 
+# record_parent SESSION_NAME — when this launcher was run from a Claude pane
+# (its Bash tool), stamp the new session with @claudemux_parent and
+# @claudemux_parent_created so the lobby can draw the handoff family. A failed
+# stamp must never fail a launch.
+record_parent() {
+  [ -n "${TMUX_PANE:-}" ] || return 0
+  local pcmd pname pcreated
+  IFS=$'\t' read -r pcmd pname pcreated < <(
+    tmux display-message -p -t "$TMUX_PANE" \
+      '#{pane_current_command}'$'\t''#{session_name}'$'\t''#{session_created}' 2>/dev/null
+  ) || return 0
+  case "$pcmd" in claude | node) ;; *) return 0 ;; esac
+  [ -n "$pname" ] || return 0
+  [ "$pname" != "$1" ] || return 0
+  tmux set-option -t "$1:" @claudemux_parent "$pname" \; \
+    set-option -t "$1:" @claudemux_parent_created "$pcreated" 2>/dev/null || true
+  return 0
+}
+
 create_session() {
   local work_dir="$1"
   local session_name clone_suffix=""
@@ -1013,6 +1033,7 @@ create_session() {
     size_args=(-x "${sess_size%x*}" -y "${sess_size#*x}")
   fi
   tmux_new_session -d -s "$session_name" -c "$work_dir" "${size_args[@]+"${size_args[@]}"}"
+  if [ -z "$EXACT_NAME" ]; then record_parent "$session_name"; fi
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
   shell_pane=""
   case "$layout" in
