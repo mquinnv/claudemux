@@ -470,7 +470,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}")
+			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
