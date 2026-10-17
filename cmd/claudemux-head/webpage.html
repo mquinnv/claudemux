@@ -85,6 +85,10 @@
   .deferred .name { opacity: .8; }
   .reason { color: var(--defer); font-weight: 500; }
   .badge-defer { color: var(--defer); font-weight: 500; margin-left: .5em; }
+  .badge-close { color: var(--close); font-weight: 500; margin-left: .5em; }
+  /* A deferred row in the closing list prints its reason in the defer hue,
+     flush in the reason cell like the closing label it stands in for. */
+  .closing td.reason .badge-defer { margin-left: 0; }
   .from { color: var(--dim); margin-right: .4em; }
   /* The closing section reuses the deferred one's shape and overrides only
      its hue, so the two lists cannot drift apart in layout. */
@@ -202,11 +206,20 @@
     var c = el('td', 'topic-cell');
     var lines = [];
     var keptDeferred = s.deferred && s.group === 'active';
-    if (s.topic || keptDeferred) {
+    // A closing member of a family drawn elsewhere (the active list) has no
+    // teardown column, so its phase rides here like the defer badge does.
+    var keptClosing = s.closing && s.group !== 'closing';
+    if (s.topic || keptDeferred || keptClosing) {
       var tl = el('div', 'topic', s.topic || '');
       if (s.topic) lines.push(s.topic);
       // A deferred child kept in its active family says so, in the defer hue.
-      if (keptDeferred) {
+      // Closing wins over deferred, as in swGroupOf, so a row that is both
+      // shows only the closing badge.
+      if (keptClosing) {
+        var cb = '\u23fb ' + (s.closing_label || 'closing');
+        tl.appendChild(el('span', 'badge-close', cb));
+        lines.push(cb);
+      } else if (keptDeferred) {
         var b = '\u25c6 ' + (s.defer_reason || 'deferred');
         tl.appendChild(el('span', 'badge-defer', b));
         lines.push(b);
@@ -268,10 +281,20 @@
   // A closing row says how far the teardown has got where a deferred row
   // says what it is blocked on; a waiting one keeps its orange edge, since
   // the conductor still brings the engineer to it.
+  // A family that is closing sits here whole, so a member that is not itself
+  // closing (a deferred child, say) prints what it really is in place of a
+  // borrowed "closing".
   function closingRow(s, now) {
     var r = el('tr', s.waiting ? 'waiting' : '');
     r.appendChild(nameCell(s));
-    r.appendChild(td('reason', s.closing_label || 'closing', s.closing_label));
+    if (!s.closing) {
+      var rc = td('reason', null, s.defer_reason);
+      if (s.deferred) rc.appendChild(el('span', 'badge-defer', '◆ ' + (s.defer_reason || 'deferred')));
+      else rc.appendChild(el('span', 'dim', '—'));
+      r.appendChild(rc);
+    } else {
+      r.appendChild(td('reason', s.closing_label || 'closing', s.closing_label));
+    }
     r.appendChild(td('num dim', ago(s.since, now)));
     r.appendChild(topicCell(s, s.summary));
     return r;

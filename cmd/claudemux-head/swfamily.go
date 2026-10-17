@@ -42,7 +42,15 @@ const (
 // child therefore stays up with the work instead of sinking out of sight with
 // its children, while a family that is entirely deferred sinks as one block.
 // swGroupOf still describes a single session; FamilyGroup is where its row is
-// actually drawn, which is what the dividers must follow.
+// actually drawn, which is what the dividers must follow. Closing sits above
+// deferred because it needs the human sooner — a confirmation, a final
+// keypress — where a deferred session by definition needs nothing yet.
+//
+// Arranging in the snapshot rather than in the TUI keeps one order for the
+// whole lobby: every index the model holds — the selection, the scroll
+// window, the row the keys act on — means the same session as the row on
+// screen. The conductor is indifferent to it (waitingQueue sorts its own
+// queue by Since), so this is a display order only.
 //
 // It returns a new slice and leaves the input alone.
 func swArrangeFamilies(sessions []swSession) []swSession {
@@ -54,7 +62,9 @@ func swArrangeFamilies(sessions []swSession) []swSession {
 
 	// parent[i] is i's parent index, -1 for a root. A link holds only when the
 	// parent is live, is not the session itself, and was born when the child
-	// said it was (see parentCreatedOption).
+	// said it was (see parentCreatedOption). A zero ParentCreated is "never
+	// recorded" or "unparseable", not a time, so it matches nothing — not
+	// even a parent whose own Created failed to parse to the same zero.
 	parent := make([]int, n)
 	from := make([]string, n)
 	for i, s := range sessions {
@@ -62,7 +72,7 @@ func swArrangeFamilies(sessions []swSession) []swSession {
 		if s.Parent == "" {
 			continue
 		}
-		if p, ok := byName[s.Parent]; ok && p != i && sessions[p].Created == s.ParentCreated {
+		if p, ok := byName[s.Parent]; ok && p != i && s.ParentCreated != 0 && sessions[p].Created == s.ParentCreated {
 			parent[i] = p
 			continue
 		}

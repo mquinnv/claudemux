@@ -210,6 +210,27 @@ func TestWebFleetViewFamilies(t *testing.T) {
 	if v.Counts.Deferred != 3 {
 		t.Errorf("Counts.Deferred = %d, want 3 (per session)", v.Counts.Deferred)
 	}
+	// A closing parent with a deferred (not closing) child: the family rides
+	// in the closing list, and each row still says what it really is.
+	cp := fam("winding", 60, "", 0)
+	cp.Closing = "wrapup"
+	cc := withDefer(fam("parked", 61, "winding", 60))
+	cc.DeferReason = "waits on ci"
+	cv := buildWebFleetView(swSnapshot{Sessions: swArrangeFamilies([]swSession{cp, cc})}, RateLimits{}, false, nil, time.Time{}, webHeadline{})
+	if len(cv.Sessions) != 2 {
+		t.Fatalf("closing family = %+v", cv.Sessions)
+	}
+	w, k := cv.Sessions[0], cv.Sessions[1]
+	if w.Group != "closing" || w.Closing != "wrapup" || w.ClosingLabel == "" || w.Deferred {
+		t.Errorf("winding = %+v", w)
+	}
+	if k.Group != "closing" || k.Closing != "" || k.ClosingLabel != "" || !k.Deferred || k.DeferReason != "waits on ci" || k.Depth != 1 {
+		t.Errorf("parked = %+v", k)
+	}
+	kraw, _ := json.Marshal(k)
+	if !strings.Contains(string(kraw), `"group":"closing"`) || !strings.Contains(string(kraw), `"deferred":true`) || strings.Contains(string(kraw), `"closing"`+":") {
+		t.Errorf("parked json = %s", kraw)
+	}
 	raw, _ := json.Marshal(by["usm"])
 	if !strings.Contains(string(raw), `"depth":1`) || !strings.Contains(string(raw), `"group":"active"`) || strings.Contains(string(raw), `"from"`) {
 		t.Errorf("usm json = %s", raw)

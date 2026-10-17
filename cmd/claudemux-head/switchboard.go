@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -280,23 +279,4 @@ func swGroupOf(sess swSession) swGroup {
 		return swGroupDeferred
 	}
 	return swGroupActive
-}
-
-// swSortSessions orders the fleet into its groups, in place: active, then
-// closing, then deferred. Closing sits above deferred because it needs the
-// human sooner — a confirmation, a final keypress — where a deferred session
-// by definition needs nothing yet. The sort is stable: within each group the
-// fleet keeps tmux's list-sessions order, which is the order the lobby has
-// always shown, so a session changing group moves that one row and leaves
-// every other row where the user last saw it.
-//
-// Sorting here rather than in the TUI keeps one order for the whole lobby:
-// every index the model holds — the selection, the scroll window, the row
-// the keys act on — means the same session as the row on screen. The
-// conductor is indifferent to it (waitingQueue sorts its own queue by Since),
-// so this is a display order only.
-func swSortSessions(sessions []swSession) {
-	sort.SliceStable(sessions, func(i, j int) bool {
-		return swGroupOf(sessions[i]) < swGroupOf(sessions[j])
-	})
 }

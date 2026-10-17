@@ -1945,3 +1945,44 @@ func TestViewIndentsChildrenAndKeepsGrid(t *testing.T) {
 		t.Errorf("topic column at %d on parent, %d on child:\n%s\n%s", pw, cw, pl, cl)
 	}
 }
+
+// Nesting deeper than the name column is wide must not shear the grid: the
+// prefix loses its leading cells first and the name keeps at least one.
+func TestViewDeepNestingKeepsGrid(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 160, 60
+	var chain []swSession
+	for i := 0; i < 15; i++ {
+		s := swSession{Name: fmt.Sprintf("n%02d", i), State: "Idle", Since: now, Context: 40,
+			Topic: fmt.Sprintf("t%02dtopic", i), Created: int64(i + 1), Model: "claude-opus-4-7"}
+		if i > 0 {
+			s.Parent, s.ParentCreated = fmt.Sprintf("n%02d", i-1), int64(i)
+		}
+		chain = append(chain, s)
+	}
+	m.snap = swSnapshot{Sessions: swArrangeFamilies(chain)}
+	if d := m.snap.Sessions[14].Depth; d*2 <= swNameColW {
+		t.Fatalf("depth %d is not deep enough to overflow the %d-cell name column", d, swNameColW)
+	}
+	var rl, dl string
+	for _, l := range strings.Split(ansi.Strip(m.View()), "\n") {
+		switch {
+		case strings.Contains(l, "t00topic"):
+			rl = l
+		case strings.Contains(l, "t14topic"):
+			dl = l
+		}
+	}
+	if rl == "" || dl == "" {
+		t.Fatalf("rows not found:\n%s", ansi.Strip(m.View()))
+	}
+	rw := lipgloss.Width(rl[:strings.Index(rl, "t00topic")])
+	dw := lipgloss.Width(dl[:strings.Index(dl, "t14topic")])
+	if rw != dw {
+		t.Errorf("topic column at %d on the root, %d on the deepest row:\n%s\n%s", rw, dw, rl, dl)
+	}
+	if !strings.Contains(dl, "└ …") && !strings.Contains(dl, "└ n") {
+		t.Errorf("deepest row lost its name cell: %q", dl)
+	}
+}

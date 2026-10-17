@@ -99,6 +99,18 @@ func (p *webPrivacy) active() bool { return p != nil && len(p.orgs) > 0 }
 
 // visible filters sessions down to the ones the page may show, and pokes the
 // resolver when it meets a session it has not resolved yet.
+//
+// The fleet arrives already arranged into handoff families (swArrangeFamilies:
+// pre-order, parents first), and dropping rows must not leave the tree lying
+// about what remains. Two repairs, both failing closed:
+//   - A row whose parent row was dropped becomes a root (depth 0), and its
+//     own descendants nest under it from there. It is not hung on the
+//     nearest shown ancestor: that session did not launch it.
+//   - From (the orphan tag) names a session the snapshot may not hold — a
+//     gone parent, or one whose name was reused — so the filter never saw
+//     it. It is published only when that name is resolved and shown; any
+//     other answer blanks it, so a private session's name cannot ride onto
+//     the page as "← name".
 func (p *webPrivacy) visible(sessions []swSession) []swSession {
 	if !p.active() {
 		return sessions
@@ -106,15 +118,44 @@ func (p *webPrivacy) visible(sessions []swSession) []swSession {
 	p.mu.RLock()
 	out := make([]swSession, 0, len(sessions))
 	unknown := false
+	// anc[d] is the row's ancestor at original depth d: whether it is shown,
+	// and the depth it was given if so.
+	type ancestor struct {
+		shown bool
+		depth int
+	}
+	var anc []ancestor
 	for _, s := range sessions {
 		hide, known := p.hidden[s.Name]
 		if !known {
 			unknown = true
+		}
+		shown := known && !hide
+		d := s.Depth
+		if d > len(anc) {
+			d = len(anc) // malformed depth; treat as a child of the last row
+		}
+		anc = anc[:d]
+		newDepth := 0
+		if d > 0 && anc[d-1].shown {
+			newDepth = anc[d-1].depth + 1
+		}
+		anc = append(anc, ancestor{shown: shown, depth: newDepth})
+		if !shown {
 			continue
 		}
-		if !hide {
-			out = append(out, s)
+		if s.Depth != newDepth {
+			// Re-rooted: the glyph string described the old nesting. The
+			// page draws by Depth alone and never reads it.
+			s.TreePrefix = ""
 		}
+		s.Depth = newDepth
+		if s.From != "" {
+			if fh, fk := p.hidden[s.From]; !fk || fh {
+				s.From = ""
+			}
+		}
+		out = append(out, s)
 	}
 	p.mu.RUnlock()
 	if unknown {

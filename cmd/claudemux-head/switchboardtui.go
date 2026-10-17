@@ -107,6 +107,19 @@ func swPad(s string, w int) string {
 	return s
 }
 
+// swFitTreePrefix splits the name column between a row's tree prefix and its
+// name, returning the prefix to draw and the cells left for the name. The
+// prefix grows 2 cells per level and nothing bounds a family's depth, so past
+// swNameColW-1 cells it loses its LEADING cells: the glyphs nearest the name
+// (the row's own tee or elbow) are the ones that say where it hangs, and the
+// name always keeps at least one cell, so the columns after it never shear.
+func swFitTreePrefix(prefix string) (string, int) {
+	if over := lipgloss.Width(prefix) - (swNameColW - 1); over > 0 {
+		prefix = ansi.TruncateLeft(prefix, over, "")
+	}
+	return prefix, swNameColW - lipgloss.Width(prefix)
+}
+
 // swCell renders text as a fixed-width column cell: truncated to w, styled,
 // then padded to w. The padding is applied outside the style so a cell's
 // color (or a reverse highlight) stops at the text rather than smearing
@@ -705,7 +718,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastErr = ""
 		// The selection follows the session, not the index it used to sit at:
-		// deferring a row sinks it below the others (swSortSessions), and an
+		// deferring a row sinks it below the others (swArrangeFamilies), and an
 		// index kept through that reshuffle would silently leave the cursor —
 		// and the preview, and the next keystroke — on a different session
 		// than the one the user was looking at. A session that left the fleet
@@ -783,7 +796,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			o.failed = append(o.failed, msg.name+": "+msg.err.Error())
-		} else {
+		}
+		if msg.err == nil || msg.live {
 			for _, l := range o.lost {
 				if l.Rec.SessionName == msg.name {
 					o.restored = append(o.restored, l)
@@ -1329,9 +1343,8 @@ func (m swModel) View() string {
 		// cells.
 		// A child's tree prefix is dim and comes out of the same column, so
 		// the name shrinks by the prefix's width and the grid holds.
-		prefixW := lipgloss.Width(sess.TreePrefix)
-		nameW := max(swNameColW-prefixW, 1)
-		name := swStatusStyle.Render(sess.TreePrefix) + swNameStyle(sess.Color, i == m.sel).
+		prefix, nameW := swFitTreePrefix(sess.TreePrefix)
+		name := swStatusStyle.Render(prefix) + swNameStyle(sess.Color, i == m.sel).
 			Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
 		// The badge names the group the row is listed in (swGroupOf), so a
 		// session that is both closing and deferred wears the closing badge.
@@ -1360,7 +1373,7 @@ func (m swModel) View() string {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
-			line2 := "    " + strings.Repeat(" ", prefixW) + detail
+			line2 := "    " + strings.Repeat(" ", lipgloss.Width(prefix)) + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}

@@ -138,6 +138,51 @@ func TestWebFleetPublishFiltersBeforeHeadline(t *testing.T) {
 	}
 }
 
+// A hidden parent must not leave its child indented under the row above it,
+// and an orphan tag must never name a session the filter has not cleared.
+func TestWebPrivacyFamiliesFailClosed(t *testing.T) {
+	paths := map[string]string{"secret": "/m"}
+	for _, n := range []string{"open", "kid", "grandkid", "lost", "orphan2", "orphan3"} {
+		paths[n] = "/c"
+	}
+	p, _ := fakePrivacy([]string{"mquinnv"}, paths,
+		map[string]string{"/m": "git@github.com:mquinnv/menuops.git", "/c": "git@github.com:mquinnv/claudemux.git"},
+		map[string]bool{"mquinnv/menuops": true}, nil)
+	p.pass()
+	fleet := swArrangeFamilies([]swSession{
+		fam("open", 1, "", 0),
+		fam("secret", 2, "", 0),
+		fam("kid", 3, "secret", 2),
+		fam("grandkid", 4, "kid", 3),
+		fam("lost", 5, "gone-private", 9), // parent never seen by the filter
+		fam("orphan2", 6, "secret", 1),    // parent's name reused, and hidden
+		fam("orphan3", 7, "open", 99),     // parent's name reused, but cleared
+	})
+	got := p.visible(fleet)
+	if want := "open,kid,grandkid,lost,orphan2,orphan3"; names(got) != want {
+		t.Fatalf("visible = %q, want %q", names(got), want)
+	}
+	by := map[string]swSession{}
+	for _, s := range got {
+		by[s.Name] = s
+	}
+	if by["kid"].Depth != 0 || by["grandkid"].Depth != 1 {
+		t.Errorf("depths kid=%d grandkid=%d, want 0 and 1 (re-rooted below the hidden parent)", by["kid"].Depth, by["grandkid"].Depth)
+	}
+	for _, n := range []string{"kid", "grandkid", "lost", "orphan2"} {
+		if by[n].From != "" {
+			t.Errorf("%s From = %q, want blank (names no cleared session)", n, by[n].From)
+		}
+	}
+	if by["orphan3"].From != "open" {
+		t.Errorf("orphan3 From = %q, want open (a cleared session)", by["orphan3"].From)
+	}
+	// The input is the lobby's own slice and must be left alone.
+	if fleet[2].Depth != 1 || fleet[3].Depth != 2 {
+		t.Errorf("visible mutated its input: %+v", fleet)
+	}
+}
+
 func TestRenderWebPageTitle(t *testing.T) {
 	if got := string(renderWebPage("")); !strings.Contains(got, "<h1>claudemux fleet</h1>") {
 		t.Fatal("default title missing")

@@ -188,3 +188,15 @@ func TestBuildSwSnapshotParsesParentFields(t *testing.T) {
 		t.Errorf("short line: %+v", u)
 	}
 }
+
+func TestArrangeFamiliesUnsetCreatedNeverAdopts(t *testing.T) {
+	// Both times unparseable (0): equal, but a zero ParentCreated means
+	// "unknown", not a match, so the child must stay an orphan.
+	got := swArrangeFamilies([]swSession{fam("p", 0, "", 0), fam("kid", 0, "p", 0)})
+	if want := []string{"p", "kid"}; !slices.Equal(famNames(got), want) {
+		t.Fatalf("order = %v, want %v", famNames(got), want)
+	}
+	if got[1].Depth != 0 || got[1].From != "p" {
+		t.Errorf("kid = depth %d from %q, want top-level orphan of p", got[1].Depth, got[1].From)
+	}
+}

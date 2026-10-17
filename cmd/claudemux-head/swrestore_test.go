@@ -285,4 +285,21 @@ func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
 	if len(sm.restore.restored) != 1 || sm.restore.restored[0].Rec.SessionName != "b" {
 		t.Errorf("restored = %v, want just b", sm.restore.restored)
 	}
+
+	// A step that relaunched but could not reapply its defer mark is a live
+	// session: the strip reports the failure, and it is still relinked.
+	m.restore = &swRestoreOffer{busy: true, total: 2, lost: []lostSession{a, b}, queue: []lostSession{b}}
+	mm, _ = m.Update(swRestoreStepMsg{name: "a", err: errString("restored, but defer not reapplied: x"), live: true})
+	sm = mm.(swModel)
+	if len(sm.restore.restored) != 1 || sm.restore.restored[0].Rec.SessionName != "a" {
+		t.Errorf("restored = %v, want a (live despite the defer error)", sm.restore.restored)
+	}
+	if len(sm.restore.failed) != 1 {
+		t.Errorf("failed = %v, want the defer error reported", sm.restore.failed)
+	}
+	mm, cmd = sm.Update(swRestoreStepMsg{name: "b"})
+	sm = mm.(swModel)
+	if cmd == nil || len(sm.restore.restored) != 2 {
+		t.Errorf("relink cmd=%v restored=%v, want a relink of both", cmd != nil, sm.restore.restored)
+	}
 }

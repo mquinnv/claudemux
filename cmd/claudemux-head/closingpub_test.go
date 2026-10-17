@@ -123,7 +123,7 @@ func TestBuildSwSnapshotParsesClosing(t *testing.T) {
 // Three groups, each keeping tmux's order: active, closing, deferred. A
 // session that is both closing and deferred belongs with the closing ones —
 // the teardown is the newer act.
-func TestSwSortSessionsGroupsClosingBetweenActiveAndDeferred(t *testing.T) {
+func TestSwArrangeFamiliesGroupsClosingBetweenActiveAndDeferred(t *testing.T) {
 	sessions := []swSession{
 		{Name: "def1", Deferred: true},
 		{Name: "close1", Closing: "wrapup"},
@@ -133,9 +133,8 @@ func TestSwSortSessionsGroupsClosingBetweenActiveAndDeferred(t *testing.T) {
 		{Name: "act2"},
 		{Name: "close2", Closing: "blocked"},
 	}
-	swSortSessions(sessions)
 	var got []string
-	for _, s := range sessions {
+	for _, s := range swArrangeFamilies(sessions) {
 		got = append(got, s.Name)
 	}
 	want := []string{"act1", "act2", "close1", "both", "close2", "def1", "def2"}
@@ -349,6 +348,21 @@ func TestBuildHeadlinePromptMarksClosing(t *testing.T) {
 
 func TestWebPageRendersClosingSection(t *testing.T) {
 	for _, want := range []string{`id="closing"`, "closingRow", "s.closing_label", "v.counts.closing"} {
+		if !strings.Contains(string(webPageHTML), want) {
+			t.Errorf("webpage.html lacks %q", want)
+		}
+	}
+}
+
+// A family's rows share one list, so a row whose own phase differs from the
+// list's must say so inline: a closing member of an active family gets the
+// closing badge, and a deferred member of a closing family prints its defer
+// reason rather than a borrowed "closing".
+func TestWebPageMarksMixedFamilyRows(t *testing.T) {
+	for _, want := range []string{
+		"s.closing && s.group !== 'closing'", "badge-close",
+		"if (!s.closing)", ".badge-close {",
+	} {
 		if !strings.Contains(string(webPageHTML), want) {
 			t.Errorf("webpage.html lacks %q", want)
 		}

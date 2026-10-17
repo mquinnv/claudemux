@@ -35,8 +35,9 @@ type swRestoreOffer struct {
 	done   int
 	total  int
 	failed []string // "name: reason"
-	// restored collects the sessions that relaunched cleanly, for the
-	// relink pass once the queue is empty.
+	// restored collects the sessions that relaunched (cleanly, or live with
+	// a follow-up error — see swRestoreStepMsg.live), for the relink pass
+	// once the queue is empty.
 	restored []lostSession
 }
 
@@ -45,6 +46,10 @@ type swRestoreScanMsg struct{ offer *swRestoreOffer }
 type swRestoreStepMsg struct {
 	name string
 	err  error
+	// live marks a step whose session is up despite err (the relaunch worked
+	// and only a follow-up, the defer mark, failed): the error is reported,
+	// and the session is still relinked with the rest.
+	live bool
 }
 
 func (o *swRestoreOffer) startPicking() {
@@ -214,7 +219,7 @@ func swRestoreOneCmd(l lostSession) tea.Cmd {
 			defer dcancel()
 			args := deferArgs(name+":", true, l.Rec.DeferReason)
 			if err := exec.CommandContext(dctx, "tmux", args...).Run(); err != nil {
-				return swRestoreStepMsg{name: name, err: fmt.Errorf("restored, but defer not reapplied: %w", err)}
+				return swRestoreStepMsg{name: name, err: fmt.Errorf("restored, but defer not reapplied: %w", err), live: true}
 			}
 		}
 		return swRestoreStepMsg{name: name}
