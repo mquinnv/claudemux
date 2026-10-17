@@ -145,10 +145,11 @@ func TestSwSortSessionsGroupsClosingBetweenActiveAndDeferred(t *testing.T) {
 }
 
 func TestSwDividerAt(t *testing.T) {
-	fleet := []swSession{
+	// Arranged, as the snapshot delivers it: dividers read FamilyGroup.
+	fleet := swArrangeFamilies([]swSession{
 		{Name: "a"}, {Name: "c1", Closing: "ready"}, {Name: "c2", Closing: "wrapup"},
 		{Name: "d1", Deferred: true}, {Name: "d2", Deferred: true},
-	}
+	})
 	want := []string{"", swClosingDividerLabel, "", swDividerLabel, ""}
 	for i := range fleet {
 		if got := swDividerAt(fleet, i); got != want[i] {
@@ -202,11 +203,11 @@ func TestSwDetailLineLeadsWithClosingPhase(t *testing.T) {
 func TestSwModelViewDrawsClosingDividerAndBadge(t *testing.T) {
 	m := swTestModel()
 	m.width = 140 // wide enough that the badge column is not clipped
-	m.snap.Sessions = []swSession{
+	m.snap.Sessions = swArrangeFamilies([]swSession{
 		{Name: "api", State: "Idle", Context: -1},
 		{Name: "web", State: "Idle", Context: -1, Closing: "ready"},
 		{Name: "scratch", State: "Idle", Context: -1, Deferred: true},
-	}
+	})
 	lines := strings.Split(ansi.Strip(m.View()), "\n")
 	row := func(name string) int {
 		for i, l := range lines {
@@ -250,7 +251,7 @@ func TestSwModelViewBothDividersCountedInListBudget(t *testing.T) {
 		}
 		sessions = append(sessions, s)
 	}
-	m.snap.Sessions = sessions
+	m.snap.Sessions = swArrangeFamilies(sessions)
 	m.sel = 29
 	raw := m.View()
 	plain := ansi.Strip(raw)

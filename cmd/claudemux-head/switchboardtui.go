@@ -1094,19 +1094,22 @@ const (
 //
 // Derived from the neighbouring rows rather than assumed from the sort: the
 // rule marks wherever a group actually starts, so a snapshot that somehow
-// arrived unsorted still draws its rules in places that mean something.
+// arrived unsorted still draws its rules in places that mean something. The
+// group compared is FamilyGroup, where the row is drawn, not swGroupOf: a
+// deferred child under an active parent sits in the active block, and a rule
+// above it would cut a family in two.
 func swDividerAt(sessions []swSession, i int) string {
 	if i < 0 || i >= len(sessions) {
 		return ""
 	}
-	g := swGroupOf(sessions[i])
+	g := sessions[i].FamilyGroup
 	if i == 0 {
 		if g == swGroupClosing {
 			return swClosingDividerLabel
 		}
 		return ""
 	}
-	if g == swGroupOf(sessions[i-1]) {
+	if g == sessions[i-1].FamilyGroup {
 		return ""
 	}
 	switch g {
@@ -1139,6 +1142,11 @@ func swDividerLine(label string, width int) string {
 // is listed where it is.
 func swDetailLine(sess swSession) string {
 	var parts []string
+	// An orphan's tag leads: its parent's name is why the session is not
+	// drawn under anything, and it has nowhere else on the row to say so.
+	if sess.From != "" {
+		parts = append(parts, swStatusStyle.Render("← "+sess.From))
+	}
 	if phase := closingText(sess.Closing); phase != "" {
 		parts = append(parts, swCloseStyle.Render(phase))
 	}
@@ -1308,8 +1316,12 @@ func (m swModel) View() string {
 		// by display width (not rune count) for the same reason as swCell: a
 		// CJK name clipped to swNameColW runes still overruns the column in
 		// cells.
-		name := swNameStyle(sess.Color, i == m.sel).
-			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
+		// A child's tree prefix is dim and comes out of the same column, so
+		// the name shrinks by the prefix's width and the grid holds.
+		prefixW := lipgloss.Width(sess.TreePrefix)
+		nameW := max(swNameColW-prefixW, 1)
+		name := swStatusStyle.Render(sess.TreePrefix) + swNameStyle(sess.Color, i == m.sel).
+			Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
 		// The badge names the group the row is listed in (swGroupOf), so a
 		// session that is both closing and deferred wears the closing badge.
 		badge := ""
@@ -1337,7 +1349,7 @@ func (m swModel) View() string {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
-			line2 := "    " + detail
+			line2 := "    " + strings.Repeat(" ", prefixW) + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}
