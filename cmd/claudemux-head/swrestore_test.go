@@ -240,3 +240,49 @@ func TestSwRestoreViewPickingHidesStripText(t *testing.T) {
 		t.Errorf("picker header missing:\n%s", view)
 	}
 }
+
+func TestRelinkArgs(t *testing.T) {
+	child := lostRec("beejax", "2", "/p", "", 1, false)
+	child.Rec.Parent = "iai-admin"
+	orphan := lostRec("usm", "3", "/p", "", 1, false)
+	orphan.Rec.Parent = "gone"
+	restored := []lostSession{lostRec("iai-admin", "1", "/p", "", 1, false), child, orphan}
+	created := map[string]int64{"iai-admin": 500, "beejax": 501, "usm": 502}
+
+	got := relinkArgs(restored, created)
+	want := []string{"set-option", "-t", "beejax:", parentOption, "iai-admin", ";",
+		"set-option", "-t", "beejax:", parentCreatedOption, "500"}
+	if len(got) != 1 || strings.Join(got[0], " ") != strings.Join(want, " ") {
+		t.Errorf("relinkArgs = %v, want [%v]", got, want)
+	}
+}
+
+func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
+	m := newSwModel("%0")
+	a := lostRec("a", "1", "/p", "", 1, false)
+	b := lostRec("b", "2", "/p", "", 1, false)
+	m.restore = &swRestoreOffer{busy: true, total: 2, lost: []lostSession{a, b}, queue: []lostSession{b}}
+	mm, _ := m.Update(swRestoreStepMsg{name: "a"})
+	sm := mm.(swModel)
+	mm, cmd := sm.Update(swRestoreStepMsg{name: "b"})
+	sm = mm.(swModel)
+	if cmd == nil {
+		t.Fatal("no relink cmd after the last step")
+	}
+	if got := sm.restore; got != nil {
+		t.Fatalf("clean restore left the strip up: %+v", got)
+	}
+
+	// A failed step is not relinked.
+	m.restore = &swRestoreOffer{busy: true, total: 2, lost: []lostSession{a, b}, queue: []lostSession{b}}
+	mm, _ = m.Update(swRestoreStepMsg{name: "a", err: errString("boom")})
+	sm = mm.(swModel)
+	if len(sm.restore.restored) != 0 {
+		t.Errorf("restored = %v after a failed step", sm.restore.restored)
+	}
+	mm, _ = sm.Update(swRestoreStepMsg{name: "b"})
+	sm = mm.(swModel)
+	if len(sm.restore.restored) != 1 || sm.restore.restored[0].Rec.SessionName != "b" {
+		t.Errorf("restored = %v, want just b", sm.restore.restored)
+	}
+}

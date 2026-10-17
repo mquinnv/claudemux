@@ -783,6 +783,13 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			o.failed = append(o.failed, msg.name+": "+msg.err.Error())
+		} else {
+			for _, l := range o.lost {
+				if l.Rec.SessionName == msg.name {
+					o.restored = append(o.restored, l)
+					break
+				}
+			}
 		}
 		o.done++
 		if len(o.queue) > 0 {
@@ -791,8 +798,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, swRestoreOneCmd(next)
 		}
 		o.busy = false
+		restored := o.restored
 		if len(o.failed) == 0 {
 			m.restore = nil
+		}
+		if len(restored) > 0 {
+			return m, swRelinkCmd(restored)
 		}
 		return m, nil
 	case usageTickMsg:

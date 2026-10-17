@@ -161,12 +161,12 @@ func TestRecordWrittenMsgNoDeleteWhenNameUnchanged(t *testing.T) {
 }
 
 func TestParseSessionNamePath(t *testing.T) {
-	name, path, ok := parseSessionNamePath("remix-2\t/Users/m/Projects/remix\n")
-	if !ok || name != "remix-2" || path != "/Users/m/Projects/remix" {
-		t.Errorf("got %q %q %v", name, path, ok)
+	name, path, parent, ok := parseSessionNamePath("remix-2\t/Users/m/Projects/remix\n")
+	if !ok || name != "remix-2" || path != "/Users/m/Projects/remix" || parent != "" {
+		t.Errorf("got %q %q %q %v", name, path, parent, ok)
 	}
 	for _, bad := range []string{"", "\t/p", "name-only"} {
-		if _, _, ok := parseSessionNamePath(bad); ok {
+		if _, _, _, ok := parseSessionNamePath(bad); ok {
 			t.Errorf("parseSessionNamePath(%q) ok, want failure", bad)
 		}
 	}
@@ -204,5 +204,17 @@ func TestRecordDueOnDeferChange(t *testing.T) {
 	m.deferReason = "review"
 	if !m.recordDue(now.Add(time.Second)) {
 		t.Fatal("not due after blocker changed")
+	}
+}
+
+func TestParseSessionNamePathParent(t *testing.T) {
+	name, path, parent, ok := parseSessionNamePath("beejax\t/Users/x/beejax\tiai-admin\n")
+	if !ok || name != "beejax" || path != "/Users/x/beejax" || parent != "iai-admin" {
+		t.Errorf("got %q %q %q %v", name, path, parent, ok)
+	}
+	// An unset option expands to an empty third field.
+	_, _, parent, ok = parseSessionNamePath("beejax\t/Users/x/beejax\t\n")
+	if !ok || parent != "" {
+		t.Errorf("empty parent: got %q %v", parent, ok)
 	}
 }

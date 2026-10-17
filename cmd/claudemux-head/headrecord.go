@@ -122,13 +122,19 @@ func claudeProjectDirName(absPath string) string {
 	return string(b)
 }
 
-// parseSessionNamePath splits "#{session_name}\t#{session_path}" output.
-func parseSessionNamePath(out string) (name, path string, ok bool) {
-	name, path, found := strings.Cut(strings.TrimRight(out, "\n"), "\t")
-	if !found || name == "" || path == "" {
-		return "", "", false
+// parseSessionNamePath splits "#{session_name}\t#{session_path}\t#{@claudemux_parent}"
+// output. The parent is optional: empty when the option is unset, and absent
+// from older two-field output.
+func parseSessionNamePath(out string) (name, path, parent string, ok bool) {
+	name, rest, found := strings.Cut(strings.TrimRight(out, "\n"), "\t")
+	if !found || name == "" {
+		return "", "", "", false
 	}
-	return name, path, true
+	path, parent, _ = strings.Cut(rest, "\t")
+	if path == "" {
+		return "", "", "", false
+	}
+	return name, path, parent, true
 }
 
 // writeRecordCmd resolves this pane's session name and launch dir and writes
@@ -139,15 +145,15 @@ func writeRecordCmd(selfPane, dir string, r sessionRecord) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", selfPane,
-			"#{session_name}\t#{session_path}").Output()
+			"#{session_name}\t#{session_path}\t#{"+parentOption+"}").Output()
 		if err != nil {
 			return nil
 		}
-		name, path, ok := parseSessionNamePath(string(out))
+		name, path, parent, ok := parseSessionNamePath(string(out))
 		if !ok {
 			return nil
 		}
-		r.SessionName, r.LaunchDir = name, path
+		r.SessionName, r.LaunchDir, r.Parent = name, path, parent
 		if writeSessionRecord(dir, r) != nil {
 			return nil
 		}
