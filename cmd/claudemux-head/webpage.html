@@ -84,6 +84,8 @@
   .deferred .fleet tbody tr:hover { background: var(--defer-hover); }
   .deferred .name { opacity: .8; }
   .reason { color: var(--defer); font-weight: 500; }
+  .badge-defer { color: var(--defer); font-weight: 500; margin-left: .5em; }
+  .from { color: var(--dim); margin-right: .4em; }
   /* The closing section reuses the deferred one's shape and overrides only
      its hue, so the two lists cannot drift apart in layout. */
   section.closing { border-color: var(--close-line); background: var(--close-bg); }
@@ -185,6 +187,8 @@
     n.appendChild(document.createTextNode(s.name));
     if (s.color) n.style.color = s.color;
     var c = td('', n, s.name + (s.description ? '\n' + s.description : ''));
+    // Family members indent by depth; the web draws no tree glyphs.
+    if (s.depth) c.style.paddingLeft = 'calc(8px + 1.1em * ' + s.depth + ')';
     if (s.description) c.appendChild(el('div', 'sub desc', s.description));
     // Phones drop the topic column; the topic rides under the name instead.
     if (s.topic) c.appendChild(el('div', 'sub m-topic', s.topic));
@@ -197,8 +201,26 @@
   function topicCell(s, detail) {
     var c = el('td', 'topic-cell');
     var lines = [];
-    if (s.topic) { c.appendChild(el('div', 'topic', s.topic)); lines.push(s.topic); }
-    if (detail) { c.appendChild(el('div', 'sub', detail)); lines.push(detail); }
+    var keptDeferred = s.deferred && s.group === 'active';
+    if (s.topic || keptDeferred) {
+      var tl = el('div', 'topic', s.topic || '');
+      if (s.topic) lines.push(s.topic);
+      // A deferred child kept in its active family says so, in the defer hue.
+      if (keptDeferred) {
+        var b = '\u25c6 ' + (s.defer_reason || 'deferred');
+        tl.appendChild(el('span', 'badge-defer', b));
+        lines.push(b);
+      }
+      c.appendChild(tl);
+    }
+    if (detail || s.from) {
+      var sl = el('div', 'sub');
+      var fromTxt = s.from ? '\u2190 ' + s.from : '';
+      if (fromTxt) sl.appendChild(el('span', 'from', fromTxt));
+      if (detail) sl.appendChild(document.createTextNode(detail));
+      c.appendChild(sl);
+      lines.push((fromTxt ? fromTxt + ' ' : '') + (detail || ''));
+    }
     if (s.prompt && detail !== s.prompt) lines.push('\u258c ' + s.prompt);
     if (!lines.length) c.appendChild(el('span', 'dim', '\u2014'));
     c.title = lines.join('\n');
@@ -313,9 +335,11 @@
 
     // Three lists, as the lobby groups them: closing wins over deferred for
     // a session that is both (swGroupOf in switchboard.go).
-    var closing = v.sessions.filter(function (s) { return !!s.closing; });
-    var parked = v.sessions.filter(function (s) { return s.deferred && !s.closing; });
-    var active = v.sessions.filter(function (s) { return !s.deferred && !s.closing; });
+    // The server decides the group (a family block stays together), so a
+    // deferred child of an active family renders in the active table.
+    var closing = v.sessions.filter(function (s) { return s.group === 'closing'; });
+    var parked = v.sessions.filter(function (s) { return s.group === 'deferred'; });
+    var active = v.sessions.filter(function (s) { return s.group !== 'closing' && s.group !== 'deferred'; });
 
     var fleetFrag = document.createDocumentFragment();
     if (active.length) {
