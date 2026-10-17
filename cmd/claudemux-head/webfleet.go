@@ -145,6 +145,13 @@ type webSession struct {
 	// prints it.
 	Closing      string `json:"closing,omitempty"`
 	ClosingLabel string `json:"closing_label,omitempty"`
+	// Depth, Group and From carry the handoff family (swArrangeFamilies):
+	// nesting level, the list the row is drawn in ("active", "closing" or
+	// "deferred" - a deferred child of an active family stays "active"), and
+	// the orphan tag naming a parent that is no longer running.
+	Depth int    `json:"depth"`
+	Group string `json:"group"`
+	From  string `json:"from,omitempty"`
 }
 
 // defaultWebTitle is the page heading when web.title is unset.
@@ -157,6 +164,17 @@ func webModelName(m string) string {
 		return ""
 	}
 	return shortModel(m)
+}
+
+// webGroupName is the list a row is drawn in, as the page's JS names it.
+func webGroupName(g swGroup) string {
+	switch g {
+	case swGroupClosing:
+		return "closing"
+	case swGroupDeferred:
+		return "deferred"
+	}
+	return "active"
 }
 
 func webTime(t time.Time) string {
@@ -193,6 +211,9 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 			Prompt:      s.Prompt,
 			Deferred:    s.Deferred,
 			Closing:     s.Closing,
+			Depth:       s.Depth,
+			Group:       webGroupName(s.FamilyGroup),
+			From:        s.From,
 			// The lobby's wording without its ⏻ glyph: the page's closing
 			// section already carries one in its heading.
 			ClosingLabel: strings.TrimPrefix(closingText(s.Closing), "⏻ "),

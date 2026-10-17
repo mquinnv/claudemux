@@ -180,3 +180,59 @@ func TestWebFleetPublishAndView(t *testing.T) {
 		t.Fatalf("view() = %+v", v)
 	}
 }
+
+func TestWebFleetViewFamilies(t *testing.T) {
+	iai := withDefer(fam("iai-admin", 20, "", 0))
+	iai.DeferReason = "waiting on beejax"
+	bj := withDefer(fam("beejax", 40, "iai-admin", 20))
+	bj.DeferReason = "needs review"
+	snap := swSnapshot{Sessions: swArrangeFamilies([]swSession{
+		fam("remix-3", 10, "", 0), iai, fam("remix-6", 30, "", 0),
+		withDefer(fam("digiscreener", 5, "", 0)), bj,
+		fam("usm", 41, "iai-admin", 20), fam("ag", 42, "iai-admin", 20),
+		fam("lost", 50, "gone", 1),
+	})}
+	v := buildWebFleetView(snap, RateLimits{}, false, nil, time.Time{}, webHeadline{})
+	by := map[string]webSession{}
+	for _, s := range v.Sessions {
+		by[s.Name] = s
+	}
+	b := by["beejax"]
+	if b.Depth != 1 || b.Group != "active" || !b.Deferred || b.DeferReason != "needs review" {
+		t.Errorf("beejax = %+v", b)
+	}
+	if by["digiscreener"].Group != "deferred" || by["iai-admin"].Group != "active" || by["iai-admin"].Depth != 0 {
+		t.Errorf("groups/depth wrong: %+v %+v", by["digiscreener"], by["iai-admin"])
+	}
+	if by["lost"].From != "gone" || by["usm"].From != "" {
+		t.Errorf("From: lost=%q usm=%q", by["lost"].From, by["usm"].From)
+	}
+	if v.Counts.Deferred != 3 {
+		t.Errorf("Counts.Deferred = %d, want 3 (per session)", v.Counts.Deferred)
+	}
+	// A closing parent with a deferred (not closing) child: the family rides
+	// in the closing list, and each row still says what it really is.
+	cp := fam("winding", 60, "", 0)
+	cp.Closing = "wrapup"
+	cc := withDefer(fam("parked", 61, "winding", 60))
+	cc.DeferReason = "waits on ci"
+	cv := buildWebFleetView(swSnapshot{Sessions: swArrangeFamilies([]swSession{cp, cc})}, RateLimits{}, false, nil, time.Time{}, webHeadline{})
+	if len(cv.Sessions) != 2 {
+		t.Fatalf("closing family = %+v", cv.Sessions)
+	}
+	w, k := cv.Sessions[0], cv.Sessions[1]
+	if w.Group != "closing" || w.Closing != "wrapup" || w.ClosingLabel == "" || w.Deferred {
+		t.Errorf("winding = %+v", w)
+	}
+	if k.Group != "closing" || k.Closing != "" || k.ClosingLabel != "" || !k.Deferred || k.DeferReason != "waits on ci" || k.Depth != 1 {
+		t.Errorf("parked = %+v", k)
+	}
+	kraw, _ := json.Marshal(k)
+	if !strings.Contains(string(kraw), `"group":"closing"`) || !strings.Contains(string(kraw), `"deferred":true`) || strings.Contains(string(kraw), `"closing"`+":") {
+		t.Errorf("parked json = %s", kraw)
+	}
+	raw, _ := json.Marshal(by["usm"])
+	if !strings.Contains(string(raw), `"depth":1`) || !strings.Contains(string(raw), `"group":"active"`) || strings.Contains(string(raw), `"from"`) {
+		t.Errorf("usm json = %s", raw)
+	}
+}

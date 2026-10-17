@@ -240,3 +240,66 @@ func TestSwRestoreViewPickingHidesStripText(t *testing.T) {
 		t.Errorf("picker header missing:\n%s", view)
 	}
 }
+
+func TestRelinkArgs(t *testing.T) {
+	child := lostRec("beejax", "2", "/p", "", 1, false)
+	child.Rec.Parent = "iai-admin"
+	orphan := lostRec("usm", "3", "/p", "", 1, false)
+	orphan.Rec.Parent = "gone"
+	restored := []lostSession{lostRec("iai-admin", "1", "/p", "", 1, false), child, orphan}
+	created := map[string]int64{"iai-admin": 500, "beejax": 501, "usm": 502}
+
+	got := relinkArgs(restored, created)
+	want := []string{"set-option", "-t", "beejax:", parentOption, "iai-admin", ";",
+		"set-option", "-t", "beejax:", parentCreatedOption, "500"}
+	if len(got) != 1 || strings.Join(got[0], " ") != strings.Join(want, " ") {
+		t.Errorf("relinkArgs = %v, want [%v]", got, want)
+	}
+}
+
+func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
+	m := newSwModel("%0")
+	a := lostRec("a", "1", "/p", "", 1, false)
+	b := lostRec("b", "2", "/p", "", 1, false)
+	m.restore = &swRestoreOffer{busy: true, total: 2, lost: []lostSession{a, b}, queue: []lostSession{b}}
+	mm, _ := m.Update(swRestoreStepMsg{name: "a"})
+	sm := mm.(swModel)
+	mm, cmd := sm.Update(swRestoreStepMsg{name: "b"})
+	sm = mm.(swModel)
+	if cmd == nil {
+		t.Fatal("no relink cmd after the last step")
+	}
+	if got := sm.restore; got != nil {
+		t.Fatalf("clean restore left the strip up: %+v", got)
+	}
+
+	// A failed step is not relinked.
+	m.restore = &swRestoreOffer{busy: true, total: 2, lost: []lostSession{a, b}, queue: []lostSession{b}}
+	mm, _ = m.Update(swRestoreStepMsg{name: "a", err: errString("boom")})
+	sm = mm.(swModel)
+	if len(sm.restore.restored) != 0 {
+		t.Errorf("restored = %v after a failed step", sm.restore.restored)
+	}
+	mm, _ = sm.Update(swRestoreStepMsg{name: "b"})
+	sm = mm.(swModel)
+	if len(sm.restore.restored) != 1 || sm.restore.restored[0].Rec.SessionName != "b" {
+		t.Errorf("restored = %v, want just b", sm.restore.restored)
+	}
+
+	// A step that relaunched but could not reapply its defer mark is a live
+	// session: the strip reports the failure, and it is still relinked.
+	m.restore = &swRestoreOffer{busy: true, total: 2, lost: []lostSession{a, b}, queue: []lostSession{b}}
+	mm, _ = m.Update(swRestoreStepMsg{name: "a", err: errString("restored, but defer not reapplied: x"), live: true})
+	sm = mm.(swModel)
+	if len(sm.restore.restored) != 1 || sm.restore.restored[0].Rec.SessionName != "a" {
+		t.Errorf("restored = %v, want a (live despite the defer error)", sm.restore.restored)
+	}
+	if len(sm.restore.failed) != 1 {
+		t.Errorf("failed = %v, want the defer error reported", sm.restore.failed)
+	}
+	mm, cmd = sm.Update(swRestoreStepMsg{name: "b"})
+	sm = mm.(swModel)
+	if cmd == nil || len(sm.restore.restored) != 2 {
+		t.Errorf("relink cmd=%v restored=%v, want a relink of both", cmd != nil, sm.restore.restored)
+	}
+}

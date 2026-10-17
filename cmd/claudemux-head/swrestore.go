@@ -35,6 +35,10 @@ type swRestoreOffer struct {
 	done   int
 	total  int
 	failed []string // "name: reason"
+	// restored collects the sessions that relaunched (cleanly, or live with
+	// a follow-up error — see swRestoreStepMsg.live), for the relink pass
+	// once the queue is empty.
+	restored []lostSession
 }
 
 type swRestoreScanMsg struct{ offer *swRestoreOffer }
@@ -42,6 +46,10 @@ type swRestoreScanMsg struct{ offer *swRestoreOffer }
 type swRestoreStepMsg struct {
 	name string
 	err  error
+	// live marks a step whose session is up despite err (the relaunch worked
+	// and only a follow-up, the defer mark, failed): the error is reported,
+	// and the session is still relinked with the rest.
+	live bool
 }
 
 func (o *swRestoreOffer) startPicking() {
@@ -211,10 +219,66 @@ func swRestoreOneCmd(l lostSession) tea.Cmd {
 			defer dcancel()
 			args := deferArgs(name+":", true, l.Rec.DeferReason)
 			if err := exec.CommandContext(dctx, "tmux", args...).Run(); err != nil {
-				return swRestoreStepMsg{name: name, err: fmt.Errorf("restored, but defer not reapplied: %w", err)}
+				return swRestoreStepMsg{name: name, err: fmt.Errorf("restored, but defer not reapplied: %w", err), live: true}
 			}
 		}
 		return swRestoreStepMsg{name: name}
+	}
+}
+
+// relinkArgs builds one tmux argv per restored child whose recorded parent
+// was also restored and is live in created (name -> #{session_created}). The
+// launcher stamps no parent on -N launches, so the links a reboot erased are
+// rebuilt here, after the batch: a child may relaunch before its parent, and
+// the parent's creation time is only known once it exists.
+func relinkArgs(restored []lostSession, created map[string]int64) [][]string {
+	names := make(map[string]bool, len(restored))
+	for _, l := range restored {
+		names[l.Rec.SessionName] = true
+	}
+	var out [][]string
+	for _, l := range restored {
+		child, parent := l.Rec.SessionName, l.Rec.Parent
+		if parent == "" || !names[parent] {
+			continue
+		}
+		c, ok := created[parent]
+		if !ok {
+			continue
+		}
+		out = append(out, []string{
+			"set-option", "-t", child + ":", parentOption, parent, ";",
+			"set-option", "-t", child + ":", parentCreatedOption, strconv.FormatInt(c, 10)})
+	}
+	return out
+}
+
+// swRelinkCmd re-stamps handoff parent links on the relaunched sessions.
+// Best-effort: a failure leaves a child unlinked (it shows as a root), which
+// is not worth failing the restore over.
+func swRelinkCmd(restored []lostSession) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F",
+			"#{session_name}\t#{session_created}").Output()
+		if err != nil {
+			return nil
+		}
+		created := map[string]int64{}
+		for _, line := range strings.Split(string(out), "\n") {
+			name, ts, ok := strings.Cut(line, "\t")
+			if !ok {
+				continue
+			}
+			if v, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64); err == nil {
+				created[name] = v
+			}
+		}
+		for _, args := range relinkArgs(restored, created) {
+			_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		}
+		return nil
 	}
 }
 

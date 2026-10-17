@@ -42,6 +42,10 @@ type sessionRecord struct {
 	// restore sets them again on the relaunched session.
 	Deferred    bool   `json:"deferred,omitempty"`
 	DeferReason string `json:"defer_reason,omitempty"`
+	// Parent is the launching session's name (@claudemux_parent). Another
+	// tmux session option, so another thing a reboot erases; restore relinks
+	// it once the whole batch is back (swRelinkCmd).
+	Parent string `json:"parent,omitempty"`
 }
 
 // loadedRecord pairs a record with the file it came from, so the lobby can

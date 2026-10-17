@@ -1449,6 +1449,7 @@ func TestSwDetailLineShowsDeferReason(t *testing.T) {
 func TestSwModelViewDrawsDeferredDivider(t *testing.T) {
 	m := swTestModel()
 	m.snap.Sessions[2].Deferred = true // scratch, already last
+	m.snap.Sessions = swArrangeFamilies(m.snap.Sessions)
 	lines := strings.Split(ansi.Strip(m.View()), "\n")
 	row := -1
 	for i, l := range lines {
@@ -1499,7 +1500,7 @@ func TestSwModelViewDividerCountedInListBudget(t *testing.T) {
 			Deferred: i >= 25,
 		})
 	}
-	m.snap.Sessions = sessions
+	m.snap.Sessions = swArrangeFamilies(sessions)
 	m.sel = 27 // scrolled to the bottom, where the divider is on screen
 	raw := m.View()
 	if !strings.Contains(ansi.Strip(raw), swDividerLabel) {
@@ -1877,5 +1878,111 @@ func TestSwViewShowsWebAddressOrError(t *testing.T) {
 	next, _ := m.Update(swSnapshotMsg{snap: m.snap, at: time.Now()})
 	if !strings.Contains(next.(swModel).View(), "web: listen tcp") {
 		t.Error("the web error must survive a successful poll (unlike lastErr)")
+	}
+}
+
+// The divider follows where a row is drawn (FamilyGroup), not what the
+// session is on its own: a deferred parent with a live child stays in the
+// active block, and a deferred child under it must not draw a deferred rule.
+func TestSwDividerAtUsesFamilyGroup(t *testing.T) {
+	sessions := []swSession{
+		{Name: "remix-3", FamilyGroup: swGroupActive},
+		{Name: "iai-admin", Deferred: true, FamilyGroup: swGroupActive},
+		{Name: "beejax", Deferred: true, Depth: 1, FamilyGroup: swGroupActive},
+		{Name: "digiscreener", Deferred: true, FamilyGroup: swGroupDeferred},
+	}
+	for i := 0; i < 3; i++ {
+		if got := swDividerAt(sessions, i); got != "" {
+			t.Errorf("swDividerAt(%d) = %q, want none", i, got)
+		}
+	}
+	if got := swDividerAt(sessions, 3); got != swDividerLabel {
+		t.Errorf("swDividerAt(3) = %q, want %q", got, swDividerLabel)
+	}
+}
+
+// The orphan tag leads the detail line, ahead of the summary.
+func TestSwDetailLineOrphanTagLeads(t *testing.T) {
+	got := ansi.Strip(swDetailLine(swSession{From: "iai-admin", Summary: "x"}))
+	if !strings.HasPrefix(got, "← iai-admin · x") {
+		t.Errorf("detail line = %q, want it to start with the orphan tag", got)
+	}
+	if got := ansi.Strip(swDetailLine(swSession{Summary: "x"})); strings.Contains(got, "←") {
+		t.Errorf("no parent, yet detail line = %q", got)
+	}
+}
+
+// A child's tree prefix comes out of the name column, so every later column
+// starts at the same cell on the parent's line and the child's.
+func TestViewIndentsChildrenAndKeepsGrid(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 140, 24
+	m.snap = swSnapshot{Sessions: swArrangeFamilies([]swSession{
+		{Name: "parent", State: "Idle", Since: now, Context: 40, Topic: "ptopic", Created: 10, Model: "claude-opus-4-7"},
+		{Name: "child", State: "Idle", Since: now, Context: 40, Topic: "ctopic", Created: 20,
+			Parent: "parent", ParentCreated: 10, Model: "claude-opus-4-7", Summary: "kid summary"},
+	})}
+	var pl, cl string
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	for i, l := range lines {
+		switch {
+		case strings.Contains(l, "ptopic"):
+			pl = l
+		case strings.Contains(l, "ctopic"):
+			cl = l
+			if i+1 < len(lines) && !strings.HasPrefix(lines[i+1], "      kid summary") {
+				t.Errorf("child detail line = %q, want an extra 2-cell indent", lines[i+1])
+			}
+		}
+	}
+	if !strings.Contains(cl, "└ child") {
+		t.Fatalf("child line has no tree prefix before its name: %q", cl)
+	}
+	pw := lipgloss.Width(pl[:strings.Index(pl, "ptopic")])
+	cw := lipgloss.Width(cl[:strings.Index(cl, "ctopic")])
+	if pw != cw {
+		t.Errorf("topic column at %d on parent, %d on child:\n%s\n%s", pw, cw, pl, cl)
+	}
+}
+
+// Nesting deeper than the name column is wide must not shear the grid: the
+// prefix loses its leading cells first and the name keeps at least one.
+func TestViewDeepNestingKeepsGrid(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 160, 60
+	var chain []swSession
+	for i := 0; i < 15; i++ {
+		s := swSession{Name: fmt.Sprintf("n%02d", i), State: "Idle", Since: now, Context: 40,
+			Topic: fmt.Sprintf("t%02dtopic", i), Created: int64(i + 1), Model: "claude-opus-4-7"}
+		if i > 0 {
+			s.Parent, s.ParentCreated = fmt.Sprintf("n%02d", i-1), int64(i)
+		}
+		chain = append(chain, s)
+	}
+	m.snap = swSnapshot{Sessions: swArrangeFamilies(chain)}
+	if d := m.snap.Sessions[14].Depth; d*2 <= swNameColW {
+		t.Fatalf("depth %d is not deep enough to overflow the %d-cell name column", d, swNameColW)
+	}
+	var rl, dl string
+	for _, l := range strings.Split(ansi.Strip(m.View()), "\n") {
+		switch {
+		case strings.Contains(l, "t00topic"):
+			rl = l
+		case strings.Contains(l, "t14topic"):
+			dl = l
+		}
+	}
+	if rl == "" || dl == "" {
+		t.Fatalf("rows not found:\n%s", ansi.Strip(m.View()))
+	}
+	rw := lipgloss.Width(rl[:strings.Index(rl, "t00topic")])
+	dw := lipgloss.Width(dl[:strings.Index(dl, "t14topic")])
+	if rw != dw {
+		t.Errorf("topic column at %d on the root, %d on the deepest row:\n%s\n%s", rw, dw, rl, dl)
+	}
+	if !strings.Contains(dl, "└ …") && !strings.Contains(dl, "└ n") {
+		t.Errorf("deepest row lost its name cell: %q", dl)
 	}
 }

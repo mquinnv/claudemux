@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -70,13 +69,33 @@ type swSession struct {
 	// the client here, since a closing session that waits is waiting on the
 	// human.
 	Closing string
+	// Created is #{session_created} (unix seconds), 0 when unparseable or the
+	// listing predates the field. It identifies a session across name reuse
+	// (see parentCreatedOption) and orders a family's children.
+	Created int64
+	// Parent / ParentCreated are the raw handoff-link options
+	// (@claudemux_parent, @claudemux_parent_created). Whether the link holds
+	// is swArrangeFamilies' call, not the parser's.
+	Parent        string
+	ParentCreated int64
+	// The fields below are derived by swArrangeFamilies, never parsed.
+	// Depth is 0 for a top-level row; TreePrefix is the tree-glyph string drawn
+	// before the name ("" at depth 0, 2 cells per level); FamilyGroup is the
+	// group of the block the row is drawn in (the lowest group of any family
+	// member, which can differ from swGroupOf for a lone deferred parent);
+	// From names the launching session when the link did not hold (parent gone
+	// or its name reused), "" otherwise.
+	Depth       int
+	TreePrefix  string
+	FamilyGroup swGroup
+	From        string
 }
 
 type swSnapshot struct {
 	// Sessions holds live claudemux sessions — those with a claudemux-head
 	// pane — excluding the lobby itself (whose own pane also runs this
 	// binary), in list-sessions order with the closing and then the deferred
-	// ones parked at the end (see swSortSessions).
+	// ones parked at the end (see swArrangeFamilies).
 	Sessions []swSession
 	Lobby    string            // session owning selfPane; "" if not found
 	Clients  map[string]string // client name -> session it is attached to
@@ -128,7 +147,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay} #{@claudemux_description} #{@claudemux_closing}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay} #{@claudemux_description} #{@claudemux_closing} #{session_created} #{@claudemux_parent} #{@claudemux_parent_created}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -170,10 +189,12 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		// 14 fields in production: the stay mark is field 12, the project
-		// description 13 and the closing mark the last. The trailing two are
-		// optional so 12- and 13-field listings (older fixtures) still parse.
-		if len(f) < 12 || len(f) > 14 || f[0] == "" {
+		// 17 fields in production: the stay mark is field 12, the project
+		// description 13, the closing mark 14, then session_created and the
+		// handoff-link pair. The 13th/14th are optional so 12- and 13-field
+		// listings (older fixtures) still parse; the family triple is
+		// all-or-nothing, so 15 and 16 fields are malformed.
+		if len(f) < 12 || len(f) > 17 || len(f) == 15 || len(f) == 16 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
@@ -186,8 +207,17 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if len(f) >= 13 {
 			sess.Description = f[12]
 		}
-		if len(f) == 14 {
+		if len(f) >= 14 {
 			sess.Closing = f[13]
+		}
+		if len(f) == 17 {
+			if c, err := strconv.ParseInt(f[14], 10, 64); err == nil {
+				sess.Created = c
+			}
+			sess.Parent = f[15]
+			if pc, err := strconv.ParseInt(f[16], 10, 64); err == nil {
+				sess.ParentCreated = pc
+			}
 		}
 		sess.Context = -1
 		if ctx, err := strconv.Atoi(f[3]); err == nil {
@@ -212,8 +242,9 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		snap.Sessions = append(snap.Sessions, sess)
 	}
 
-	// Closing and deferred sessions sink below the rest — see swSortSessions.
-	swSortSessions(snap.Sessions)
+	// Group the fleet and nest handoff families under their parents; closing
+	// and deferred families sink below the rest — see swArrangeFamilies.
+	snap.Sessions = swArrangeFamilies(snap.Sessions)
 
 	for _, line := range strings.Split(clientOut, "\n") {
 		f := strings.Split(line, "\t")
@@ -248,23 +279,4 @@ func swGroupOf(sess swSession) swGroup {
 		return swGroupDeferred
 	}
 	return swGroupActive
-}
-
-// swSortSessions orders the fleet into its groups, in place: active, then
-// closing, then deferred. Closing sits above deferred because it needs the
-// human sooner — a confirmation, a final keypress — where a deferred session
-// by definition needs nothing yet. The sort is stable: within each group the
-// fleet keeps tmux's list-sessions order, which is the order the lobby has
-// always shown, so a session changing group moves that one row and leaves
-// every other row where the user last saw it.
-//
-// Sorting here rather than in the TUI keeps one order for the whole lobby:
-// every index the model holds — the selection, the scroll window, the row
-// the keys act on — means the same session as the row on screen. The
-// conductor is indifferent to it (waitingQueue sorts its own queue by Since),
-// so this is a display order only.
-func swSortSessions(sessions []swSession) {
-	sort.SliceStable(sessions, func(i, j int) bool {
-		return swGroupOf(sessions[i]) < swGroupOf(sessions[j])
-	})
 }

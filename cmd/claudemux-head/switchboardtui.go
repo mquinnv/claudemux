@@ -107,6 +107,19 @@ func swPad(s string, w int) string {
 	return s
 }
 
+// swFitTreePrefix splits the name column between a row's tree prefix and its
+// name, returning the prefix to draw and the cells left for the name. The
+// prefix grows 2 cells per level and nothing bounds a family's depth, so past
+// swNameColW-1 cells it loses its LEADING cells: the glyphs nearest the name
+// (the row's own tee or elbow) are the ones that say where it hangs, and the
+// name always keeps at least one cell, so the columns after it never shear.
+func swFitTreePrefix(prefix string) (string, int) {
+	if over := lipgloss.Width(prefix) - (swNameColW - 1); over > 0 {
+		prefix = ansi.TruncateLeft(prefix, over, "")
+	}
+	return prefix, swNameColW - lipgloss.Width(prefix)
+}
+
 // swCell renders text as a fixed-width column cell: truncated to w, styled,
 // then padded to w. The padding is applied outside the style so a cell's
 // color (or a reverse highlight) stops at the text rather than smearing
@@ -470,7 +483,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}")
+			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -705,7 +718,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastErr = ""
 		// The selection follows the session, not the index it used to sit at:
-		// deferring a row sinks it below the others (swSortSessions), and an
+		// deferring a row sinks it below the others (swArrangeFamilies), and an
 		// index kept through that reshuffle would silently leave the cursor —
 		// and the preview, and the next keystroke — on a different session
 		// than the one the user was looking at. A session that left the fleet
@@ -784,6 +797,14 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			o.failed = append(o.failed, msg.name+": "+msg.err.Error())
 		}
+		if msg.err == nil || msg.live {
+			for _, l := range o.lost {
+				if l.Rec.SessionName == msg.name {
+					o.restored = append(o.restored, l)
+					break
+				}
+			}
+		}
 		o.done++
 		if len(o.queue) > 0 {
 			next := o.queue[0]
@@ -791,8 +812,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, swRestoreOneCmd(next)
 		}
 		o.busy = false
+		restored := o.restored
 		if len(o.failed) == 0 {
 			m.restore = nil
+		}
+		if len(restored) > 0 {
+			return m, swRelinkCmd(restored)
 		}
 		return m, nil
 	case usageTickMsg:
@@ -1094,19 +1119,22 @@ const (
 //
 // Derived from the neighbouring rows rather than assumed from the sort: the
 // rule marks wherever a group actually starts, so a snapshot that somehow
-// arrived unsorted still draws its rules in places that mean something.
+// arrived unsorted still draws its rules in places that mean something. The
+// group compared is FamilyGroup, where the row is drawn, not swGroupOf: a
+// deferred child under an active parent sits in the active block, and a rule
+// above it would cut a family in two.
 func swDividerAt(sessions []swSession, i int) string {
 	if i < 0 || i >= len(sessions) {
 		return ""
 	}
-	g := swGroupOf(sessions[i])
+	g := sessions[i].FamilyGroup
 	if i == 0 {
 		if g == swGroupClosing {
 			return swClosingDividerLabel
 		}
 		return ""
 	}
-	if g == swGroupOf(sessions[i-1]) {
+	if g == sessions[i-1].FamilyGroup {
 		return ""
 	}
 	switch g {
@@ -1139,6 +1167,11 @@ func swDividerLine(label string, width int) string {
 // is listed where it is.
 func swDetailLine(sess swSession) string {
 	var parts []string
+	// An orphan's tag leads: its parent's name is why the session is not
+	// drawn under anything, and it has nowhere else on the row to say so.
+	if sess.From != "" {
+		parts = append(parts, swStatusStyle.Render("← "+sess.From))
+	}
 	if phase := closingText(sess.Closing); phase != "" {
 		parts = append(parts, swCloseStyle.Render(phase))
 	}
@@ -1308,8 +1341,11 @@ func (m swModel) View() string {
 		// by display width (not rune count) for the same reason as swCell: a
 		// CJK name clipped to swNameColW runes still overruns the column in
 		// cells.
-		name := swNameStyle(sess.Color, i == m.sel).
-			Render(swPad(ansi.Truncate(sess.Name, swNameColW, "…"), swNameColW))
+		// A child's tree prefix is dim and comes out of the same column, so
+		// the name shrinks by the prefix's width and the grid holds.
+		prefix, nameW := swFitTreePrefix(sess.TreePrefix)
+		name := swStatusStyle.Render(prefix) + swNameStyle(sess.Color, i == m.sel).
+			Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
 		// The badge names the group the row is listed in (swGroupOf), so a
 		// session that is both closing and deferred wears the closing badge.
 		badge := ""
@@ -1337,7 +1373,7 @@ func (m swModel) View() string {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
-			line2 := "    " + detail
+			line2 := "    " + strings.Repeat(" ", lipgloss.Width(prefix)) + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}

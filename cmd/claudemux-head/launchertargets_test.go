@@ -133,6 +133,41 @@ func TestLauncherDeclaresRestoreOptions(t *testing.T) {
 	}
 }
 
+func TestLauncherRecordsParentOnlyFromClaudePane(t *testing.T) {
+	src, err := os.ReadFile(launcherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	rp, ok := shellFuncBody(s, "record_parent")
+	if !ok {
+		t.Fatal("record_parent not found")
+	}
+	for _, want := range []string{"pane_current_command", "claude", "node", "@claudemux_parent_created"} {
+		if !strings.Contains(rp, want) {
+			t.Errorf("record_parent does not mention %s", want)
+		}
+	}
+	cs, ok := shellFuncBody(s, "create_session")
+	if !ok {
+		t.Fatal("create_session not found")
+	}
+	lines := strings.Split(cs, "\n")
+	found := false
+	for i, l := range lines {
+		if !strings.Contains(l, "record_parent") {
+			continue
+		}
+		found = true
+		if !strings.Contains(l, `[ -z "$EXACT_NAME" ]`) && (i == 0 || !strings.Contains(lines[i-1], `[ -z "$EXACT_NAME" ]`)) {
+			t.Errorf("record_parent call not guarded by EXACT_NAME: %s", strings.TrimSpace(l))
+		}
+	}
+	if !found {
+		t.Error("create_session does not call record_parent")
+	}
+}
+
 func TestLauncherSyntax(t *testing.T) {
 	if out, err := exec.Command("bash", "-n", launcherPath).CombinedOutput(); err != nil {
 		t.Fatalf("bash -n: %v\n%s", err, out)

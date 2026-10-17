@@ -84,6 +84,12 @@
   .deferred .fleet tbody tr:hover { background: var(--defer-hover); }
   .deferred .name { opacity: .8; }
   .reason { color: var(--defer); font-weight: 500; }
+  .badge-defer { color: var(--defer); font-weight: 500; margin-left: .5em; }
+  .badge-close { color: var(--close); font-weight: 500; margin-left: .5em; }
+  /* A deferred row in the closing list prints its reason in the defer hue,
+     flush in the reason cell like the closing label it stands in for. */
+  .closing td.reason .badge-defer { margin-left: 0; }
+  .from { color: var(--dim); margin-right: .4em; }
   /* The closing section reuses the deferred one's shape and overrides only
      its hue, so the two lists cannot drift apart in layout. */
   section.closing { border-color: var(--close-line); background: var(--close-bg); }
@@ -185,6 +191,8 @@
     n.appendChild(document.createTextNode(s.name));
     if (s.color) n.style.color = s.color;
     var c = td('', n, s.name + (s.description ? '\n' + s.description : ''));
+    // Family members indent by depth; the web draws no tree glyphs.
+    if (s.depth) c.style.paddingLeft = 'calc(8px + 1.1em * ' + s.depth + ')';
     if (s.description) c.appendChild(el('div', 'sub desc', s.description));
     // Phones drop the topic column; the topic rides under the name instead.
     if (s.topic) c.appendChild(el('div', 'sub m-topic', s.topic));
@@ -197,8 +205,35 @@
   function topicCell(s, detail) {
     var c = el('td', 'topic-cell');
     var lines = [];
-    if (s.topic) { c.appendChild(el('div', 'topic', s.topic)); lines.push(s.topic); }
-    if (detail) { c.appendChild(el('div', 'sub', detail)); lines.push(detail); }
+    var keptDeferred = s.deferred && s.group === 'active';
+    // A closing member of a family drawn elsewhere (the active list) has no
+    // teardown column, so its phase rides here like the defer badge does.
+    var keptClosing = s.closing && s.group !== 'closing';
+    if (s.topic || keptDeferred || keptClosing) {
+      var tl = el('div', 'topic', s.topic || '');
+      if (s.topic) lines.push(s.topic);
+      // A deferred child kept in its active family says so, in the defer hue.
+      // Closing wins over deferred, as in swGroupOf, so a row that is both
+      // shows only the closing badge.
+      if (keptClosing) {
+        var cb = '\u23fb ' + (s.closing_label || 'closing');
+        tl.appendChild(el('span', 'badge-close', cb));
+        lines.push(cb);
+      } else if (keptDeferred) {
+        var b = '\u25c6 ' + (s.defer_reason || 'deferred');
+        tl.appendChild(el('span', 'badge-defer', b));
+        lines.push(b);
+      }
+      c.appendChild(tl);
+    }
+    if (detail || s.from) {
+      var sl = el('div', 'sub');
+      var fromTxt = s.from ? '\u2190 ' + s.from : '';
+      if (fromTxt) sl.appendChild(el('span', 'from', fromTxt));
+      if (detail) sl.appendChild(document.createTextNode(detail));
+      c.appendChild(sl);
+      lines.push((fromTxt ? fromTxt + ' ' : '') + (detail || ''));
+    }
     if (s.prompt && detail !== s.prompt) lines.push('\u258c ' + s.prompt);
     if (!lines.length) c.appendChild(el('span', 'dim', '\u2014'));
     c.title = lines.join('\n');
@@ -246,10 +281,20 @@
   // A closing row says how far the teardown has got where a deferred row
   // says what it is blocked on; a waiting one keeps its orange edge, since
   // the conductor still brings the engineer to it.
+  // A family that is closing sits here whole, so a member that is not itself
+  // closing (a deferred child, say) prints what it really is in place of a
+  // borrowed "closing".
   function closingRow(s, now) {
     var r = el('tr', s.waiting ? 'waiting' : '');
     r.appendChild(nameCell(s));
-    r.appendChild(td('reason', s.closing_label || 'closing', s.closing_label));
+    if (!s.closing) {
+      var rc = td('reason', null, s.defer_reason);
+      if (s.deferred) rc.appendChild(el('span', 'badge-defer', '◆ ' + (s.defer_reason || 'deferred')));
+      else rc.appendChild(el('span', 'dim', '—'));
+      r.appendChild(rc);
+    } else {
+      r.appendChild(td('reason', s.closing_label || 'closing', s.closing_label));
+    }
     r.appendChild(td('num dim', ago(s.since, now)));
     r.appendChild(topicCell(s, s.summary));
     return r;
@@ -313,9 +358,11 @@
 
     // Three lists, as the lobby groups them: closing wins over deferred for
     // a session that is both (swGroupOf in switchboard.go).
-    var closing = v.sessions.filter(function (s) { return !!s.closing; });
-    var parked = v.sessions.filter(function (s) { return s.deferred && !s.closing; });
-    var active = v.sessions.filter(function (s) { return !s.deferred && !s.closing; });
+    // The server decides the group (a family block stays together), so a
+    // deferred child of an active family renders in the active table.
+    var closing = v.sessions.filter(function (s) { return s.group === 'closing'; });
+    var parked = v.sessions.filter(function (s) { return s.group === 'deferred'; });
+    var active = v.sessions.filter(function (s) { return s.group !== 'closing' && s.group !== 'deferred'; });
 
     var fleetFrag = document.createDocumentFragment();
     if (active.length) {
