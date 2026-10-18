@@ -37,9 +37,9 @@ A subagent inherits this session's cwd, hooks, CLAUDE.md, memory scope and workt
 3. **Brief:** `SendMessage` with `to:` the bare agent name (add its ` [ref]` only if the listing shows duplicate names), `notify_when_idle: true`, and the brief below.
 4. **Defer:** once the brief is sent, if this session has nothing to do until the peer reports, mark it deferred so the conductor skips it while it waits:
    ```bash
-   tmux set-option -t "$TMUX_PANE" @claudemux_defer 1 \; set-option -t "$TMUX_PANE" @claudemux_defer_reason "waiting on <tmux-name>: <goal in a few words>"
+   tmux set-option -t "$TMUX_PANE" @claudemux_defer wait \; set-option -t "$TMUX_PANE" @claudemux_defer_reason "waiting on <tmux-name>: <goal in a few words>"
    ```
-   The blocker is `waiting on <tmux-name>: <goal>`: one line, no tabs or newlines, under about 48 characters so the head's chip shows all of it. Skip this step when the user gave this session other work to continue, when `$TMUX_PANE` is empty (not under tmux), or when `tmux display-message -p -t "$TMUX_PANE" '#{@claudemux_defer}'` prints `1`: that mark is the user's, and you must neither overwrite it nor clear it later.
+   The value `wait` (not `1`) marks the defer as a handoff's, so the lobby badges this session WAIT instead of DEFER. The blocker is `waiting on <tmux-name>: <goal>`: one line, no tabs or newlines, under about 48 characters so the head's chip shows all of it. Skip this step when the user gave this session other work to continue, when `$TMUX_PANE` is empty (not under tmux), or when `tmux display-message -p -t "$TMUX_PANE" '#{@claudemux_defer}'` prints `1`: that mark is the user's, and you must neither overwrite it nor clear it later.
 
 ## The brief (the peer's entire knowledge)
 

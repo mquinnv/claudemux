@@ -53,6 +53,10 @@ type swSession struct {
 	// outside claudemux, so the conductor must never drive the client here.
 	// See swconductor.go's waitingQueue for what this excludes.
 	Deferred bool
+	// DeferWait marks a Deferred session whose mark a handoff set
+	// (deferWaitValue): it is waiting on a peer session, so its badge reads
+	// WAIT. Never true without Deferred.
+	DeferWait bool
 	// DeferReason mirrors @claudemux_defer_reason: the blocker typed when the
 	// session was deferred, "" when none was given. Shown on the row's detail
 	// line only while Deferred is set.
@@ -200,7 +204,7 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if !heads[f[0]] || f[0] == snap.Lobby {
 			continue
 		}
-		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: f[8] == "1", DeferReason: f[9], Stay: f[11] == "1"}
+		sess := swSession{Name: f[0], State: f[1], Summary: f[4], Prompt: f[5], Model: f[6], Color: f[7], Deferred: isDeferValue(f[8]), DeferWait: f[8] == deferWaitValue, DeferReason: f[9], Stay: f[11] == "1"}
 		if validProjectEmoji(f[10]) {
 			sess.Emoji = f[10]
 		}

@@ -139,6 +139,7 @@ type webSession struct {
 	Summary     string `json:"summary,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
 	Deferred    bool   `json:"deferred"`
+	DeferWait   bool   `json:"defer_wait,omitempty"`
 	DeferReason string `json:"defer_reason,omitempty"`
 	// Closing is the head's teardown phase (closingPublishValue), omitted when
 	// the session is not closing; ClosingLabel is that phase as the page
@@ -210,6 +211,7 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 			Summary:     s.Summary,
 			Prompt:      s.Prompt,
 			Deferred:    s.Deferred,
+			DeferWait:   s.DeferWait,
 			Closing:     s.Closing,
 			Depth:       s.Depth,
 			Group:       webGroupName(s.FamilyGroup),

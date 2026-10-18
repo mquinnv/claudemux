@@ -181,6 +181,13 @@ func TestSessionRecordCarriesDefer(t *testing.T) {
 	if !r.Deferred || r.DeferReason != "waiting on Jean" {
 		t.Errorf("deferred record = %v %q, want true %q", r.Deferred, r.DeferReason, "waiting on Jean")
 	}
+	if r.DeferWait {
+		t.Error("a user defer recorded as a handoff wait")
+	}
+	m.deferRaw = deferWaitValue
+	if r := m.sessionRecordFor(now); !r.Deferred || !r.DeferWait {
+		t.Errorf("handoff wait record = %v %v, want deferred and wait", r.Deferred, r.DeferWait)
+	}
 	m.deferRaw = ""
 	if r := m.sessionRecordFor(now); r.Deferred || r.DeferReason != "" {
 		t.Errorf("undeferred record = %v %q, want false \"\"", r.Deferred, r.DeferReason)

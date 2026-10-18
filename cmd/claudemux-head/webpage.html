@@ -220,7 +220,7 @@
         tl.appendChild(el('span', 'badge-close', cb));
         lines.push(cb);
       } else if (keptDeferred) {
-        var b = '\u25c6 ' + (s.defer_reason || 'deferred');
+        var b = '\u25c6 ' + (s.defer_reason || (s.defer_wait ? 'waiting' : 'deferred'));
         tl.appendChild(el('span', 'badge-defer', b));
         lines.push(b);
       }
@@ -289,7 +289,7 @@
     r.appendChild(nameCell(s));
     if (!s.closing) {
       var rc = td('reason', null, s.defer_reason);
-      if (s.deferred) rc.appendChild(el('span', 'badge-defer', '◆ ' + (s.defer_reason || 'deferred')));
+      if (s.deferred) rc.appendChild(el('span', 'badge-defer', '◆ ' + (s.defer_reason || (s.defer_wait ? 'waiting' : 'deferred'))));
       else rc.appendChild(el('span', 'dim', '—'));
       r.appendChild(rc);
     } else {

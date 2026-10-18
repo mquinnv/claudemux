@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -58,6 +59,31 @@ func TestDeferChip(t *testing.T) {
 		if got := deferChip(raw, "PR review"); got != "" {
 			t.Errorf("deferChip(%s) = %q, want empty", name, got)
 		}
+	}
+}
+
+// A handoff's mark is a defer that reads "wait", and deferValueArgs sets it.
+func TestDeferWaitValue(t *testing.T) {
+	if got := deferChip(deferWaitValue, "waiting on api: fix"); !strings.Contains(got, "◆ wait: waiting on api: fix") {
+		t.Errorf("deferChip(wait, reason) = %q, want the wait label", got)
+	}
+	if got := ansi.Strip(deferChip(deferWaitValue, "")); got != "◆ wait" {
+		t.Errorf("deferChip(wait) = %q, want %q", got, "◆ wait")
+	}
+	if !isDeferValue(deferWaitValue) || !isDeferValue(deferOnValue) || isDeferValue("0") {
+		t.Error("isDeferValue must accept exactly the two set values")
+	}
+	got := deferValueArgs("api", true, deferWaitValue, "")
+	want := []string{"set-option", "-t", "api", deferOption, "wait",
+		";", "set-option", "-t", "api", "-u", deferReasonOption}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("deferValueArgs(wait) = %v, want %v", got, want)
+	}
+	if b := ansi.Strip(swDeferBadgeText(true)); b != "  WAIT " {
+		t.Errorf("swDeferBadgeText(true) = %q, want %q", b, "  WAIT ")
+	}
+	if lipgloss.Width(swDeferBadgeText(true)) > lipgloss.Width(swDeferBadgeText(false)) {
+		t.Error("WAIT must not be wider than DEFER, which the topic reserve measures")
 	}
 }
 

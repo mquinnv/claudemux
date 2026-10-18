@@ -40,10 +40,10 @@ func (m model) recordDue(now time.Time) bool {
 // recordDeferKey is the defer mark and blocker as one comparable value, for
 // recordDue's change check.
 func (m model) recordDeferKey() string {
-	if m.deferRaw != "1" {
+	if !isDeferValue(m.deferRaw) {
 		return ""
 	}
-	return "1\t" + sanitizeDeferReason(m.deferReason)
+	return m.deferRaw + "\t" + sanitizeDeferReason(m.deferReason)
 }
 
 // sessionRecordFor builds the record from what the head knows. The session
@@ -56,8 +56,9 @@ func (m model) sessionRecordFor(now time.Time) sessionRecord {
 		Topic:     m.summary.Topic,
 		LastSeen:  now.Unix(),
 	}
-	if m.deferRaw == "1" {
+	if isDeferValue(m.deferRaw) {
 		r.Deferred = true
+		r.DeferWait = m.deferRaw == deferWaitValue
 		r.DeferReason = sanitizeDeferReason(m.deferReason)
 	}
 	return r

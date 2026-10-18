@@ -1561,7 +1561,7 @@ func TestSwModelDeferKeyEmptyListNoop(t *testing.T) {
 // rather than written down, so it moves with the layout — it was 97 before
 // the emoji marker and badge columns added four cells to the chrome.
 func swDeferNarrowestW() int {
-	return swRowChromeW + swTopicColMinW + lipgloss.Width(swDeferBadgeText())
+	return swRowChromeW + swTopicColMinW + lipgloss.Width(swDeferBadgeText(false))
 }
 
 func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
@@ -1589,6 +1589,28 @@ func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
 	}
 	if !strings.HasSuffix(row, "DEFER ") {
 		t.Errorf("deferred row missing full DEFER badge at the end:\n%q", row)
+	}
+}
+
+// A handoff's wait mark wears WAIT where the user's defer wears DEFER.
+func TestSwModelViewHandoffWaitBadge(t *testing.T) {
+	m := swTestModel()
+	m.width = swDeferNarrowestW() + 3
+	m.snap.Sessions[0].Deferred = true
+	m.snap.Sessions[0].DeferWait = true
+	view := ansi.Strip(m.View())
+	var row string
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "api") {
+			row = l
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("could not find api's row:\n%s", view)
+	}
+	if !strings.HasSuffix(row, " WAIT ") || strings.Contains(row, "DEFER") {
+		t.Errorf("handoff-deferred row should end with WAIT, not DEFER:\n%q", row)
 	}
 }
 

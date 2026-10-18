@@ -14,11 +14,28 @@ import (
 // Defer publication: a session-scoped tmux user option, mirroring the shape
 // of statepub.go's options rather than conductpub.go's global heartbeat — the
 // mark belongs to one session, not the fleet, and it must survive both head
-// and lobby restarts by living on the tmux session itself. Value "1" means
-// deferred; unset (or anything else) means normal. There is deliberately no
-// heartbeat/staleness handling like conductOption's: a defer mark has no
-// process keeping it alive, so it stays exactly as long as the user set it.
+// and lobby restarts by living on the tmux session itself. Value "1" or
+// "wait" means deferred; unset (or anything else) means normal. There is
+// deliberately no heartbeat/staleness handling like conductOption's: a defer
+// mark has no process keeping it alive, so it stays exactly as long as it
+// was set.
 const deferOption = "@claudemux_defer"
+
+// The mark's two set values. deferOnValue is the user's own defer (`d`).
+// deferWaitValue is the claudemux-handoff skill's: the agent handed work to a
+// peer session and has nothing to do until it reports, so both surfaces say
+// WAIT rather than DEFER. Nothing else differs — a waiting session is
+// deferred to the conductor, the grouping and restore alike.
+const (
+	deferOnValue   = "1"
+	deferWaitValue = "wait"
+)
+
+// isDeferValue reports whether a raw @claudemux_defer value marks the session
+// deferred, by the user or by a handoff.
+func isDeferValue(raw string) bool {
+	return raw == deferOnValue || raw == deferWaitValue
+}
 
 // deferReasonOption holds the blocker the user typed when deferring — what
 // the session is waiting on. It lives beside deferOption on the same session
@@ -38,11 +55,18 @@ const deferReasonMaxCells = 48
 // in one ";"-chained tmux invocation, so a poll never sees the mark from one
 // defer paired with the reason from another.
 func deferArgs(target string, on bool, reason string) []string {
+	return deferValueArgs(target, on, deferOnValue, reason)
+}
+
+// deferValueArgs is deferArgs with the set value given, so restore can put a
+// handoff's deferWaitValue back as it was instead of turning it into the
+// user's own defer.
+func deferValueArgs(target string, on bool, value, reason string) []string {
 	if !on {
 		return []string{"set-option", "-t", target, "-u", deferOption,
 			";", "set-option", "-t", target, "-u", deferReasonOption}
 	}
-	args := []string{"set-option", "-t", target, deferOption, "1", ";"}
+	args := []string{"set-option", "-t", target, deferOption, value, ";"}
 	if reason = sanitizeDeferReason(reason); reason != "" {
 		// tmux reads any argument ending in ";" as a command separator, even
 		// from argv, and would drop it; "\;" is its escape for a literal one.
@@ -102,12 +126,16 @@ var (
 	swBadgeDeferStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("232")).Background(lipgloss.Color("45"))
 )
 
-// swDeferBadgeText is the lobby row's DEFER badge, leading separator space
-// included — the exact text the row loop appends after the model column.
-// Extracted so swTopicW's reserve calculation (switchboardtui.go) and the
-// per-row render measure and emit the identical string; if they drifted, a
-// too-small reserve would let clipLine truncate the badge again.
-func swDeferBadgeText() string {
+// swDeferBadgeText is the lobby row's DEFER badge (WAIT for a handoff's
+// mark), leading separator space included — the exact text the row loop
+// appends after the model column. Extracted so swTopicW's reserve calculation
+// (switchboardtui.go) and the per-row render measure and emit the identical
+// string; if they drifted, a too-small reserve would let clipLine truncate
+// the badge again. The reserve measures DEFER, the wider of the two.
+func swDeferBadgeText(wait bool) string {
+	if wait {
+		return " " + swBadgeDeferStyle.Render(" WAIT ")
+	}
 	return " " + swBadgeDeferStyle.Render(" DEFER ")
 }
 
@@ -115,15 +143,20 @@ func swDeferBadgeText() string {
 // only when the mark is actually set, blank otherwise (no lobby-liveness
 // gating here, unlike conductChip — the mark means something with or without
 // a lobby watching). A recorded blocker rides along after the label, capped
-// at deferReasonMaxCells.
+// at deferReasonMaxCells. A handoff's mark says "wait" where the user's says
+// "defer".
 func deferChip(raw, reason string) string {
-	if raw != "1" {
+	if !isDeferValue(raw) {
 		return ""
 	}
-	if reason = sanitizeDeferReason(reason); reason != "" {
-		return swDeferStyle.Render("◆ defer: " + ansi.Truncate(reason, deferReasonMaxCells, "…"))
+	label := "◆ defer"
+	if raw == deferWaitValue {
+		label = "◆ wait"
 	}
-	return swDeferStyle.Render("◆ defer")
+	if reason = sanitizeDeferReason(reason); reason != "" {
+		return swDeferStyle.Render(label + ": " + ansi.Truncate(reason, deferReasonMaxCells, "…"))
+	}
+	return swDeferStyle.Render(label)
 }
 
 // deferPromptText is the text of the blocker prompt both surfaces show while

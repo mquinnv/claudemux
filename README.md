@@ -235,6 +235,11 @@ the top. The session's own status pane shows a
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.
 
+When the claudemux-handoff skill hands work to another session and has nothing to do until
+it reports, it defers its own session the same way, but marks it `wait`: the row's badge
+reads ` WAIT ` and the chip `◆ wait: <blocker>`. It behaves exactly like a defer, and the
+agent clears it itself when the peer replies.
+
 **Closing sessions** get a list of their own too. A session whose teardown is in flight
 — you typed `/done` in it, pressed `x` or `X` in its status pane, or it is sitting at
 `⏻ press x to tear down` — moves under a `─ closing ─` rule, between the working fleet

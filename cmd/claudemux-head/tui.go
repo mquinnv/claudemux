@@ -1417,7 +1417,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selfPane == "" {
 				return m, nil
 			}
-			if m.deferRaw == "1" {
+			if isDeferValue(m.deferRaw) {
 				return m, setDeferCmd(m.selfPane, false, "")
 			}
 			m.deferPrompting = true
@@ -1435,7 +1435,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.deferPrompting = true
 			m.deferInput = ""
-			if m.deferRaw == "1" {
+			if isDeferValue(m.deferRaw) {
 				m.deferInput = sanitizeDeferReason(m.deferReason)
 			}
 			return m, nil

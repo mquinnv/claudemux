@@ -217,7 +217,11 @@ func swRestoreOneCmd(l lostSession) tea.Cmd {
 			// a session, as swDeferTarget explains.
 			dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer dcancel()
-			args := deferArgs(name+":", true, l.Rec.DeferReason)
+			value := deferOnValue
+			if l.Rec.DeferWait {
+				value = deferWaitValue
+			}
+			args := deferValueArgs(name+":", true, value, l.Rec.DeferReason)
 			if err := exec.CommandContext(dctx, "tmux", args...).Run(); err != nil {
 				return swRestoreStepMsg{name: name, err: fmt.Errorf("restored, but defer not reapplied: %w", err), live: true}
 			}

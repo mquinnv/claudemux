@@ -39,8 +39,10 @@ type sessionRecord struct {
 	// Deferred and DeferReason carry the session's defer mark and blocker
 	// (deferpub.go). Those live as tmux session options, which die with the
 	// tmux server, so the record is the only copy a reboot leaves behind —
-	// restore sets them again on the relaunched session.
+	// restore sets them again on the relaunched session. DeferWait records
+	// that a handoff set the mark (deferWaitValue), so it comes back as WAIT.
 	Deferred    bool   `json:"deferred,omitempty"`
+	DeferWait   bool   `json:"defer_wait,omitempty"`
 	DeferReason string `json:"defer_reason,omitempty"`
 	// Parent is the launching session's name (@claudemux_parent). Another
 	// tmux session option, so another thing a reboot erases; restore relinks

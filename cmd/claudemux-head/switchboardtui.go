@@ -1294,7 +1294,7 @@ func (m swModel) View() string {
 	// reserve covers both badges: a row wears at most one, and the wider.
 	reserve := 0
 	if anyBadge {
-		reserve = max(lipgloss.Width(swDeferBadgeText()), swCloseBadgeW)
+		reserve = max(lipgloss.Width(swDeferBadgeText(false)), swCloseBadgeW)
 	}
 	topicW := swTopicW(m.width, reserve)
 
@@ -1353,7 +1353,7 @@ func (m swModel) View() string {
 		case swGroupClosing:
 			badge = swCloseBadgeText(sess.Closing, sess.State)
 		case swGroupDeferred:
-			badge = swDeferBadgeText()
+			badge = swDeferBadgeText(sess.DeferWait)
 		}
 		line := fmt.Sprintf(" %s %s %s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
