@@ -1049,6 +1049,15 @@ the launch shell would be — the project's `shell_size`, else `launch.shell_siz
 else 30%. It is a plain shell; `shell_command` is not run in it. Outside tmux `t`
 does nothing.
 
+**Handoff breadcrumbs.** A session another Claude session launched (see
+[The handoff skill](#the-handoff-skill)) shows the whole chain in place of its
+project badge — `🐝 beejax › 🚢 beejax-platform` — and `p` switches you to the
+parent, one step up. Each step is the project's emoji and `name:`, falling back
+to the session name; a chain deeper than two keeps the root and the parent and
+elides the middle. A link holds only while the parent is still running and is
+the same session that launched this one (the lobby's family rule), so once a
+parent closes the breadcrumb ends there and `p` does nothing.
+
 ### Tearing down a session
 
 When the work is finished, click the status pane and press `x`. It runs the whole

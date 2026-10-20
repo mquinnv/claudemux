@@ -452,6 +452,13 @@ type model struct {
 	projectDescription string
 	projectName        string
 
+	// sessionName and lineage are this head's tmux session and the handoff
+	// chain above it (root first, parent last), re-read every poll: unlike the
+	// project config, ancestors come and go under a running session. Empty
+	// lineage means no live parent — see lineage.go.
+	sessionName string
+	lineage     []crumb
+
 	// worktreePending records that bin/claudemux marked this session as wanting
 	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
 	// one; hooks/claudemux-worktree.sh asks the model to — right before its
@@ -928,6 +935,10 @@ func (m model) Init() tea.Cmd {
 	if c := publishOptionCmd(m.selfPane, infoDescriptionOption, m.projectDescription); c != nil {
 		cmds = append(cmds, c)
 	}
+	// The name too, for a child head's breadcrumb (lineage.go).
+	if c := publishOptionCmd(m.selfPane, infoNameOption, m.projectName); c != nil {
+		cmds = append(cmds, c)
+	}
 	// A head always starts with no teardown in flight, so whatever a previous
 	// head left in the closing mark is stale: without this, a session whose
 	// head restarted mid-wrap-up would sit in the lobby's closing list forever.
@@ -1079,10 +1090,12 @@ func (m model) pollData() tea.Cmd {
 		// read is "" and the chip simply stays off.
 		conductRaw := ""
 		deferRaw, deferReason := "", ""
+		sessionName, lineage, lineageOK := "", []crumb(nil), false
 		if selfPane != "" {
 			cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
 			conductRaw = readConductOption(cctx)
 			deferRaw, deferReason = readDeferOption(cctx, selfPane)
+			sessionName, lineage, lineageOK = readLineage(cctx, selfPane)
 			ccancel()
 		}
 		return dataMsg{
@@ -1095,6 +1108,9 @@ func (m model) pollData() tea.Cmd {
 			deferRaw:     deferRaw,
 			deferReason:  deferReason,
 			claudePane:   claudePane,
+			sessionName:  sessionName,
+			lineage:      lineage,
+			lineageOK:    lineageOK,
 		}
 	}
 }
@@ -1105,10 +1121,13 @@ type dataMsg struct {
 	newEvents    []Event
 	rateLimits   RateLimits
 	rateLimitErr error
-	conductRaw   string // raw @claudemux_conducting value, "" when unset/unreadable
-	deferRaw     string // raw @claudemux_defer value, "" when unset/unreadable
-	deferReason  string // raw @claudemux_defer_reason value, "" when unset/unreadable
-	claudePane   string // the claude pane this poll bound to, "" when none was seen
+	conductRaw   string  // raw @claudemux_conducting value, "" when unset/unreadable
+	deferRaw     string  // raw @claudemux_defer value, "" when unset/unreadable
+	deferReason  string  // raw @claudemux_defer_reason value, "" when unset/unreadable
+	claudePane   string  // the claude pane this poll bound to, "" when none was seen
+	sessionName  string  // this head's tmux session, valid when lineageOK
+	lineage      []crumb // handoff ancestors, root first, valid when lineageOK
+	lineageOK    bool    // the lineage read succeeded; false keeps the last chain
 }
 
 // turnEndedByIdle reports whether kind reads as "the main thread's turn
@@ -1461,6 +1480,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.shellSplitNote = ""
 			return m, splitShellCmd(m.selfPane, m.paneDir, m.claudePane, m.shellSplitSize)
+		case "p":
+			// Up the handoff chain to the session that launched this one. No-op
+			// without a live parent (lineage is empty) or outside tmux.
+			if m.selfPane == "" || len(m.lineage) == 0 {
+				return m, nil
+			}
+			return m, switchToParentCmd(m.lineage[len(m.lineage)-1].Session)
 		case "x":
 			return m.teardownKey()
 		case "X":
@@ -1581,6 +1607,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deferReason = msg.deferReason
 		if msg.claudePane != "" {
 			m.claudePane = msg.claudePane
+		}
+		if msg.lineageOK {
+			m.sessionName, m.lineage = msg.sessionName, msg.lineage
 		}
 		// A poll that agrees with an outstanding space retires it early, so the
 		// chip stops being a promise the moment it becomes a fact. Compared by
@@ -2520,7 +2549,7 @@ func renderStateLine(m model, now time.Time) string {
 	if c := m.deferChipText(); c != "" {
 		parts = append(parts, c)
 	}
-	if b := projectBadge(m.projectEmoji, m.projectName); b != "" {
+	if b := breadcrumbText(m.lineage, m.projectEmoji, m.projectName, m.sessionName); b != "" {
 		parts = append(parts, b)
 	}
 
