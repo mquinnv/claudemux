@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCleanCommandText(t *testing.T) {
@@ -210,6 +211,30 @@ func TestParseEventToolResultContent(t *testing.T) {
 	}
 	if !strings.Contains(ev.ToolResults[0].Content, "boigiwsir") {
 		t.Errorf("Content = %q, want the string payload", ev.ToolResults[0].Content)
+	}
+}
+
+// An api-request-blob copies a message already sent — tool_use and all — with
+// no timestamp. Read as a turn, its tool_use outlived its real tool_result in
+// the event ring and the pane sat at "Tool: Edit 0:00" (2026-10-20).
+func TestParseEventIgnoresRequestBlob(t *testing.T) {
+	line := `{"type":"api-request-blob","hash":"h","sessionId":"s","message":{"role":"assistant","content":[` +
+		`{"type":"text","text":"Edit next."},` +
+		`{"type":"tool_use","id":"toolu_9","name":"Edit","input":{}}` +
+		`]}}`
+	ev, ok := parseEvent(line)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if len(ev.ToolUses) != 0 || ev.UserText != "" {
+		t.Errorf("blob read as a turn: uses=%v text=%q", ev.ToolUses, ev.UserText)
+	}
+	got := classifyState([]Event{
+		{Type: "assistant", Timestamp: "2026-10-20T15:43:00Z", UserText: "done"},
+		ev,
+	}, 0, time.Time{}, 0, time.Now())
+	if got.Kind != StateIdle {
+		t.Errorf("state = %v (%q), want StateIdle", got.Kind, got.ToolName)
 	}
 }
 

@@ -360,7 +360,15 @@ func parseEvent(line string) (Event, bool) {
 
 	extractLaunch(&ev, raw.ToolUseResult)
 
-	if len(raw.Message) > 0 {
+	// Only conversation turns carry a message the head should read. Claude Code
+	// also writes `api-request-blob` records: a copy of each message sent in a
+	// request, with a `message` but no timestamp. Read as turns, every
+	// tool_use they copy is a duplicate whose tool_result the event ring may
+	// already have dropped, so classifyState finds an "unresolved" call that
+	// finished long ago — seen 2026-10-20 after a daemon fork rewrote a
+	// session's history, pinning the pane at "Tool: Edit 0:00" and holding a
+	// /done teardown at "wrapping up…" for good.
+	if len(raw.Message) > 0 && (raw.Type == "user" || raw.Type == "assistant") {
 		var msg struct {
 			Model   string          `json:"model"`
 			Content json.RawMessage `json:"content"`
