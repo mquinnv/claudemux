@@ -114,7 +114,10 @@ if [ "$already_on_path" -eq 0 ]; then
     *)    path_rc="" ;;
   esac
 
-  if [ -e /dev/tty ] && [ -n "$path_rc" ]; then
+  # Open /dev/tty rather than test that it exists: with no controlling terminal
+  # (CI, an agent, setsid) the node is there but opening it fails, and under
+  # `set -e` that would abort the install after the files are already in place.
+  if [ -n "$path_rc" ] && { : >/dev/tty; } 2>/dev/null; then
     printf 'claudemux: %s is not on your PATH. Add it to %s now? [y/N] ' "$PREFIX" "$path_rc" > /dev/tty
     read -r answer < /dev/tty || answer=""
     case "$answer" in
