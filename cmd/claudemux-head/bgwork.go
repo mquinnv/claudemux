@@ -23,7 +23,8 @@ import (
 // sets an agent running again after its previous run has already notified,
 // and a Monitor (see extractLaunch for each record's shape). Completions are
 // recognized by the notification that carries the same id back, except a
-// Monitor's streamed events, which share its id (see bgStatusRe). See
+// Monitor's streamed events, which share its id (see bgStatusRe), and by a
+// TaskStop's own result, since a stopped task is never notified. See
 // docs/superpowers/specs/2026-08-11-background-work-state-design.md for the
 // verified event shapes.
 //
@@ -109,8 +110,17 @@ var (
 // user turn carrying the same payload once the session wakes to consume it.
 // Retiring an id twice is harmless, and handling both means the feature
 // survives either form going away.
+//
+// A TaskStop is the one ending that sends no notification at all: the harness
+// kills the task and records only the stop's own result (Event.BgStoppedID).
+// Counting on the notification alone kept a killed shell "running" for the
+// rest of bgShellMaxAge, holding the session busy — and a teardown's ready
+// gate shut — for up to half an hour after the work was gone.
 func bgCompletions(e Event) []string {
 	var ids []string
+	if e.BgStoppedID != "" {
+		ids = append(ids, e.BgStoppedID)
+	}
 	for _, text := range []string{e.QueueText, e.UserText} {
 		if !strings.HasPrefix(strings.TrimSpace(text), bgNotificationPrefix) {
 			continue

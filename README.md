@@ -1077,7 +1077,9 @@ unpushed) against the main checkout, even though the status line may show a work
 chip for it. The chip tracks where the commands are going; the gate tracks where the
 session is sitting.
 
-`esc` cancels a teardown in progress. **It does not undo anything** — by then the
+`esc` cancels a teardown in progress, and every chip it can still cancel ends in
+`· esc cancels` to say so — including the one a typed `/done` arms on its own,
+which you never pressed a key to start. **It does not undo anything** — by then the
 wrap-up command has already run; cancelling only stops the status pane from driving
 the rest.
 

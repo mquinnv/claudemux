@@ -125,6 +125,11 @@ type Event struct {
 	// persistent monitor, which has no timeout. See extractLaunch.
 	BgMonitorID      string
 	BgMonitorTimeout time.Duration
+	// BgStoppedID is the task a TaskStop killed — the harness's own record
+	// that background work ENDED. A stopped task never sends the completion
+	// notification bgCompletions otherwise waits for, so without this it
+	// counted until its expiry cap. See extractLaunch.
+	BgStoppedID string
 	// ContinuedIn is the successor session id from a `continued-in` record —
 	// the harness's note that this transcript is finished and the
 	// conversation carries on in <continuedInSessionId>.jsonl (a park into a
@@ -370,6 +375,9 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 		TaskID     string `json:"taskId"`
 		TimeoutMs  *int64 `json:"timeoutMs"`
 		Persistent bool   `json:"persistent"`
+		Message    string `json:"message"`
+		StopTaskID string `json:"task_id"`
+		TaskType   string `json:"task_type"`
 	}
 	if json.Unmarshal(toolUseResult, &res) != nil {
 		return
@@ -428,6 +436,16 @@ func extractLaunch(ev *Event, toolUseResult json.RawMessage) {
 		if !res.Persistent {
 			ev.BgMonitorTimeout = time.Duration(*res.TimeoutMs) * time.Millisecond
 		}
+	}
+	// Not a launch but its inverse, read here because it is the same harness
+	// record: a TaskStop writes `{message, task_id, task_type, command}` — all
+	// 41 on this machine as of 2026-10-20 (task_type local_bash, see
+	// testdata/stop-shell.jsonl). The success wording is required as well as
+	// the id, so a stop that failed cannot retire work still running, and
+	// task_type so that another tool's snake_case `task_id` cannot read as one.
+	if res.StopTaskID != "" && res.TaskType != "" &&
+		strings.HasPrefix(res.Message, "Successfully stopped task") {
+		ev.BgStoppedID = res.StopTaskID
 	}
 }
 

@@ -1312,3 +1312,51 @@ func TestBgTrackerReseedAfterClearDoesNotDoubleCount(t *testing.T) {
 		t.Errorf("unsure = %d, want 0: the reseed must not resurrect cleared doubt", got)
 	}
 }
+
+// A TaskStop ends background work without the completion notification every
+// other ending sends: the harness records only the stop's own result. The
+// shell it killed must stop counting right there, not 30 minutes later at
+// bgShellMaxAge. stop-shell.jsonl is a real TaskStop of a timed-out Bash
+// (2026-10-20, redacted per testdata/README.md; the task id is kept as
+// captured).
+func TestBgTrackerRetiresStoppedTask(t *testing.T) {
+	events, now := bgFixture(t, "stop-shell.jsonl")
+	if got := events[1].BgStoppedID; got != "byk5xjn6x" {
+		t.Fatalf("BgStoppedID = %q, want the stopped task's id", got)
+	}
+	b := newBgTracker()
+	b.observe([]Event{{Type: "user", BgTaskID: "byk5xjn6x", Timestamp: now.Add(-time.Minute).Format(time.RFC3339Nano)}}, now)
+	if n, _ := b.outstanding(now); n != 1 {
+		t.Fatalf("outstanding = %d before the stop, want 1", n)
+	}
+	b.observe(events, now)
+	if n, _ := b.outstanding(now); n != 0 {
+		t.Errorf("outstanding = %d after the stop, want 0", n)
+	}
+	if u := b.unsure(); u != 0 {
+		t.Errorf("unsure = %d, want 0: a stop is a fact, not an expiry", u)
+	}
+}
+
+// Only a stop that worked retires anything, and only the stop's own record
+// shape: a failed stop, or another tool's snake_case task_id, must leave a
+// running task counted.
+func TestExtractLaunchStopShape(t *testing.T) {
+	tests := []struct {
+		name, result, want string
+	}{
+		{"real stop", `{"message":"Successfully stopped task: b1 (sleep 600)","task_id":"b1","task_type":"local_bash","command":"sleep 600"}`, "b1"},
+		{"failed stop", `{"message":"No task found with ID: b1","task_id":"b1","task_type":"local_bash"}`, ""},
+		{"no task_type", `{"message":"Successfully stopped task: b1","task_id":"b1"}`, ""},
+		{"monitor launch", `{"taskId":"b1","timeoutMs":1000,"persistent":false}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ev Event
+			extractLaunch(&ev, json.RawMessage(tt.result))
+			if ev.BgStoppedID != tt.want {
+				t.Errorf("BgStoppedID = %q, want %q", ev.BgStoppedID, tt.want)
+			}
+		})
+	}
+}

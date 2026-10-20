@@ -329,21 +329,27 @@ func teardownCommandTyped(prompt, command string) bool {
 // "unpushed", ...) — empty for a worktree block, whose reason is always the
 // same fixed sentence below. When set it is appended in parens so the chip
 // says what's actually holding the gate shut, not just that it is shut.
+//
+// Every phase esc can still cancel says so (teardownEscHint): an auto-armed
+// watch in particular appears without the user pressing anything, and one
+// held shut — blocked, or waiting on a turn that never reads as ended — is a
+// dead end to anyone who doesn't know the key. Exiting is past cancelling, so
+// it carries no hint.
 func teardownChip(p teardownPhase, blocked, auto bool, reason, note string, noteAt, now time.Time) string {
 	switch p {
 	case teardownSent:
 		if blocked {
 			if reason != "" {
-				return "⏻ blocked (" + reason + ")"
+				return "⏻ blocked (" + reason + ")" + teardownEscHint
 			}
-			return "⏻ worktree still present"
+			return "⏻ worktree still present" + teardownEscHint
 		}
 		if auto {
-			return "⏻ watching your wrap-up…"
+			return "⏻ watching your wrap-up…" + teardownEscHint
 		}
-		return "⏻ wrapping up…"
+		return "⏻ wrapping up…" + teardownEscHint
 	case teardownReady:
-		return "⏻ press x to tear down"
+		return "⏻ press x to tear down" + teardownEscHint
 	case teardownExiting:
 		return "⏻ exiting claude…"
 	case teardownDirect:
@@ -351,13 +357,16 @@ func teardownChip(p teardownPhase, blocked, auto bool, reason, note string, note
 		// teardownDirectKey), so the chip has to say which press commits.
 		// blocked/auto are ignored — nothing was probed, so neither can be
 		// anything but stale.
-		return "⏻ kill session? press X"
+		return "⏻ kill session? press X" + teardownEscHint
 	}
 	if note != "" && now.Sub(noteAt) < teardownNoteTTL {
 		return "⏻ " + note
 	}
 	return ""
 }
+
+// teardownEscHint follows every teardown chip esc can still cancel.
+const teardownEscHint = " · esc cancels"
 
 // sendLiteralArgs builds the tmux call that types text into pane verbatim.
 //
