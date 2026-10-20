@@ -467,6 +467,43 @@ sources the resolver by a path relative to its own location (`dirname` of its ow
 resolved path), not via `PATH`. Symlinking only one of them, or symlinking them into
 different directories, breaks project-color resolution silently (it just no-ops).
 
+### Linux, and Windows via WSL2
+
+claudemux is tmux plus bash, so there is no native Windows build — on Windows it runs
+inside WSL2, which is just Linux, hosted in Windows Terminal. Release tarballs exist for
+`linux_amd64` (what WSL usually is) and `linux_arm64`, and the shell installer picks the
+right one.
+
+1. **Windows only:** install WSL2 with Ubuntu (`wsl --install` from an admin
+   PowerShell, then reboot) and open the Ubuntu profile in Windows Terminal. Every step
+   below runs *inside* that Ubuntu shell.
+2. Install the dependencies and claudemux:
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y tmux jq git curl
+   curl -fsSL https://raw.githubusercontent.com/mquinnv/claudemux/main/install.sh | sh
+   ```
+
+3. Install Claude Code **inside Linux** too, and log in once with `claude`:
+
+   ```bash
+   curl -fsSL https://claude.ai/install.sh | bash
+   ```
+
+   A Windows-native `claude` won't do: the head reads transcripts from `~/.claude` on the
+   Linux side, and the hooks are registered in the Linux `~/.claude/settings.json`.
+4. Keep projects on the Linux filesystem (`~/src/…`), not under `/mnt/c/…`. git and file
+   watching across that boundary are slow enough to make the head lag.
+
+Then `claudemux ~/src/some-project` as usual. What differs from macOS:
+
+- **Tab colors** are iTerm2 escape sequences; Windows Terminal ignores them, so tabs stay
+  uncolored. Nothing else depends on them.
+- **`op_env`** needs the 1Password CLI installed inside WSL, with the 1Password desktop
+  app's WSL integration turned on so `op` can unlock through it.
+- **The fleet page** (`web.listen: tailscale:…`) binds the Tailscale address, so it needs
+  Tailscale running inside WSL itself; Tailscale on the Windows host isn't visible to it.
+
 ## Dependencies
 
 Homebrew installs and pins `tmux`, `jq`, and `git` for you. On the other channels
