@@ -61,8 +61,9 @@ type swSession struct {
 	// session was deferred, "" when none was given. Shown on the row's detail
 	// line only while Deferred is set.
 	DeferReason string
-	// Stay mirrors @claudemux_stay: the session's newest typed prompt carried
-	// the #stay marker (see staymark.go), so the turn it started is not a
+	// Stay mirrors @claudemux_stay: the session's current turn was started by
+	// a #stay-marked prompt or a "Chat about this" answer to an
+	// AskUserQuestion (see turnStays in staymark.go), so it is not a
 	// hand-back — the conductor keeps the human here while it runs. It only
 	// means anything while the session is busy; the head clears it with the
 	// next unmarked prompt.

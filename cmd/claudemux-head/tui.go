@@ -251,7 +251,11 @@ type model struct {
 	// lastTyped is the newest prompt from a real `user` turn — see
 	// lastTypedPrompt. Only the teardown watch reads it; everything
 	// user-facing uses lastPrompt.
-	lastTyped  string
+	lastTyped string
+	// turnStays is whether the current turn asked the conductor to leave
+	// the human here (a #stay prompt or a "Chat about this" answer) — see
+	// turnStays in staymark.go. Published with the state.
+	turnStays  bool
 	summary    Summary
 	rateLimits RateLimits
 	rateOK     bool
@@ -617,6 +621,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	}
 	m.lastPrompt = lastUserPrompt(m.allEvents)
 	m.lastTyped = lastTypedPrompt(m.allEvents)
+	m.turnStays = turnStays(m.allEvents)
 	if m.reader != nil {
 		m.firstPrompt = m.reader.FirstPrompt()
 	}

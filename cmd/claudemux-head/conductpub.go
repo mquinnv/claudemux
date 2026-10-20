@@ -236,5 +236,5 @@ func conductChipFor(raw string, now time.Time, staying bool) string {
 // the head-side twin of the conductor's stayingIn, fed the same values the
 // head publishes so the chip and the lobby cannot disagree.
 func (m *model) stayingTurn() bool {
-	return stayingIn(swSession{State: statePublishValue(m.state), Stay: stayMarked(m.lastTyped)})
+	return stayingIn(swSession{State: statePublishValue(m.state), Stay: m.turnStays})
 }

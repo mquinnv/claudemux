@@ -79,7 +79,7 @@ func TestMaybePublishStateRepublishesOnStayFlip(t *testing.T) {
 	if m.maybePublishState(now) != nil {
 		t.Fatal("nothing changed; must not republish")
 	}
-	m.lastTyped = "and then this #stay"
+	m.turnStays = true
 	if m.maybePublishState(now) == nil || !m.publishedStay {
 		t.Fatalf("stay flip must republish, publishedStay=%v", m.publishedStay)
 	}
@@ -253,7 +253,7 @@ func TestConductChipForStaying(t *testing.T) {
 }
 
 func TestModelStayingTurn(t *testing.T) {
-	m := &model{state: State{Kind: StateThinking}, lastTyped: "do it #stay"}
+	m := &model{state: State{Kind: StateThinking}, turnStays: true}
 	if !m.stayingTurn() {
 		t.Error("busy on a marked prompt must be a staying turn")
 	}
@@ -261,8 +261,45 @@ func TestModelStayingTurn(t *testing.T) {
 	if m.stayingTurn() {
 		t.Error("an idle session is not in a staying turn")
 	}
-	m.state, m.lastTyped = State{Kind: StateThinking}, "do it"
+	m.state, m.turnStays = State{Kind: StateThinking}, false
 	if m.stayingTurn() {
 		t.Error("unmarked prompt is not a staying turn")
+	}
+}
+
+func clarifyEvents(tool string, isErr bool) []Event {
+	return []Event{
+		{Type: "user", UserText: "plan the rollout"},
+		{Type: "assistant", ToolUses: []ToolUse{{ID: "toolu_1", Name: tool}}},
+		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "toolu_1", IsError: isErr,
+			Content: "The user doesn't want to proceed with this tool use. ... the user said:\nThe user wants to clarify these questions.\n    This means they may have additional information"}}},
+	}
+}
+
+func TestTurnStays(t *testing.T) {
+	cases := []struct {
+		name   string
+		events []Event
+		want   bool
+	}{
+		{"no events", nil, false},
+		{"unmarked prompt", []Event{{Type: "user", UserText: "go"}}, false},
+		{"#stay prompt", []Event{{Type: "user", UserText: "go #stay"}}, true},
+		{"chat about this", clarifyEvents("AskUserQuestion", true), true},
+		{"chat about this, model already replying",
+			append(clarifyEvents("AskUserQuestion", true), Event{Type: "assistant"}), true},
+		{"same words from another tool", clarifyEvents("Bash", true), false},
+		{"not an error", clarifyEvents("AskUserQuestion", false), false},
+		{"typed prompt after the clarify ends it",
+			append(clarifyEvents("AskUserQuestion", true), Event{Type: "user", UserText: "here is my question"}), false},
+		{"#stay prompt after the clarify keeps it",
+			append(clarifyEvents("AskUserQuestion", true), Event{Type: "user", UserText: "more #stay"}), true},
+		{"injected notice does not end it",
+			append(clarifyEvents("AskUserQuestion", true), Event{Type: "user", UserText: "<task-notification>done</task-notification>"}), true},
+	}
+	for _, c := range cases {
+		if got := turnStays(c.events); got != c.want {
+			t.Errorf("%s: turnStays = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

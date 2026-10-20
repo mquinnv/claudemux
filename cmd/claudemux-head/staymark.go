@@ -25,8 +25,9 @@ import "strings"
 // is. The end of the prompt is the recommended spot.
 const stayMarker = "#stay"
 
-// stayMarkerOption carries whether the session's newest typed prompt is
-// marked: "1" when it is, unset otherwise. It is published in the same tmux
+// stayMarkerOption carries whether the session's current turn stays (see
+// turnStays: a #stay-marked prompt or a "Chat about this" answer): "1" when
+// it does, unset otherwise. It is published in the same tmux
 // invocation as @claudemux_state (statePublishArgs) because the marked prompt
 // and the busy state it causes come from the same transcript record: publishing
 // them separately would let a lobby poll land between the two and read the
@@ -42,4 +43,56 @@ func stayMarked(prompt string) bool {
 		return false
 	}
 	return strings.EqualFold(f[0], stayMarker) || strings.EqualFold(f[len(f)-1], stayMarker)
+}
+
+// clarifyResultPrefix opens the tool_result Claude Code writes when the user
+// answers an AskUserQuestion with "Chat about this": the call is rejected
+// (is_error) and the model resumes the SAME turn to ask what they want to
+// discuss. To the conductor that looks exactly like a hand-back — the session
+// goes from Asking to busy with no typed prompt in between — so without this
+// the human is escorted away at the very moment they asked to talk.
+const clarifyResultPrefix = "The user wants to clarify these questions."
+
+// turnStays reports whether the turn the session is on was started by
+// something that asked the conductor to leave the human here: a #stay-marked
+// typed prompt, or a "Chat about this" answer to an AskUserQuestion. Whichever
+// of the two is newer decides, so the next typed prompt (unmarked) ends a
+// clarify stay exactly as it ends a #stay one.
+//
+// The clarify result only counts when its tool_use_id names an
+// AskUserQuestion call: any tool's error output could carry the same words,
+// but only the harness writes them for this tool.
+func turnStays(events []Event) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if e.Type != "user" {
+			continue
+		}
+		for _, tr := range e.ToolResults {
+			if tr.IsError && strings.Contains(tr.Content, clarifyResultPrefix) && askToolUse(events[:i], tr.ToolUseID) {
+				return true
+			}
+		}
+		if genuinePrompt(e) {
+			return stayMarked(e.UserText)
+		}
+	}
+	return false
+}
+
+// askToolUse reports whether events contains an AskUserQuestion tool_use
+// with the given id, searching newest-first since the call sits just before
+// its result.
+func askToolUse(events []Event, id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		for _, tu := range events[i].ToolUses {
+			if tu.ID == id {
+				return tu.Name == "AskUserQuestion"
+			}
+		}
+	}
+	return false
 }

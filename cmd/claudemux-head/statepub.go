@@ -144,7 +144,7 @@ func publishStateCmd(selfPane string, s State, now time.Time, stay bool) tea.Cmd
 // so the two can never be read apart.
 func (m *model) maybePublishState(now time.Time) tea.Cmd {
 	v := statePublishValue(m.state)
-	stay := stayMarked(m.lastTyped)
+	stay := m.turnStays
 	if v == m.publishedState && stay == m.publishedStay && (!m.state.Anchored || m.state.Since.Equal(m.publishedSince)) {
 		return nil
 	}

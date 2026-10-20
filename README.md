@@ -170,6 +170,11 @@ pane shows `⏸ #stay` in place of `⏵ conduct`. Deferring the session still ca
 you out, and walking away yourself still counts as walking away. To stay put across
 many prompts, switch the conductor to standby (`Space`) instead.
 
+Answering one of Claude's questions with **Chat about this** works the same way
+without the marker: Claude picks the turn back up to ask what you want to discuss,
+and that turn is a `#stay` turn, so you aren't carried off just as you asked to talk.
+Your next prompt hands the session back as usual.
+
 Every escorted arrival is announced: a small popup pulls in a locomotive and
 introduces the session you just landed in — what it's working on, its name, and
 which model is driving at what context — closing after two seconds or on your
