@@ -255,10 +255,19 @@ type model struct {
 	// turnStays is whether the current turn asked the conductor to leave
 	// the human here (a #stay prompt or a "Chat about this" answer) — see
 	// turnStays in staymark.go. Published with the state.
-	turnStays  bool
-	summary    Summary
-	rateLimits RateLimits
-	rateOK     bool
+	turnStays bool
+	summary   Summary
+	// firstReply is the reader's FirstReply, the summarizer's second anchor
+	// line beside firstPrompt.
+	firstReply string
+	// carriedTopic is the topic this session's previous head published in its
+	// session record, read once at startup. It stands in as prevTopic until
+	// this head lands a summary of its own, so a head restart (binwatch
+	// restarts every head on `go install`) does not ask the model to name
+	// the session from scratch off whatever step it is in right now.
+	carriedTopic string
+	rateLimits   RateLimits
+	rateOK       bool
 	// modelWindows are the per-model weekly limits from the usage cache. Empty
 	// whenever the pull path is unavailable or broken, which must never affect
 	// the 5h/wk gauges above.
@@ -521,6 +530,8 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		rateLimitsPath:   defaultRateLimitsPath(),
 		usageCachePath:   defaultUsageCachePath(),
 		firstPrompt:      r.FirstPrompt(),
+		firstReply:       r.FirstReply(),
+		carriedTopic:     recordedTopic(sessionRecordDir(), sessionID),
 		// Init always issues the first poll itself (see Init below), so the
 		// flag starts held to prevent the first 1s tick from firing a second,
 		// concurrent poll that races on EventReader.offset.
@@ -631,6 +642,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	m.turnStays = turnStays(m.allEvents)
 	if m.reader != nil {
 		m.firstPrompt = m.reader.FirstPrompt()
+		m.firstReply = m.reader.FirstReply()
 	}
 	m.sessionCwd = lastMainCwd(m.allEvents, m.sessionCwd)
 	m.sessionBranch = lastGitBranch(m.allEvents, m.sessionBranch)
@@ -706,6 +718,7 @@ func (m *model) moveSession(jsonlPath string, now time.Time) {
 	m.reader = r
 	m.allEvents = seeded
 	m.firstPrompt = r.FirstPrompt()
+	m.firstReply = r.FirstReply()
 	// The tracker's liveness source is derived from the transcript path, so a
 	// move invalidates it: left pointing at the old directory, every later
 	// agent launch stats a file that will never appear and expires via
@@ -769,6 +782,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	m.reader = r
 	m.allEvents = seeded
 	m.firstPrompt = r.FirstPrompt()
+	m.firstReply = r.FirstReply()
 	// Clean slate: the new session's own cwd must come from its own events, not
 	// linger from the session we just left. Its seed always carries one.
 	m.sessionCwd = ""
@@ -796,6 +810,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) tea.Cmd {
 	// here, which is exactly the same no-floor-at-all failure this comment
 	// warns against.
 	m.summary = Summary{}
+	m.carriedTopic = recordedTopic(sessionRecordDir(), sessionID)
 	m.bg = newBgTracker()
 	// Same seeding rationale as newModel: the rotated-to session may have
 	// work out that only its transcript knows about.
@@ -908,6 +923,35 @@ func firstUserPrompt(events []Event) string {
 		}
 	}
 	return fallback
+}
+
+// firstAssistantReply returns the main chain's first assistant text after the
+// prompt whose text is first. It is the other half of the summarizer's
+// anchor: a first prompt is often too terse to name the goal on its own
+// ("[Image #1]", "go", a pasted error), and the reply to it is where the
+// session first says in words what it is about. A slash-command first prompt
+// gets no reply — what answers "/clear" says nothing about the session.
+func firstAssistantReply(events []Event, first string) string {
+	if first == "" || strings.HasPrefix(first, "/") {
+		return ""
+	}
+	seen := false
+	for _, e := range events {
+		if !seen {
+			seen = genuinePrompt(e) && e.UserText == first
+			continue
+		}
+		if mainChainText(e) {
+			return e.UserText
+		}
+	}
+	return ""
+}
+
+// mainChainText reports whether e is assistant text the human saw. Subagent
+// (sidechain) text answers a brief, not the human, so it never counts.
+func mainChainText(e Event) bool {
+	return e.Type == "assistant" && !e.IsSidechain && strings.TrimSpace(e.UserText) != ""
 }
 
 func (m model) Init() tea.Cmd {
@@ -1317,14 +1361,17 @@ func (m model) tabText(s Summary) string {
 
 func (m model) summarize() tea.Cmd {
 	s := m.summarizer
-	first := m.firstPrompt
+	first, reply := m.firstPrompt, m.firstReply
 	events := m.allEvents
 	prevTopic := m.summary.Topic
+	if prevTopic == "" {
+		prevTopic = m.carriedTopic
+	}
 	gen := m.summaryGen
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), summaryCallTimeout)
 		defer cancel()
-		out, err := s.Summarize(ctx, first, events, prevTopic)
+		out, err := s.Summarize(ctx, first, reply, events, prevTopic)
 		return summaryMsg{gen: gen, summary: out, err: err, at: time.Now()}
 	}
 }

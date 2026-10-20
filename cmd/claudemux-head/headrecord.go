@@ -56,6 +56,11 @@ func (m model) sessionRecordFor(now time.Time) sessionRecord {
 		Topic:     m.summary.Topic,
 		LastSeen:  now.Unix(),
 	}
+	// Until this head lands a summary, keep the topic it inherited: writing
+	// "" would erase the only copy, and the next restart would start blank.
+	if r.Topic == "" {
+		r.Topic = m.carriedTopic
+	}
 	if isDeferValue(m.deferRaw) {
 		r.Deferred = true
 		r.DeferWait = m.deferRaw == deferWaitValue

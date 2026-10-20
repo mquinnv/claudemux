@@ -27,7 +27,7 @@ func TestCondenseTranscript(t *testing.T) {
 		{Type: "user", IsMeta: true, UserText: "caveat notice"},
 	}
 
-	got := condenseTranscript("fix the worktree chip", events, 30)
+	got := condenseTranscript("fix the worktree chip", "", events, 30)
 
 	for _, want := range []string{
 		"first prompt: fix the worktree chip",
@@ -57,7 +57,7 @@ func TestCondenseTranscriptKeepsTail(t *testing.T) {
 		events = append(events, Event{Type: "user", UserText: s})
 	}
 
-	got := condenseTranscript("one", events, 2)
+	got := condenseTranscript("one", "", events, 2)
 
 	if strings.Contains(got, "user: one") {
 		t.Errorf("oldest content event should be dropped when over maxEvents\ngot:\n%s", got)
@@ -88,7 +88,7 @@ func TestCondenseTranscriptBookkeepingDoesNotConsumeWindow(t *testing.T) {
 		Event{Type: "permission-mode", UserText: "permission-mode bookkeeping"},
 	)
 
-	got := condenseTranscript("fix the summary window", events, summaryMaxEvents)
+	got := condenseTranscript("fix the summary window", "", events, summaryMaxEvents)
 
 	for _, want := range []string{
 		"user: fix the summary window",
@@ -116,7 +116,7 @@ func TestCondenseTranscriptSkipsRepeatedLastPrompt(t *testing.T) {
 		{Type: "assistant", UserText: "on it"},
 	}
 
-	got := condenseTranscript("", events, summaryMaxEvents)
+	got := condenseTranscript("", "", events, summaryMaxEvents)
 
 	if n := strings.Count(got, "user: fix the chip"); n != 1 {
 		t.Errorf("repeated last-prompt records must collapse to one user line, got %d\ngot:\n%s", n, got)
@@ -131,7 +131,7 @@ func TestCondenseTranscriptKeepsRepeatedUserTurns(t *testing.T) {
 		{Type: "user", UserText: "again"},
 	}
 
-	got := condenseTranscript("", events, summaryMaxEvents)
+	got := condenseTranscript("", "", events, summaryMaxEvents)
 
 	if n := strings.Count(got, "user: again"); n != 2 {
 		t.Errorf("repeated user turns are real prompts and must both survive, got %d\ngot:\n%s", n, got)
@@ -140,7 +140,7 @@ func TestCondenseTranscriptKeepsRepeatedUserTurns(t *testing.T) {
 
 func TestCondenseTranscriptTruncatesLongText(t *testing.T) {
 	long := strings.Repeat("x", 500)
-	got := condenseTranscript("", []Event{{Type: "user", UserText: long}}, 30)
+	got := condenseTranscript("", "", []Event{{Type: "user", UserText: long}}, 30)
 
 	for _, line := range strings.Split(got, "\n") {
 		if len([]rune(line)) > 220 {
@@ -156,7 +156,7 @@ func TestCondenseTranscriptNegativeMaxEvents(t *testing.T) {
 		{Type: "user", UserText: "three"},
 	}
 
-	got := condenseTranscript("one", events, -1)
+	got := condenseTranscript("one", "", events, -1)
 
 	if strings.Contains(got, "user:") {
 		t.Errorf("negative maxEvents must yield no tail events, not panic\ngot:\n%s", got)
@@ -169,7 +169,7 @@ func TestCondenseTranscriptZeroMaxEvents(t *testing.T) {
 		{Type: "user", UserText: "two"},
 	}
 
-	got := condenseTranscript("one", events, 0)
+	got := condenseTranscript("one", "", events, 0)
 
 	if strings.Contains(got, "user:") {
 		t.Errorf("zero maxEvents must yield no tail events\ngot:\n%s", got)
@@ -181,7 +181,7 @@ func TestCondenseTranscriptAssistantToolOnlyEmitsNoBlankLine(t *testing.T) {
 		{Type: "assistant", ToolUses: []ToolUse{{Name: "Read"}}},
 	}
 
-	got := condenseTranscript("", events, 30)
+	got := condenseTranscript("", "", events, 30)
 
 	if strings.Contains(got, "assistant: ") {
 		t.Errorf("assistant event with empty UserText must not emit a blank assistant line\ngot:\n%s", got)
@@ -288,7 +288,7 @@ func TestSummarizeReturnsBothLines(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponse("fixing the worktree chip", "running the tui tests")}
 	s := testSummarizer(d)
 
-	got, err := s.Summarize(context.Background(), "fix the chip", []Event{{Type: "user", UserText: "fix the chip"}}, "")
+	got, err := s.Summarize(context.Background(), "fix the chip", "", []Event{{Type: "user", UserText: "fix the chip"}}, "")
 	if err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
@@ -304,7 +304,7 @@ func TestSummarizeForcesTheTool(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponse("a", "b")}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err != nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
 
@@ -325,7 +325,7 @@ func TestSummarizeAnchorsThePreviousTopic(t *testing.T) {
 	s := testSummarizer(d)
 
 	prevTopic := "fixing the worktree chip"
-	if _, err := s.Summarize(context.Background(), "", nil, prevTopic); err != nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, prevTopic); err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
 
@@ -355,7 +355,7 @@ func TestSummarizeErrorsOnAPIFailure(t *testing.T) {
 	d := &fakeDoer{status: 500, body: `{"type":"error","error":{"type":"api_error","message":"boom"}}`}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error so the TUI falls back to raw prompts")
 	}
 }
@@ -364,7 +364,7 @@ func TestSummarizeErrorsOnNoToolUseBlock(t *testing.T) {
 	d := &fakeDoer{body: textOnlyResponse()}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when the response has no tool_use block")
 	}
 }
@@ -374,7 +374,7 @@ func TestSummarizeErrorsOnWrongToolName(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponseRaw("not_"+summarizeToolName, input)}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when the tool_use block names a different tool")
 	}
 }
@@ -383,7 +383,7 @@ func TestSummarizeErrorsOnMalformedToolInput(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponseRaw(summarizeToolName, json.RawMessage(`{"topic":123,"now":true}`))}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when the tool input doesn't decode into Summary")
 	}
 }
@@ -392,7 +392,7 @@ func TestSummarizeErrorsOnBothFieldsEmpty(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponse("", "")}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when both topic and now are empty")
 	}
 }
@@ -401,7 +401,7 @@ func TestSummarizeErrorsOnNowEmpty(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponse("fixing the worktree chip", "")}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when now is empty even though topic is set — a half-empty summary must not render a blank status row")
 	}
 }
@@ -410,7 +410,7 @@ func TestSummarizeErrorsOnTopicEmpty(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponse("", "running the tui tests")}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when topic is empty even though now is set")
 	}
 }
@@ -431,7 +431,7 @@ func TestSummarizeErrorsOnWhitespaceOnlyLines(t *testing.T) {
 			d := &fakeDoer{body: toolUseResponse(tt.topic, tt.now)}
 			s := testSummarizer(d)
 
-			if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+			if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 				t.Error("Summarize() error = nil, want an error: a whitespace-only line must fall back to the raw prompts, not render as the placeholder")
 			}
 		})
@@ -472,7 +472,7 @@ func TestNewSummarizerNeverAuthenticatesFromAmbientCredentials(t *testing.T) {
 	if s == nil {
 		t.Fatal("newSummarizer() = nil; a caller-supplied option should still construct a client")
 	}
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err != nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err != nil {
 		t.Fatalf("Summarize() error = %v; a client built from caller-only options must not depend on ambient credentials", err)
 	}
 	if d.gotHeader == nil {
@@ -501,7 +501,7 @@ func TestSummarizerEnvOptionsHonorBaseURL(t *testing.T) {
 	if s == nil {
 		t.Fatal("newSummarizer() = nil, want a client")
 	}
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err != nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
 	if d.gotURL == nil {
@@ -528,7 +528,7 @@ func TestSummarizerEnvOptionsDefaultBaseURL(t *testing.T) {
 	if s == nil {
 		t.Fatal("newSummarizer() = nil, want a client")
 	}
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err != nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
 	if d.gotURL == nil {
@@ -556,7 +556,7 @@ func TestNewSummarizerCapsRetriesOnCallerOptionsPath(t *testing.T) {
 	d := &fakeDoer{status: 500, body: `{"type":"error","error":{"type":"api_error","message":"boom"}}`}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Fatal("Summarize() error = nil, want an error from the fake 500 responses")
 	}
 	if d.calls.Load() != 2 {
@@ -585,7 +585,7 @@ func TestSummarizeRejectsPlaceholderLines(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := &fakeDoer{body: toolUseResponse(tt.topic, tt.now)}
 			s := testSummarizer(d)
-			if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+			if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 				t.Errorf("Summarize() with topic=%q now=%q returned nil error; a placeholder must "+
 					"error so the pane falls back to the raw prompts", tt.topic, tt.now)
 			}
@@ -620,7 +620,7 @@ func TestSummarizeErrorsOnEmptyTab(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponseWithTab("fixing the worktree chip", "running tests", "")}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when tab is empty even though topic and now are set")
 	}
 }
@@ -629,7 +629,7 @@ func TestSummarizeErrorsOnPlaceholderTab(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponseWithTab("fixing the worktree chip", "running tests", "<UNKNOWN>")}
 	s := testSummarizer(d)
 
-	if _, err := s.Summarize(context.Background(), "", nil, ""); err == nil {
+	if _, err := s.Summarize(context.Background(), "", "", nil, ""); err == nil {
 		t.Error("Summarize() error = nil, want an error when tab is a placeholder")
 	}
 }

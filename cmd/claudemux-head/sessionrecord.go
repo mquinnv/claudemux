@@ -137,6 +137,22 @@ func readSessionRecords(dir string) []loadedRecord {
 	return out
 }
 
+// recordedTopic returns the topic a previous head published for sessionID, or
+// "" when no record names that session. Records are keyed by tmux session
+// name, not session id, so this scans them all — a handful of small files,
+// read once per head start or session switch.
+func recordedTopic(dir, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	for _, l := range readSessionRecords(dir) {
+		if l.Rec.SessionID == sessionID && l.Rec.Topic != "" {
+			return l.Rec.Topic
+		}
+	}
+	return ""
+}
+
 // pruneSessionRecords deletes top-level records (and stray temp files) whose
 // file was last written more than maxAge ago. By mtime rather than LastSeen
 // so a corrupt file is also eventually cleared.

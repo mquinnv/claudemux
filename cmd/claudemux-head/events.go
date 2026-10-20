@@ -147,6 +147,7 @@ type EventReader struct {
 	seeded      []Event
 	seedErr     error
 	firstPrompt string // genuine first user prompt of the session, captured before ring truncation
+	firstReply  string // the main chain's first assistant text after firstPrompt, captured the same way
 }
 
 func newEventReader(path string) *EventReader {
@@ -187,6 +188,7 @@ func (r *EventReader) SeedFromEnd(maxEvents int) {
 	// the ring truncates the head away. lastUserPrompt scans newest-first; the
 	// first prompt needs an oldest-first scan, which firstUserPrompt does.
 	r.firstPrompt = firstUserPrompt(events)
+	r.firstReply = firstAssistantReply(events, r.firstPrompt)
 	if len(events) > maxEvents {
 		events = events[len(events)-maxEvents:]
 	}
@@ -200,6 +202,36 @@ func (r *EventReader) Seeded() ([]Event, error) {
 // FirstPrompt returns the session's first user prompt, captured at seed time.
 func (r *EventReader) FirstPrompt() string {
 	return r.firstPrompt
+}
+
+// FirstReply returns the assistant's first text reply to FirstPrompt.
+func (r *EventReader) FirstReply() string {
+	return r.firstReply
+}
+
+// captureFirstReply fills firstReply from a later batch: a session seeded
+// before its first reply was written (or before its first genuine prompt)
+// would otherwise have none for life. Once set it freezes, like firstPrompt.
+// A batch that carries the first prompt itself is scanned from that prompt
+// on; otherwise the prompt is already behind us and the batch's first
+// main-chain assistant text is the reply.
+func (r *EventReader) captureFirstReply(events []Event) {
+	if r.firstReply != "" || r.firstPrompt == "" || strings.HasPrefix(r.firstPrompt, "/") {
+		return
+	}
+	if reply := firstAssistantReply(events, r.firstPrompt); reply != "" {
+		r.firstReply = reply
+		return
+	}
+	for _, e := range events {
+		if genuinePrompt(e) && e.UserText == r.firstPrompt {
+			return // the prompt is here but its reply is not yet
+		}
+		if mainChainText(e) {
+			r.firstReply = e.UserText
+			return
+		}
+	}
 }
 
 // upgradeFirstPrompt lets a genuine prompt displace a slash-command placeholder.
@@ -255,6 +287,7 @@ func (r *EventReader) Tail() ([]Event, error) {
 	}
 	events := parseLines(consume, false)
 	r.upgradeFirstPrompt(events)
+	r.captureFirstReply(events)
 	return events, nil
 }
 

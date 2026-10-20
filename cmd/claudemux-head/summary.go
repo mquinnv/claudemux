@@ -16,9 +16,11 @@ import (
 const transcriptTextLimit = 200
 
 // condenseTranscript flattens the event ring into the plain text the summarizer
-// reads: the session's first prompt (which anchors the topic even after the ring
-// has truncated the head away), then the last maxEvents CONTENT events as user
-// text, assistant text, and tool names.
+// reads: the session's first prompt and the assistant's first reply to it
+// (which together anchor the topic even after the ring has truncated the head
+// away — the reply carries it when the prompt is just "[Image #1]" or "go"),
+// then the last maxEvents CONTENT events as user text, assistant text, and tool
+// names.
 //
 // events is the raw JSONL event ring, in which bookkeeping records (attachment,
 // mode, permission-mode, agent-color, system, ...) outnumber content records
@@ -26,10 +28,13 @@ const transcriptTextLimit = 200
 // AFTER filtering: slicing the raw tail first would spend most of the window on
 // records that say nothing about the session, starving the `now` line — the one
 // line most sensitive to recency.
-func condenseTranscript(firstPrompt string, events []Event, maxEvents int) string {
+func condenseTranscript(firstPrompt, firstReply string, events []Event, maxEvents int) string {
 	var b strings.Builder
 	if firstPrompt != "" {
 		b.WriteString("first prompt: " + truncateRunes(collapseWhitespace(firstPrompt), transcriptTextLimit) + "\n")
+	}
+	if firstReply != "" {
+		b.WriteString("first reply: " + truncateRunes(collapseWhitespace(firstReply), transcriptTextLimit) + "\n")
 	}
 
 	if maxEvents < 0 {
@@ -104,12 +109,21 @@ const summarySystemPrompt = `You label a live coding session for a two-line term
 Call the summarize tool with these fields:
 
 - topic: what this session is FOR — the goal the human is pursuing.
-  Derive it PRIMARILY from the "first prompt" line: that is the human's original
-  ask and the best evidence of the session's purpose. The rest of the transcript
-  shows where the work has wandered, not what it is for — a debugging detour, a
-  review round, a merge step, or a tooling problem is never the topic. If the
-  first prompt asked for a feature, the topic stays that feature hours later,
-  while the work is deep inside some sub-step of building it.
+  Derive it PRIMARILY from the "first prompt" and "first reply" lines: the
+  human's original ask and the assistant's first answer to it are the best
+  evidence of the session's purpose. When the first prompt is terse ("go", an
+  image, a pasted error), the first reply says what it was about. The rest of
+  the transcript shows where the work has wandered, not what it is for — a
+  debugging detour, a review round, a merge step, or a tooling problem is never
+  the topic. If the first prompt asked for a feature, the topic stays that
+  feature hours later, while the work is deep inside some sub-step of building
+  it.
+
+  The topic names the SUBJECT — the system, feature, or problem — never the
+  process. Writing a spec or plan, executing a plan, dispatching subagents,
+  running tests, reviewing, or committing is how the work is done, never what
+  it is for: "implement feature from spec and plan via subagent execution" is
+  a wrong topic; the feature that plan builds is the right one.
 
 - now: what it is doing RIGHT NOW — the current step. Derive it from the END of
   the transcript.
@@ -126,7 +140,10 @@ Never answer with a placeholder like <UNKNOWN>, "unknown", or "n/a". If the
 transcript is thin, describe whatever it does show, however small.
 
 If a previous topic is given, KEEP IT VERBATIM unless the human has genuinely
-changed goals. A stable topic is worth more than a fresh one.`
+changed goals. A stable topic is worth more than a fresh one. Moving from
+planning to building, or into subagents, review, or a fix-up step is not a
+change of goal. The one exception: replace a previous topic that names only a
+process (as above) with the subject it was about.`
 
 // summaryRequestTimeout bounds a single Summarize attempt. This runs in a poll loop,
 // so a hung request must not accumulate indefinitely across retries.
@@ -240,8 +257,8 @@ func newSummarizer(cfg SummaryConfig, opts ...option.RequestOption) *Summarizer 
 	return &Summarizer{client: anthropic.NewClient(opts...), model: cfg.Model}
 }
 
-func (s *Summarizer) Summarize(ctx context.Context, firstPrompt string, events []Event, prevTopic string) (Summary, error) {
-	transcript := condenseTranscript(firstPrompt, events, summaryMaxEvents)
+func (s *Summarizer) Summarize(ctx context.Context, firstPrompt, firstReply string, events []Event, prevTopic string) (Summary, error) {
+	transcript := condenseTranscript(firstPrompt, firstReply, events, summaryMaxEvents)
 
 	prompt := "Transcript:\n" + transcript
 	if prevTopic != "" {
