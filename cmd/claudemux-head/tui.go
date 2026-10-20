@@ -409,6 +409,12 @@ type model struct {
 	// shown on the chip for teardownNoteTTL.
 	claudeRestartNote   string
 	claudeRestartNoteAt time.Time
+	// shellSplitSize is how wide `t` opens its shell pane, resolved once at
+	// startup (see shellSplitSize). shellSplitNote / shellSplitNoteAt are a
+	// failed split's reason, shown on the chip for teardownNoteTTL.
+	shellSplitSize   string
+	shellSplitNote   string
+	shellSplitNoteAt time.Time
 	// claudePane is the claude pane the poll last saw, kept after the pane
 	// stops being listed: a claude that exited leaves a dead pane behind that
 	// listPanes filters out but that a restart still needs to respawn into.
@@ -515,6 +521,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		showLast:           cfg.Head.ShowLast,
 		showFirst:          cfg.Head.ShowFirst,
 		teardownCmdText:    cfg.Teardown.Command,
+		shellSplitSize:     shellSplitSize("", cfg.Launch.ShellSize),
 		// Init fires the seed summarize call when summarizer != nil and a
 		// session is actually bound (see Init below); this flag must already
 		// be held at that point, for the same reason polling starts true
@@ -556,6 +563,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		m.projectEmoji = projectDeclaredEmoji(cfg)
 		m.projectDescription = projectDeclaredDescription(cfg)
 		m.projectName = projectDeclaredName(cfg)
+		m.shellSplitSize = shellSplitSize(cfg, m.shellSplitSize)
 	}
 	m.worktreePending = os.Getenv("CLAUDEMUX_WORKTREE_PENDING") != ""
 	if m.worktreePending {
@@ -1439,6 +1447,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deferInput = sanitizeDeferReason(m.deferReason)
 			}
 			return m, nil
+		case "t":
+			// Open a shell to the right of claude — the shell-right layout's
+			// pane, on demand: for a no-shell session, a shell that was
+			// closed, or a second one. No-op outside tmux.
+			if m.selfPane == "" {
+				return m, nil
+			}
+			m.shellSplitNote = ""
+			return m, splitShellCmd(m.selfPane, m.paneDir, m.claudePane, m.shellSplitSize)
 		case "x":
 			return m.teardownKey()
 		case "X":
@@ -1729,6 +1746,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case claudeRestartMsg:
 		m.claudeRestartNote = msg.note
 		m.claudeRestartNoteAt = time.Now()
+
+	case shellSplitMsg:
+		m.shellSplitNote = msg.note
+		m.shellSplitNoteAt = time.Now()
 
 	case teardownSentMsg:
 		if m.teardown != teardownSent && m.teardown != teardownExiting {
@@ -2130,6 +2151,9 @@ func (m model) statusChip(now time.Time) string {
 	}
 	if rc := claudeRestartChip(m.claudeRestartArmed, m.sessionID != "", m.claudeRestartNote, m.claudeRestartNoteAt, now); rc != "" {
 		return rc
+	}
+	if sc := shellSplitChip(m.shellSplitNote, m.shellSplitNoteAt, now); sc != "" {
+		return sc
 	}
 	if m.summarizing {
 		return summarizingChip

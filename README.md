@@ -999,6 +999,14 @@ session as soon as `claude` announces it. While a session has no transcript yet
 `n new`. `c` does nothing while a teardown is in flight, and `x`/`X` do nothing
 while a restart is armed; outside tmux `c` does nothing at all.
 
+**Opening a shell.** Press `t` to split a shell off the right of the `claude`
+pane and move the focus into it — the `shell-right` layout's pane, on demand: for
+a `no-shell` session, a shell you closed, or a second one. It starts in `claude`'s
+current directory (a worktree it entered mid-session included) and is as wide as
+the launch shell would be — the project's `shell_size`, else `launch.shell_size`,
+else 30%. It is a plain shell; `shell_command` is not run in it. Outside tmux `t`
+does nothing.
+
 ### Tearing down a session
 
 When the work is finished, click the status pane and press `x`. It runs the whole
