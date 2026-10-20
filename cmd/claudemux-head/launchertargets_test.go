@@ -173,3 +173,47 @@ func TestLauncherSyntax(t *testing.T) {
 		t.Fatalf("bash -n: %v\n%s", err, out)
 	}
 }
+
+// `claudemux hook ensure` once fell through to resolve_dir, where `project
+// find hook` matched a directory named "hooks" and launched a stray session
+// there. Every claudemux-head subcommand must be claimed by the launcher's
+// reserved-word case — passed through or refused — before any resolution.
+func TestLauncherReservesHeadSubcommands(t *testing.T) {
+	src, err := os.ReadFile(launcherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm := regexp.MustCompile(`(?m)^  ([a-z]+(?: \| [a-z]+)*)\)$`)
+	claimed := map[string]bool{}
+	for _, m := range arm.FindAllStringSubmatch(string(src), -1) {
+		for _, w := range strings.Split(m[1], " | ") {
+			claimed[w] = true
+		}
+	}
+	for _, sub := range knownSubcommands {
+		if !claimed[sub] {
+			t.Errorf("claudemux-head subcommand %q is not reserved in %s", sub, launcherPath)
+		}
+	}
+
+	stubDir := t.TempDir()
+	stub := "#!/bin/sh\necho \"stub-head $*\"\n"
+	if err := os.WriteFile(stubDir+"/claudemux-head", []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "PATH="+stubDir+":"+os.Getenv("PATH"), "TMUX=", "TMUX_PANE=")
+
+	cmd := exec.Command("bash", launcherPath, "hook", "ensure")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "stub-head hook ensure" {
+		t.Errorf("`claudemux hook ensure` = %q (err %v), want it passed to claudemux-head", out, err)
+	}
+
+	cmd = exec.Command("bash", launcherPath, "statusline")
+	cmd.Env = env
+	out, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "internal claudemux-head subcommand") {
+		t.Errorf("`claudemux statusline` = %q (err %v), want it refused", out, err)
+	}
+}

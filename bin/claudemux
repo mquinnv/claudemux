@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
 # Usage: claudemux [-n] [-d] [-w|-W] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]
+#        claudemux version|config|project|hook ...   (passed to claudemux-head)
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
@@ -1222,6 +1223,29 @@ if [ "${1:-}" = "setup" ]; then
   fi
   exec claudemux-head onboard
 fi
+
+# claudemux-head's own subcommands are reserved words here too, matched before
+# any directory or zoxide resolution for the same reason as switch/setup.
+# Without this, `claudemux hook ensure` (an easy slip for `claudemux-head hook
+# ensure`) fell through to resolve_dir, `project find hook` matched some
+# directory named "hooks", and a stray session was launched there. The
+# user-facing ones are passed through; the internal ones (run by the launcher,
+# tmux or Claude Code, never by hand) are refused rather than guessed at.
+# TestLauncherReservesHeadSubcommands keeps these two lists in step with
+# knownSubcommands in cmd/claudemux-head/main.go.
+case "${1:-}" in
+  version | config | project | hook)
+    if ! command -v claudemux-head >/dev/null 2>&1; then
+      echo "claudemux: claudemux-head not found on PATH — install it to run '$1'" >&2
+      exit 1
+    fi
+    exec claudemux-head "$@"
+    ;;
+  boot | statusline | switchboard | onboard | banner)
+    echo "claudemux: '$1' is an internal claudemux-head subcommand, not a launcher command (the lobby is \`claudemux switch\`, the layout picker \`claudemux setup\`)" >&2
+    exit 2
+    ;;
+esac
 
 # Bare claudemux ALWAYS means the switchboard now — no attach-sole-session,
 # no create-in-$PWD. maybe_onboard runs first so a first-time user is offered
