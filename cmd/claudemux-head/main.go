@@ -82,7 +82,14 @@ func main() {
 		if len(os.Args) > 2 && os.Args[2] == "ensure" {
 			os.Exit(runHookEnsure(os.Args[3:], os.Stdout, os.Stderr))
 		}
-		fmt.Fprintln(os.Stderr, "usage: claudemux-head hook ensure [--script <path>]")
+		// The Claude Code hooks themselves (hookrun.go), which settings.json
+		// runs with the event payload on stdin.
+		if len(os.Args) > 2 {
+			if run, ok := hookRunners[os.Args[2]]; ok {
+				os.Exit(run(os.Stdin, os.Stdout, os.Stderr, os.Getenv))
+			}
+		}
+		fmt.Fprintln(os.Stderr, "usage: claudemux-head hook ensure | claudemux-head hook map|ask|worktree < payload")
 		os.Exit(2)
 	}
 
