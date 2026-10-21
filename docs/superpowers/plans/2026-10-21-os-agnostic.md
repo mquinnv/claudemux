@@ -12,7 +12,7 @@
 
 ## Decisions (recommended; confirm before Phase 3)
 
-1. **Windows multiplexer: psmux, behind the existing tmux command language.** It is the only option that accepts the tmux commands claudemux already sends, which keeps one code path. The alternatives were weighed. zellij (native Windows since v0.44, x86_64 only) would need a second backend. WezTerm's mux would force a terminal choice. Windows Terminal's `wt.exe` cannot list panes, read them or send keys. Writing our own ConPTY multiplexer would mean writing a VT emulator. WSL2 stays documented as an alternative route, not as the Windows story.
+1. **Windows multiplexer: psmux, behind the existing tmux command language.** It is the only option that accepts the tmux commands claudemux already sends, which keeps one code path. It is its own Rust server on ConPTY, not a wrapper over a real tmux; its source tree has its own `vt100-psmux` and `portable-pty-psmux` crates, and it uses loopback TCP. The alternatives were weighed. zellij (native Windows since v0.44, x86_64 only) would need a second backend. WezTerm's mux would force a terminal choice. Windows Terminal's `wt.exe` cannot list panes, read them or send keys. Writing our own ConPTY multiplexer would mean writing a VT emulator. WSL2 stays documented as an alternative route, not as the Windows story.
 2. **The launcher becomes Go, inside the same binary.** The bash launcher (`bin/claudemux`, 1273 lines) is why Windows needs Git Bash at all. The Go head already shells back into it (`switchboardtui.go:546`, `swrestore.go:205`), and it has 40+ external-tool dependencies. Using argv[0] dispatch instead of a second `cmd/` avoids splitting the 18k-line `package main` into packages first.
 3. **No shell strings anywhere a pane is started.** Today's `cd %q && exec CMD`, the `/bin/sh -c` shell-pane wrapper, `respawn-pane "exec …"` and `display-popup` POSIX quoting all assume a POSIX default shell. psmux's default shell is PowerShell. tmux has accepted `cmd [arg...]` executed directly (no `sh -c`) since 3.0, plus `-c`/`-e` on `new-session`, `split-window`, `respawn-pane` and `display-popup`. This was checked against the tmux 3.8 man page.
 4. **Packaging on Windows: a zip per arch, `install.ps1`, and our own Scoop bucket.** winget comes later; it needs a reviewed PR to `microsoft/winget-pkgs`. Homebrew and `install.sh` stay as they are.
@@ -119,11 +119,14 @@ PR #23 (hooks as Go subcommands) must be merged first; everything below assumes 
 
 **Interfaces:**
 - Produces:
-  - `muxBinary() string`. Resolution order: `$CLAUDEMUX_TMUX`, then `tmux` on PATH, then (Windows only) `psmux`. Memoized.
+  - `muxBinary() string`. Memoized. Resolution order:
+    - `$CLAUDEMUX_TMUX` first, on every OS.
+    - Unix: then `tmux` on PATH.
+    - Windows: then `psmux` on PATH, and **never a bare `tmux`**. psmux installs a `tmux.exe` alias, but an MSYS2/Cygwin tmux or a stray shim earlier on PATH would answer instead and talk to a different server that has none of our sessions. `tmux -V` cannot tell them apart, because psmux reports a tmux-shaped version; `psmux -V` reports `psmux X.Y.Z`.
   - `muxCmd(ctx context.Context, args ...string) *exec.Cmd`. All call sites use this, so the arg builders (`xxxArgs()`) stay untouched.
   - `muxOutput(ctx context.Context, args ...string) ([]byte, error)`. This replaces `swTmux`.
 
-- [ ] **Step 1:** Write `TestMuxBinaryHonorsOverride` (env set → returned verbatim) and `TestMuxBinaryFallsBackToPsmuxOnWindows` (skip unless windows; PATH holds only a fake `psmux.exe` → its path).
+- [ ] **Step 1:** Write `TestMuxBinaryHonorsOverride` (env set → returned verbatim) and `TestMuxBinaryPrefersPsmuxOverTmuxOnWindows` (skip unless windows; PATH holds a fake `tmux.exe` in an earlier directory and a fake `psmux.exe` in a later one → the psmux path).
 - [ ] **Step 2:** Write `TestNoDirectTmuxExec`. Parse every non-test `.go` file in the package with `go/parser` and fail on any `exec.Command`/`exec.CommandContext` call whose first non-ctx argument is the literal `"tmux"`. This is the guard that keeps the seam.
 - [ ] **Step 3:** Implement `mux.go` and convert the call sites mechanically.
 - [ ] **Step 4:** Run `go test ./...`. Expected: PASS, and `TestNoDirectTmuxExec` passes.
@@ -292,7 +295,7 @@ The bash launcher stays the shipped launcher until Task 3.4 proves parity. Its s
 | Task | Content | Done when |
 |---|---|---|
 | **4.1** psmux compatibility spike | On a Windows VM (or the windows-latest runner via `winget install psmux` / `scoop install psmux`), run the Phase 2/3 integration tests against psmux 3.3.8. Verify the UNVERIFIED items: argv-form commands; `-e` on `respawn-pane`/`display-popup`; `;` chaining; `=name` and trailing-`:` targets; `#{session_name}`/`#{client_tty}`/`#{start_time}`; pane user options (`set -p @x`); `remain-on-exit failed`; the `window-resized` / `client-session-changed` hooks | Every gap is written up with a minimal repro, then worked around in `mux.go` (e.g. a `muxQuirks` struct keyed on `muxBinary()` + version) or filed upstream at psmux/psmux |
-| **4.2** Version gate | `muxVersion() (name string, major, minor, patch int, err error)` from `tmux -V`/`psmux -V`. The launcher refuses tmux < 3.2 and psmux < 3.3.8, and warns on psmux 3.4.0 naming issue #845 until a fixed release is known | Table test over sample `-V` strings |
+| **4.2** Version and identity gate | `muxVersion() (name string, major, minor, patch int, err error)` from `<muxBinary()> -V`. The launcher refuses tmux < 3.2 and psmux < 3.3.8, and warns on psmux 3.4.0 naming issue #845 until a fixed release is known. On Windows it also refuses when the resolved binary does not identify as psmux (e.g. `$CLAUDEMUX_TMUX` pointing at an MSYS2 tmux), with a message naming the path it found. The code never parses `$TMUX`; psmux documents its first field as not a socket path | Table test over sample `-V` strings, including `tmux 3.4` from an MSYS2 build on Windows → refused |
 | **4.3** Claude Code specifics | `claude.exe` resolution (`%USERPROFILE%\.local\bin`). `exeBase` everywhere `pane_current_command` is compared. Confirm that hook payload `cwd`/`transcript_path` arrive with backslashes, and fixture one. `--permission-mode auto`, `-n`, `/color` | A recorded Windows payload in `testdata/` drives the map, ask and worktree hook tests |
 | **4.4** Windows smoke in CI | A `windows-latest` job installs psmux (pinned) and runs `go test -tags integration ./...` | Green |
 | **4.5** Manual acceptance (Bespoke Stairlifts pilot) | Windows Terminal + psmux + native Claude Code: launch, all layouts, switchboard, ask/permission states, restart, worktree flow, op_env (with `op.exe`), web page via Tailscale for Windows | Checklist signed off by a pilot user |
