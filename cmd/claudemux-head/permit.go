@@ -19,7 +19,7 @@ import (
 //
 // Two signals together say otherwise, and neither is enough alone:
 //
-//   - hooks/claudemux-ask.sh writes a marker at PermissionRequest, the one
+//   - the ask hook (hookrun.go) writes a marker at PermissionRequest, the one
 //     hook that fires when a dialog is about to open. But no hook fires when
 //     it is ANSWERED: an approved tool just starts running, and its
 //     PostToolUse arrives only when it finishes. On the marker alone an

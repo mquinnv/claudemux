@@ -25,7 +25,7 @@ const (
 	// assistant tool_use event only when the question is answered, so while
 	// one is pending the transcript just ends at the preceding thinking/text
 	// event and classifyState honestly reads Idle or Thinking. The signal
-	// comes from the marker hooks/claudemux-ask.sh writes at PreToolUse —
+	// comes from the marker the ask hook writes at PreToolUse —
 	// see askOverride.
 	StateAsking
 	// StateWaiting: the head is bound to a project with no transcript yet — a

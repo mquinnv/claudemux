@@ -71,7 +71,7 @@ func fetchPlanUsage(ctx context.Context, claudeBin string, now time.Time) (PlanU
 		"--strict-mcp-config",
 		"--mcp-config", `{"mcpServers":{}}`,
 	)
-	// TMUX_PANE must not reach the child: claudemux-map.sh keys its pane-map
+	// TMUX_PANE must not reach the child: the pane-map hook keys its pane-map
 	// file on it and exits immediately when it is absent. Without this, a poll
 	// spawned from a head pane writes a phantom session into that pane's map
 	// entry. Everything else in the environment is kept — the OAuth profile

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// paneMap mirrors the JSON written by hooks/claudemux-map.sh.
+// paneMap mirrors the JSON written by the pane-map hook (runHookMap).
 type paneMap struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
@@ -127,7 +127,7 @@ func panePaths(listing string) map[string]string {
 	return paths
 }
 
-// askMarkerDir returns the directory where hooks/claudemux-ask.sh records
+// askMarkerDir returns the directory where the ask hook (runHookAsk) records
 // pending AskUserQuestion markers, keyed by session id. Empty when the home
 // dir can't be resolved.
 func askMarkerDir() string {

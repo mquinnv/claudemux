@@ -69,33 +69,30 @@ every file it copies out of the tarball, independent of `install.sh` and
 those — it is a separate, hand-maintained list that must be kept in sync by
 hand, every time a shipped script is added, renamed, or removed here.
 
-As of this writing that list must name exactly these **six** files, kept as
-siblings: `claudemux-head`, `claudemux`, `project-color-resolve.sh`,
-`claudemux-map.sh`, `claudemux-worktree.sh`, `claudemux-ask.sh`.
+As of this writing that list must name exactly these **three** files, kept as
+siblings: `claudemux-head`, `claudemux`, `project-color-resolve.sh`.
 
-Skills are not on this list. They are embedded in `claudemux-head`
-(`cmd/claudemux-head/skills/`) and written out by `hook ensure`, so a new or
-changed skill needs no packaging change in any channel.
+**The first release after the hooks became Go must shrink the list from six.**
+Earlier releases also shipped `claudemux-map.sh`, `claudemux-worktree.sh` and
+`claudemux-ask.sh`; those are now `claudemux-head hook map|worktree|ask`, and
+the tarball no longer contains them. A formula that still lists them fails
+`brew install` outright, because `libexec.install` of a file that is not in
+the tarball is an error. The same release can drop the formula's `jq`
+dependency: nothing in claudemux runs jq any more.
 
-This matters more than a typical packaging omission: `claudemux-head hook
-ensure` resolves and validates every shipped script's source path **before
-copying any of them** (see `cmd/claudemux-head/hook.go`). One missing
-sibling — e.g. a formula that lists all but one of the files — doesn't just
-fail to install the new script; it fails the entire hook-registration pass,
-so the already-working `claudemux-map.sh` pane-map hook is silently lost too.
-A formula that ships all but one of the files it needs is not "missing one
-feature" — it is "hook registration is a total, silent no-op for every
-Homebrew user."
+Skills and hooks are not on this list. Both are inside `claudemux-head` —
+skills embedded (`cmd/claudemux-head/skills/`) and written out by `hook
+ensure`, hooks as subcommands of the copy of the binary `hook ensure`
+installs — so a new or changed skill or hook needs no packaging change in any
+channel.
 
-The two-repo split is what makes this bite. `claudemux-worktree.sh` and
-`claudemux-ask.sh` were added to `install.sh` and `release.yml` during the
-1.1.0 -> 1.2.0 window; the formula's list was correct for 1.1.0 and simply
-could not be updated in the same commit, because it lives in another repo. So
-the formula is *always* one release behind by construction, and the only thing
-standing between that and a silently broken hook install is someone checking
-this list at bump time. Check it at bump time.
+The two-repo split is what makes this bite: the formula lives in another repo
+and cannot be updated in the same commit as `install.sh` and `release.yml`, so
+it is *always* one release behind by construction, and the only thing standing
+between that and a broken install is someone checking this list at bump time.
+Check it at bump time.
 
-If you added, renamed, or removed a shipped script in this release, update
+If you added, renamed, or removed a shipped file in this release, update
 **all three** places it is listed before tagging:
 
 1. `install.sh` (this repo)

@@ -423,7 +423,7 @@ Restore uses three launcher options `claudemux` gained for this (see
 
 ## Install
 
-**Homebrew** (recommended — it installs `tmux`, `jq`, and `git` for you):
+**Homebrew** (recommended — it installs `tmux` and `git` for you):
 
 ```bash
 brew install mquinnv/tap/claudemux
@@ -480,7 +480,7 @@ right one.
 2. Install the dependencies and claudemux:
 
    ```bash
-   sudo apt-get update && sudo apt-get install -y tmux jq git curl
+   sudo apt-get update && sudo apt-get install -y tmux git curl
    curl -fsSL https://raw.githubusercontent.com/mquinnv/claudemux/main/install.sh | sh
    ```
 
@@ -506,14 +506,13 @@ Then `claudemux ~/src/some-project` as usual. What differs from macOS:
 
 ## Dependencies
 
-Homebrew installs and pins `tmux`, `jq`, and `git` for you. On the other channels
+Homebrew installs and pins `tmux` and `git` for you. On the other channels
 they're your responsibility:
 
 | Tool | Required by | Without it |
 |---|---|---|
 | `tmux` | `claudemux` | `claudemux` cannot run at all |
 | `claudemux-head` on `PATH` | `claudemux` | the head pane dies at "command not found" and is left on screen saying so; an `op_env` session shows that in place of its waiting screen, then still starts `claude` once the secrets land |
-| `jq` | `hooks/claudemux-map.sh`, `hooks/claudemux-worktree.sh`, `hooks/claudemux-ask.sh` | the hook exits silently; see below |
 | `git` | `claudemux` (1Password org inference) | `op_account` in `.claudemux.yml` or `onepassword.default_account` still work |
 | `zoxide` | `claudemux` (fuzzy directory resolution) | `claudemux <query>` resolves literal directories and `launch.project_dirs` matches, but not `z`-style frecency queries |
 | `op` (1Password CLI) | `claudemux` (`op_env` injection) | sessions launch without injected secrets |
@@ -536,10 +535,19 @@ shows **Starting** until the hook binds it to the `claude` pane next to it, and 
 ever falls back to a transcript written *after* it started — the previous session's
 transcript in a project you have used before is never the one it is looking for.
 
-A second hook, `hooks/claudemux-worktree.sh`, ships and is registered the same way —
+The hooks are subcommands of `claudemux-head` — `claudemux-head hook map`, `hook
+worktree` and `hook ask` — run from a copy of the binary at
+`~/.claude/hooks/claudemux-head`, so they need no shell, `jq`, or other tools. `hook
+ensure` (run by every installer and every launch) refreshes that copy after an upgrade
+and migrates a `settings.json` written by older releases, which registered shell scripts
+(`~/.claude/hooks/claudemux-*.sh`) instead: their entries are replaced, and the script
+files themselves become one-line shims into the new commands, because Claude Code sessions
+that were already running keep invoking the paths they started with.
+
+A second hook, `claudemux-head hook worktree`, is registered the same way —
 see `launch.auto_worktree` below for what it does.
 
-A third hook, `hooks/claudemux-ask.sh`, tracks pending `AskUserQuestion` calls. Claude
+A third hook, `claudemux-head hook ask`, tracks pending `AskUserQuestion` calls. Claude
 Code does not write the question to the transcript until it is answered, so without this
 hook a session sitting on a multiple-choice question reads as **Idle** or **Thinking** —
 exactly the wrong verdict for the one session that most needs your attention. With the
@@ -591,8 +599,8 @@ claudemux owns that directory, and a local edit to it is replaced on the next la
 The `5h` and `wk` gauges in the head and the switchboard come from Claude Code itself.
 Claude Code hands its **statusline command** a JSON payload on every render, and that
 payload carries the account's rate-limit windows — so claudemux ships one:
-`claudemux-head statusline`, installed alongside the hooks as
-`~/.claude/hooks/claudemux-statusline` and registered in the `statusLine` key of
+`claudemux-head statusline`, run from the same `~/.claude/hooks/claudemux-head` copy
+the hooks use and registered in the `statusLine` key of
 `~/.claude/settings.json`. It prints nothing (whatever a statusline command prints
 *becomes* your status line) and writes `~/.claude/claudemux/rate-limits.json`, which the
 head panes read.
@@ -768,7 +776,7 @@ web:
   in a git repo's main checkout **on its default branch** marks the session as wanting a
   worktree rather than creating one at launch: `claudemux` prefixes both the `claude`
   command and the head pane's command with `env CLAUDEMUX_WORKTREE_PENDING=1`. The
-  worktree itself doesn't exist yet at that point — `hooks/claudemux-worktree.sh` (a
+  worktree itself doesn't exist yet at that point — `claudemux-head hook worktree` (a
   `UserPromptSubmit` hook) tells the model to call `EnterWorktree` **immediately before
   its first change to the repo's git state** — an edit, a new file, a commit — and not
   before, with a name derived from the task: 2-5 words, lowercase, dash-separated.
@@ -953,7 +961,7 @@ only inside tmux, and only while summaries are on; turn it off with
 `summary.tab_title: false`. Outside tmux there is nothing to rename.
 
 **Worktree names.** When the head *observes* a session move from outside a worktree
-into one — the signature of `hooks/claudemux-worktree.sh` having just created one — the
+into one — the signature of `claudemux-head hook worktree` having just created one — the
 tab takes that worktree's name, dashes rendered as spaces, ahead of any Haiku label. It
 holds until the summarizer's topic replaces an already-established one, at which point
 Haiku's label takes over the tab for good. A session already sitting in a worktree when
@@ -1109,7 +1117,7 @@ to the model, not a command. The same goes for a half-typed draft left in the pr
 The worktree the gate watches is the one **the session's working directory is in** — the
 cwd from its transcript. `claudemux -w` (or `launch.auto_worktree`, or `worktree: true`
 in `.claudemux.yml`) only marks the session as wanting one; it's the model, prompted by
-`hooks/claudemux-worktree.sh`, that actually calls `EnterWorktree` and moves the
+`claudemux-head hook worktree`, that actually calls `EnterWorktree` and moves the
 session's cwd there, typically during its first response. The gate reads that cwd
 regardless of when the move happened, so it holds just as well for a worktree entered
 mid-session as it would have for one that existed at launch. That is not where the

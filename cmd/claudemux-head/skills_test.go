@@ -27,7 +27,7 @@ func shippedSkill(t *testing.T) []byte {
 func TestHookEnsureInstallsSkill(t *testing.T) {
 	writeSettings(t, "")
 	var out, errb bytes.Buffer
-	if rc := runHookEnsure([]string{"--script", stubScript(t)}, &out, &errb); rc != 0 {
+	if rc := runHookEnsure(nil, &out, &errb); rc != 0 {
 		t.Fatalf("rc=%d stderr=%s", rc, errb.String())
 	}
 	got, err := os.ReadFile(skillPath(t))
@@ -43,16 +43,15 @@ func TestHookEnsureInstallsSkill(t *testing.T) {
 // rewritten each time.
 func TestHookEnsureLeavesCurrentSkillAlone(t *testing.T) {
 	writeSettings(t, "")
-	script := stubScript(t)
 	var out, errb bytes.Buffer
-	if rc := runHookEnsure([]string{"--script", script}, &out, &errb); rc != 0 {
+	if rc := runHookEnsure(nil, &out, &errb); rc != 0 {
 		t.Fatalf("first run rc=%d stderr=%s", rc, errb.String())
 	}
 	old := time.Now().Add(-time.Hour).Truncate(time.Second)
 	if err := os.Chtimes(skillPath(t), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if rc := runHookEnsure([]string{"--script", script}, &out, &errb); rc != 0 {
+	if rc := runHookEnsure(nil, &out, &errb); rc != 0 {
 		t.Fatalf("second run rc=%d stderr=%s", rc, errb.String())
 	}
 	info, err := os.Stat(skillPath(t))
@@ -75,7 +74,7 @@ func TestHookEnsureReplacesStaleSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer
-	if rc := runHookEnsure([]string{"--script", stubScript(t)}, &out, &errb); rc != 0 {
+	if rc := runHookEnsure(nil, &out, &errb); rc != 0 {
 		t.Fatalf("rc=%d stderr=%s", rc, errb.String())
 	}
 	got, _ := os.ReadFile(p)
@@ -88,7 +87,7 @@ func TestHookEnsureReplacesStaleSkill(t *testing.T) {
 func TestHookEnsureMalformedSettingsInstallsNoSkill(t *testing.T) {
 	writeSettings(t, "{not json")
 	var out, errb bytes.Buffer
-	if rc := runHookEnsure([]string{"--script", stubScript(t)}, &out, &errb); rc != 3 {
+	if rc := runHookEnsure(nil, &out, &errb); rc != 3 {
 		t.Fatalf("rc=%d, want 3", rc)
 	}
 	if _, err := os.Stat(skillPath(t)); !os.IsNotExist(err) {
@@ -105,7 +104,7 @@ func TestHookEnsureSkillFailureKeepsHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer
-	if rc := runHookEnsure([]string{"--script", stubScript(t)}, &out, &errb); rc != 4 {
+	if rc := runHookEnsure(nil, &out, &errb); rc != 4 {
 		t.Fatalf("rc=%d, want 4", rc)
 	}
 	if len(hookCommands(t, readSettings(t, settingsPath), "SessionStart")) == 0 {
