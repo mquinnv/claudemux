@@ -240,10 +240,22 @@ func ensureHooks(args []string, stdout, stderr io.Writer) (rc int, shimErrs []er
 	}
 
 	if changed {
+		// A dotfiles user's settings.json is a symlink; write its target, so
+		// the rename below replaces the real file and leaves the link alone.
+		target, err := filepath.EvalSymlinks(settingsPath)
+		if err != nil {
+			target = settingsPath
+		}
+		// The file's own mode, for the write and the backup alike: a user who
+		// locked it down (its env block can hold tokens) keeps it that way.
+		mode := os.FileMode(0o644)
+		if info, err := os.Stat(target); err == nil {
+			mode = info.Mode().Perm()
+		}
 		backup := ""
 		if existing != nil {
 			backup = settingsPath + ".bak-" + strconv.FormatInt(time.Now().Unix(), 10)
-			if err := os.WriteFile(backup, existing, 0o644); err != nil {
+			if err := os.WriteFile(backup, existing, mode); err != nil {
 				fmt.Fprintf(stderr, "claudemux: writing backup %s: %v\n", backup, err)
 				return 4, nil
 			}
@@ -255,13 +267,8 @@ func ensureHooks(args []string, stdout, stderr io.Writer) (rc int, shimErrs []er
 		}
 		out = append(out, '\n')
 		// Atomically, so a crash or a full disk mid-write cannot leave Claude
-		// Code a truncated settings.json, and with the file's own mode, so a
-		// user who locked it down keeps it that way.
-		mode := os.FileMode(0o644)
-		if info, err := os.Stat(settingsPath); err == nil {
-			mode = info.Mode().Perm()
-		}
-		if err := writeAtomic(settingsPath, out, mode); err != nil {
+		// Code a truncated settings.json.
+		if err := writeAtomic(target, out, mode); err != nil {
 			if backup != "" {
 				fmt.Fprintf(stderr, "claudemux: writing %s: %v (the previous version is in %s)\n", settingsPath, err, backup)
 			} else {

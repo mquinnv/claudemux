@@ -886,6 +886,68 @@ func TestHookEnsureKeepsSettingsMode(t *testing.T) {
 	}
 }
 
+// The backup holds the same contents as settings.json, env tokens included,
+// so it must be no more readable than the file it copies.
+func TestHookEnsureBackupKeepsSettingsMode(t *testing.T) {
+	p := writeSettings(t, `{"model": "opus"}`)
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	matches, err := filepath.Glob(p + ".bak-*")
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("backups = %v (err %v), want exactly 1", matches, err)
+	}
+	info, err := os.Stat(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("backup mode = %v, want settings.json's 0600", info.Mode().Perm())
+	}
+}
+
+// Dotfiles users keep settings.json as a symlink into their repo. The write
+// lands in the link's target; the link itself survives.
+func TestHookEnsureFollowsSymlinkedSettings(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	target := filepath.Join(t.TempDir(), "dotfiles-settings.json")
+	if err := os.WriteFile(target, []byte(legacySettings(hooksDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json mode = %v, want it still a symlink", info.Mode())
+	}
+	s := readSettings(t, target)
+	if got := hookCommands(t, s, "SessionStart"); !sameStrings(got, hookCmd(t, "map"), "/other/tool.sh") {
+		t.Errorf("target SessionStart = %v, want the migrated hooks", got)
+	}
+	if s["model"] != "opus" {
+		t.Errorf("model = %v, want it preserved", s["model"])
+	}
+}
+
 // A legacy file that cannot be replaced by its shim is reported (exit 4, the
 // file named) but costs nothing else: settings.json is still migrated and the
 // skills are still installed.
