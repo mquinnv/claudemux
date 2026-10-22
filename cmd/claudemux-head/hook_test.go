@@ -948,6 +948,68 @@ func TestHookEnsureFollowsSymlinkedSettings(t *testing.T) {
 	}
 }
 
+// A dotfiles link whose target does not exist yet (a fresh machine) gets its
+// target created; the link itself survives.
+func TestHookEnsureCreatesDanglingSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	dot := filepath.Join(root, "dot")
+	if err := os.MkdirAll(dot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.Symlink(filepath.Join("..", "..", "dot", "settings.json"), p); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json mode = %v, want it still a symlink", info.Mode())
+	}
+	s := readSettings(t, filepath.Join(dot, "settings.json"))
+	if got := hookCommands(t, s, "SessionStart"); !sameStrings(got, hookCmd(t, "map")) {
+		t.Errorf("target SessionStart = %v, want the registered map hook", got)
+	}
+}
+
+// A link whose target cannot be created is refused rather than replaced by a
+// regular file.
+func TestHookEnsureRefusesUnwritableSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.Symlink(filepath.Join(root, "missing-dir", "settings.json"), p); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 4 {
+		t.Fatalf("runHookEnsure() = %d, want 4 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json mode = %v, want it still a symlink", info.Mode())
+	}
+}
+
 // A legacy file that cannot be replaced by its shim is reported (exit 4, the
 // file named) but costs nothing else: settings.json is still migrated and the
 // skills are still installed.

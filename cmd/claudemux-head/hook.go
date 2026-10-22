@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -242,9 +243,10 @@ func ensureHooks(args []string, stdout, stderr io.Writer) (rc int, shimErrs []er
 	if changed {
 		// A dotfiles user's settings.json is a symlink; write its target, so
 		// the rename below replaces the real file and leaves the link alone.
-		target, err := filepath.EvalSymlinks(settingsPath)
+		target, err := settingsWriteTarget(settingsPath)
 		if err != nil {
-			target = settingsPath
+			fmt.Fprintf(stderr, "claudemux: %s is a symlink that cannot be followed: %v; leaving it alone\n", settingsPath, err)
+			return 4, nil
 		}
 		// The file's own mode, for the write and the backup alike: a user who
 		// locked it down (its env block can hold tokens) keeps it that way.
@@ -282,6 +284,41 @@ func ensureHooks(args []string, stdout, stderr io.Writer) (rc int, shimErrs []er
 	// After settings.json, so a shim that cannot be written never costs the
 	// registration itself.
 	return 0, shimLegacyHookFiles(hooksDir, bin)
+}
+
+// settingsWriteTarget follows path's symlinks to the file a write should
+// replace. Unlike filepath.EvalSymlinks it accepts a dangling final link, as
+// on a fresh machine whose dotfiles target does not exist yet, returning the
+// target to create, but only when that target's directory exists.
+func settingsWriteTarget(path string) (string, error) {
+	p := path
+	for range 40 {
+		info, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			if p == path {
+				return p, nil
+			}
+			if dir, err := os.Stat(filepath.Dir(p)); err != nil || !dir.IsDir() {
+				return "", fmt.Errorf("its target %s has no directory to be created in", p)
+			}
+			return p, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return p, nil
+		}
+		link, err := os.Readlink(p)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(p), link)
+		}
+		p = link
+	}
+	return "", errors.New("too many levels of symbolic links")
 }
 
 // legacyShim is what an old hook file in ~/.claude/hooks becomes: a pass-
