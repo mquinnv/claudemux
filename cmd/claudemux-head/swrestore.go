@@ -123,11 +123,7 @@ func swRestoreScanCmd(sessions []swSession) tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		bootOut, bootErr := exec.CommandContext(ctx, "sysctl", "-n", "kern.boottime").Output()
-		boot, bootOK := int64(0), false
-		if bootErr == nil {
-			boot, bootOK = parseBootTime(string(bootOut))
-		}
+		boot, bootOK := bootTime(ctx)
 		startOut, startErr := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{start_time}").Output()
 		start, startOK := int64(0), false
 		if startErr == nil {
