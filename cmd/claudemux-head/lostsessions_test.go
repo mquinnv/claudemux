@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"reflect"
+	"runtime"
 	"sort"
 	"testing"
+	"time"
 )
 
 func rec(name, id, state string, lastSeen int64) loadedRecord {
@@ -147,6 +150,34 @@ func TestParseBootTime(t *testing.T) {
 		if _, ok := parseBootTime(bad); ok {
 			t.Errorf("parseBootTime(%q) ok, want failure", bad)
 		}
+	}
+}
+
+func TestParseProcStatBootTime(t *testing.T) {
+	stat := "cpu  1 2 3 4 5 6 7 0 0 0\ncpu0 1 2 3 4 5 6 7 0 0 0\nintr 12345 0 0\nctxt 999\nbtime 1789750380\nprocesses 4242\n"
+	sec, ok := parseProcStatBootTime(stat)
+	if !ok || sec != 1789750380 {
+		t.Errorf("got %d %v", sec, ok)
+	}
+	for _, bad := range []string{"", "cpu 1 2 3\n", "btime\n", "btime abc\n", "btime -5\n", "xbtime 1789750380\n"} {
+		if _, ok := parseProcStatBootTime(bad); ok {
+			t.Errorf("parseProcStatBootTime(%q) ok, want failure", bad)
+		}
+	}
+}
+
+// On the machine running the tests, whichever source bootTime picks must
+// yield a plausible past boot.
+func TestBootTimeLocal(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("boot time is read only on darwin and linux")
+	}
+	sec, ok := bootTime(context.Background())
+	if !ok {
+		t.Fatal("bootTime() not ok")
+	}
+	if now := time.Now().Unix(); sec <= 0 || sec > now {
+		t.Errorf("bootTime() = %d, want in (0, %d]", sec, now)
 	}
 }
 

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,6 +126,40 @@ func parseBootTime(out string) (int64, bool) {
 		return 0, false
 	}
 	return sec, true
+}
+
+// parseProcStatBootTime reads Linux's /proc/stat, whose "btime" line is the
+// boot time in Unix seconds: "btime 1789750380".
+func parseProcStatBootTime(stat string) (int64, bool) {
+	for _, line := range strings.Split(stat, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 || f[0] != "btime" {
+			continue
+		}
+		sec, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil || sec <= 0 {
+			return 0, false
+		}
+		return sec, true
+	}
+	return 0, false
+}
+
+// bootTime is the machine's boot time in Unix seconds: /proc/stat on Linux
+// (WSL2 included), `sysctl kern.boottime` elsewhere.
+func bootTime(ctx context.Context) (int64, bool) {
+	if runtime.GOOS == "linux" {
+		stat, err := os.ReadFile("/proc/stat")
+		if err != nil {
+			return 0, false
+		}
+		return parseProcStatBootTime(string(stat))
+	}
+	out, err := exec.CommandContext(ctx, "sysctl", "-n", "kern.boottime").Output()
+	if err != nil {
+		return 0, false
+	}
+	return parseBootTime(string(out))
 }
 
 // restoreCutoff is the later of the boot time and the tmux server's start.
