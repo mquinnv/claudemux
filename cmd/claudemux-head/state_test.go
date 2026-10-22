@@ -271,3 +271,67 @@ func TestClassifyToolResultTurnIsNotACommand(t *testing.T) {
 		t.Errorf("got %v, want StateThinking", got.Kind)
 	}
 }
+
+// Claude Code compacts an idle session on its own ("Compacted while idle,
+// before the prompt cache expired") and writes the summary as a `user`
+// record that no assistant turn answers. Read as a prompt, it pinned
+// scala3d-2 at Thinking for hours with nothing running (2026-10-22). The
+// shape is the real one from that transcript.
+func TestParseEventCompactSummary(t *testing.T) {
+	line := `{"type":"user","isVisibleInTranscriptOnly":true,"isCompactSummary":true,` +
+		`"timestamp":"2026-10-22T10:35:47.235Z","message":{"role":"user","content":` +
+		`"This session is being continued from a previous conversation that ran out of context."}}`
+	ev, ok := parseEvent(line)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if !ev.IsCompactSummary {
+		t.Error("IsCompactSummary not set")
+	}
+}
+
+func TestClassifyIdleCompactionStaysIdle(t *testing.T) {
+	ts := time.Unix(1_754_700_000, 0)
+	events := []Event{
+		{Type: "assistant", UserText: "merged and posted", Timestamp: ts.Format(time.RFC3339)},
+		{Type: "system"},
+		{Type: "user", IsCompactSummary: true, UserText: "This session is being continued…",
+			Timestamp: ts.Add(3 * time.Hour).Format(time.RFC3339)},
+		{Type: "attachment"},
+	}
+	got := classifyState(events, 0, time.Time{}, 0, ts.Add(4*time.Hour))
+	if got.Kind != StateIdle {
+		t.Fatalf("got %v, want StateIdle", got.Kind)
+	}
+	if !got.Since.Equal(ts) {
+		t.Errorf("Since = %v, want the end of the last turn %v", got.Since, ts)
+	}
+}
+
+// Auto-compaction mid-turn lands between a tool_result and the assistant
+// turn that continues the work; the session is working throughout.
+func TestClassifyMidTurnCompactionStaysThinking(t *testing.T) {
+	events := []Event{
+		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
+		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1"}}},
+		{Type: "user", IsCompactSummary: true, UserText: "This session is being continued…"},
+	}
+	if got := classifyState(events, 0, time.Time{}, 0, time.Now()); got.Kind != StateThinking {
+		t.Errorf("got %v, want StateThinking", got.Kind)
+	}
+}
+
+// The summary is not something the human typed, so it must not become the
+// row's prompt line.
+func TestCompactSummaryIsNotAPrompt(t *testing.T) {
+	events := []Event{
+		{Type: "user", UserText: "merge it"},
+		{Type: "user", IsCompactSummary: true, UserText: "This session is being continued…"},
+	}
+	if got := lastTypedPrompt(events); got != "merge it" {
+		t.Errorf("lastTypedPrompt = %q, want %q", got, "merge it")
+	}
+	if got := lastUserPrompt(events); got != "merge it" {
+		t.Errorf("lastUserPrompt = %q, want %q", got, "merge it")
+	}
+}

@@ -861,7 +861,7 @@ func genuinePrompt(e Event) bool {
 	if e.Type != "last-prompt" && e.Type != "user" {
 		return false
 	}
-	if e.IsMeta || e.UserText == "" {
+	if e.IsMeta || e.IsCompactSummary || e.UserText == "" {
 		return false
 	}
 	return !strings.HasPrefix(strings.TrimSpace(e.UserText), "<")

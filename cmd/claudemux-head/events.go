@@ -138,7 +138,13 @@ type Event struct {
 	// otherwise pin the head to a transcript nobody writes to again.
 	ContinuedIn string
 	IsSidechain bool // true for subagent (Task) entries — excluded from the worktree chip
-	RawLine     string
+	// IsCompactSummary marks the `user` record a compaction writes to carry
+	// its summary. Nobody typed it and nothing need answer it: an idle
+	// compaction (Claude Code compacting on its own before the prompt cache
+	// expires) leaves it as the newest turn indefinitely. See
+	// lastConversationEvent and genuinePrompt.
+	IsCompactSummary bool
+	RawLine          string
 }
 
 type EventReader struct {
@@ -330,6 +336,7 @@ func parseEvent(line string) (Event, bool) {
 		Cwd         string          `json:"cwd"`
 		GitBranch   string          `json:"gitBranch"`
 		IsSidechain bool            `json:"isSidechain"`
+		IsCompact   bool            `json:"isCompactSummary"`
 		Message     json.RawMessage `json:"message"`
 		Content     json.RawMessage `json:"content"`    // top level; queue-operation only
 		LastPrompt  string          `json:"lastPrompt"` // present on type=last-prompt events
@@ -344,7 +351,7 @@ func parseEvent(line string) (Event, bool) {
 	}
 
 	ev := Event{Type: raw.Type, IsMeta: raw.IsMeta, Timestamp: raw.Timestamp, Cwd: raw.Cwd,
-		GitBranch: raw.GitBranch, IsSidechain: raw.IsSidechain, RawLine: line}
+		GitBranch: raw.GitBranch, IsSidechain: raw.IsSidechain, IsCompactSummary: raw.IsCompact, RawLine: line}
 
 	if raw.Type == "last-prompt" && raw.LastPrompt != "" {
 		ev.UserText = cleanCommandText(raw.LastPrompt)
