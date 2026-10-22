@@ -983,6 +983,53 @@ func TestHookEnsureCreatesDanglingSymlinkTarget(t *testing.T) {
 	}
 }
 
+// A relative link inside a symlinked ~/.claude resolves from the directory it
+// really lives in, as the kernel does, not from the textual path.
+func TestHookEnsureRelativeLinkInSymlinkedClaudeDir(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	claudeDir := filepath.Join(root, "dotfiles", "claude")
+	common := filepath.Join(root, "dotfiles", "common")
+	for _, d := range []string{claudeDir, common} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(claudeDir, filepath.Join(home, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "common", "settings.json"), filepath.Join(claudeDir, "settings.json")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(common, "settings.json")
+	for _, existing := range []bool{false, true} {
+		if existing {
+			if err := os.WriteFile(target, []byte(`{"model": "opus"}`+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var stdout, stderr bytes.Buffer
+		if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("existing=%v: runHookEnsure() = %d, want 0 (stderr %s)", existing, code, stderr.String())
+		}
+		info, err := os.Lstat(filepath.Join(claudeDir, "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("existing=%v: settings.json mode = %v, want it still a symlink", existing, info.Mode())
+		}
+		s := readSettings(t, target)
+		if got := hookCommands(t, s, "SessionStart"); !sameStrings(got, hookCmd(t, "map")) {
+			t.Errorf("existing=%v: target SessionStart = %v, want the registered map hook", existing, got)
+		}
+	}
+}
+
 // A link whose target cannot be created is refused rather than replaced by a
 // regular file.
 func TestHookEnsureRefusesUnwritableSymlinkTarget(t *testing.T) {

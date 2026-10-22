@@ -291,6 +291,11 @@ func ensureHooks(args []string, stdout, stderr io.Writer) (rc int, shimErrs []er
 // on a fresh machine whose dotfiles target does not exist yet, returning the
 // target to create, but only when that target's directory exists.
 func settingsWriteTarget(path string) (string, error) {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
 	p := path
 	for range 40 {
 		info, err := os.Lstat(p)
@@ -314,7 +319,14 @@ func settingsWriteTarget(path string) (string, error) {
 			return "", err
 		}
 		if !filepath.IsAbs(link) {
-			link = filepath.Join(filepath.Dir(p), link)
+			// From the directory the link really lives in, as the kernel
+			// resolves it: a textual Join would strip ".." across a
+			// symlinked parent such as ~/.claude itself.
+			dir, err := filepath.EvalSymlinks(filepath.Dir(p))
+			if err != nil {
+				return "", err
+			}
+			link = filepath.Join(dir, link)
 		}
 		p = link
 	}
