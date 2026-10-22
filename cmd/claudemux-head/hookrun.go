@@ -16,13 +16,17 @@ import (
 // The three Claude Code hooks claudemux registers, run as `claudemux-head hook
 // <name>`. They were bash scripts (hooks/claudemux-{map,ask,worktree}.sh) that
 // spawned jq, find and mv on every prompt; these are ports with the same
-// stdout, exit codes and files. The scripts' history lives in their commit log
-// and in the comments below, which carry over what each one explained.
+// stdout, exit codes and files for every well-formed payload. The scripts'
+// history lives in their commit log and in the comments below, which carry
+// over what each one explained.
 //
 // Every hook here reads one JSON payload on stdin. Exit codes follow the
 // scripts: 0 on every path that ends normally, including the silent ones, and
 // 1 when a write fails (bash's `set -e`). Never 2 — Claude Code treats exit 2
 // as "block this prompt / tool call", which no failure of ours should cause.
+// runHookCommand turns an unknown hook name or a panic into 1 as well; only an
+// unrecoverable runtime fatal (out of memory, a concurrent map write) can
+// still exit 2.
 
 // hookStaleAge is how long a pane-map file, ask marker or worktree-ask counter
 // may go unwritten before a hook run prunes it. The scripts used
@@ -35,6 +39,38 @@ var hookRunners = map[string]func(stdin io.Reader, stdout, stderr io.Writer, get
 	"map":      runHookMap,
 	"ask":      runHookAsk,
 	"worktree": runHookWorktree,
+}
+
+// runHookCommand implements `claudemux-head hook ...`; args are the words
+// after `hook`. `ensure` is the installer (hook.go); every other name is a
+// Claude Code hook from hookRunners, run with the event payload on stdin.
+//
+// Only a bare `hook` is a usage error with exit 2 — Claude Code never runs
+// that. A name this binary does not know is exit 1: settings.json written by
+// a newer claudemux can name a hook an older copy of this binary lacks, and
+// exit 2 there would block every prompt. A panic in a runner is caught for
+// the same reason; left alone, the Go runtime exits 2.
+func runHookCommand(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) (rc int) {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: claudemux-head hook ensure | claudemux-head hook map|ask|worktree < payload")
+		return 2
+	}
+	name := args[0]
+	if name == "ensure" {
+		return runHookEnsure(args[1:], stdout, stderr)
+	}
+	run, ok := hookRunners[name]
+	if !ok {
+		fmt.Fprintf(stderr, "claudemux hook: unknown hook %q (this binary may be older than settings.json)\n", name)
+		return 1
+	}
+	defer func() {
+		if v := recover(); v != nil {
+			fmt.Fprintf(stderr, "claudemux hook %s: internal error: %v\n", name, v)
+			rc = 1
+		}
+	}()
+	return run(stdin, stdout, stderr, getenv)
 }
 
 // claudemuxStateDir is ~/.claude/claudemux, where every hook keeps its files.
@@ -71,9 +107,11 @@ func decodeHookPayload(stdin io.Reader) (map[string]json.RawMessage, bool) {
 
 // payloadText renders a payload field the way the scripts' `jq -r '.f // ""'`
 // did: absent, null and false become "", a string is itself, and a number or
-// true is its literal text. ok is false for an object or array, where the
-// scripts' jq expression failed outright (join() refuses them) — callers treat
-// that as an unparseable payload.
+// true is its literal text. ok is false for an object or array — callers treat
+// that as an unparseable payload. That matches the ask script, whose join()
+// refused them, but not the worktree script, whose bare `jq -r '.cwd // empty'`
+// printed one as JSON. The difference is kept deliberately: no real payload
+// carries an object or array in these fields.
 func payloadText(obj map[string]json.RawMessage, key string) (s string, ok bool) {
 	raw, present := obj[key]
 	if !present {

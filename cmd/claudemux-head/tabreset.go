@@ -35,7 +35,7 @@ func findShippedScript(name string, dirs []string, exists func(string) bool) (st
 	return "", false
 }
 
-// shippedScriptPath locates a script that ships with claudemux, trying three
+// shippedScriptPath locates a script that ships with claudemux, trying two
 // layouts in order:
 //
 //  1. Beside this binary — what install.sh and the Homebrew formula produce,
@@ -44,11 +44,6 @@ func findShippedScript(name string, dirs []string, exists func(string) bool) (st
 //     layout, where the head binary is a `go build` output in GOBIN while the
 //     shell scripts stay in the repo and only claudemux is symlinked onto PATH.
 //     This finds project-color-resolve.sh, which lives in the repo's bin/.
-//  3. The repo's hooks/ directory, one level up from that same resolved bin/.
-//     The hook scripts do NOT live beside claudemux — they live in hooks/ — so
-//     layout 2 alone finds project-color-resolve.sh and misses both hooks. That
-//     gap made `hook ensure` return 4 in any dev checkout, which (since the
-//     validate-all-before-copy-any pass) registers nothing at all.
 //
 // bin/claudemux already survives the second layout because resolve_self follows
 // its own symlink back into the repo; this gives the head the same reach.
@@ -61,8 +56,7 @@ func shippedScriptPath(name string) (string, bool) {
 
 	if cm, err := exec.LookPath("claudemux"); err == nil {
 		if resolved, err := filepath.EvalSymlinks(cm); err == nil {
-			binDir := filepath.Dir(resolved)
-			dirs = append(dirs, binDir, filepath.Join(binDir, "..", "hooks"))
+			dirs = append(dirs, filepath.Dir(resolved))
 		}
 	}
 

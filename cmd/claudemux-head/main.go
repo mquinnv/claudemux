@@ -78,19 +78,11 @@ func main() {
 		os.Exit(runBoot(os.Args[2:], os.Stderr))
 	}
 
+	// `hook ensure` installs the hooks; `hook <name>` is one of the Claude
+	// Code hooks themselves (hookrun.go), which settings.json runs with the
+	// event payload on stdin.
 	if len(os.Args) > 1 && os.Args[1] == "hook" {
-		if len(os.Args) > 2 && os.Args[2] == "ensure" {
-			os.Exit(runHookEnsure(os.Args[3:], os.Stdout, os.Stderr))
-		}
-		// The Claude Code hooks themselves (hookrun.go), which settings.json
-		// runs with the event payload on stdin.
-		if len(os.Args) > 2 {
-			if run, ok := hookRunners[os.Args[2]]; ok {
-				os.Exit(run(os.Stdin, os.Stdout, os.Stderr, os.Getenv))
-			}
-		}
-		fmt.Fprintln(os.Stderr, "usage: claudemux-head hook ensure | claudemux-head hook map|ask|worktree < payload")
-		os.Exit(2)
+		os.Exit(runHookCommand(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, os.Getenv))
 	}
 
 	// `statusline` is registered in the statusLine slot of ~/.claude/settings.json

@@ -159,8 +159,8 @@ func TestWorktreeHookInstructionBytes(t *testing.T) {
 	}
 }
 
-// An unknown hook name is not silently a no-op: main() prints usage and exits
-// 2 for anything hookRunners lacks, so the table must hold exactly the names
+// An unknown hook name is not silently a no-op: runHookCommand fails with exit
+// 1 for anything hookRunners lacks, so the table must hold exactly the names
 // claudemuxHooks registers.
 func TestHookRunnersCoverRegisteredHooks(t *testing.T) {
 	if len(hookRunners) != len(claudemuxHooks) {

@@ -124,7 +124,9 @@ resolve_self() {
 # session. Exit 3 (a settings.json that does not parse) and exit 4 (an I/O
 # failure) are the two cases worth surfacing: 3 means we deliberately touched
 # nothing, and 4 means the hooks may be registered against a stale copy of
-# the binary, or not at all.
+# the binary, or not at all — or, when the message says they ARE registered,
+# that only the shims redirecting already-running sessions' old hook paths
+# could not be written.
 ensure_hook() {
   command -v claudemux-head >/dev/null 2>&1 || return 0
   local err rc=0

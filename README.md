@@ -538,7 +538,7 @@ transcript in a project you have used before is never the one it is looking for.
 The hooks are subcommands of `claudemux-head` — `claudemux-head hook map`, `hook
 worktree` and `hook ask` — run from a copy of the binary at
 `~/.claude/hooks/claudemux-head`, so they need no shell, `jq`, or other tools. `hook
-ensure` (run by every installer and every launch) refreshes that copy after an upgrade
+ensure` (run by `install.sh` and by every `claudemux` launch) refreshes that copy after an upgrade
 and migrates a `settings.json` written by older releases, which registered shell scripts
 (`~/.claude/hooks/claudemux-*.sh`) instead: their entries are replaced, and the script
 files themselves become one-line shims into the new commands, because Claude Code sessions
@@ -566,9 +566,11 @@ and cleared, within a couple of seconds.
 Two caveats. An Esc'd question can keep reading as **Asking** until you send the next
 prompt — nothing flushes to the transcript on Esc, so there's no signal available to clear
 the marker any sooner; this is inherent to what Claude Code exposes, not a bug in the
-hook. And a session that was already running when this hook was installed or upgraded
-won't pick it up until its next start — hooks are snapshotted at session startup, so a
-live session keeps running whatever it started with.
+hook. And a session that was already running when this hook was first installed won't pick it
+up until its next start — hooks are snapshotted at session startup, so a live session
+keeps running whatever it started with. Upgrades take effect at once: the registered
+command stays the same, and only the binary behind it (and the shims at the old script
+paths) changes.
 
 **Unsure** is Idle the head no longer trusts. Background work is counted from the
 transcript and expires on a timer when nothing reports it finished; when that timer,
@@ -577,7 +579,9 @@ and publishes `Unsure:N`. The switchboard does not treat it as waiting, so the
 conductor will not escort you into a session whose pane may still say "2 shells still
 running". It clears on your next prompt or Claude's next turn.
 
-`claudemux-head hook ensure` installs and repairs all three scripts together.
+`claudemux-head hook ensure` installs and repairs all three hooks together: it refreshes
+the `~/.claude/hooks/claudemux-head` copy and registers `hook map`, `hook worktree` and
+`hook ask` in `settings.json`.
 
 ## The handoff skill
 

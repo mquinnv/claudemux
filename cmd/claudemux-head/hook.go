@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -81,8 +83,22 @@ const legacyStatuslineName = "claudemux-statusline"
 const abtopStatuslineName = "abtop-statusline.sh"
 
 // hookCommandFor is the settings.json command for hook h, run from bin.
+// Claude Code runs it through a shell, so bin is quoted: a HOME with a space
+// in it would otherwise break every hook.
 func hookCommandFor(bin string, h claudemuxHook) string {
+	return shQuote(bin) + " hook " + h.name
+}
+
+// unquotedHookCommandFor is what hookCommandFor registered before it quoted
+// bin. Those entries are ours, and are migrated like the bash scripts'.
+func unquotedHookCommandFor(bin string, h claudemuxHook) string {
 	return bin + " hook " + h.name
+}
+
+// shQuote single-quotes s for a POSIX shell; a quote inside it is closed,
+// escaped and reopened.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // siblingOfExecutable joins name onto the directory holding this binary, with
@@ -112,9 +128,11 @@ func siblingOfExecutable(name string) (string, error) {
 //
 // The shipped skills (skills.go) are installed last, and only when the hooks
 // got that far: a skill that cannot be written is reported as 4 but never
-// costs the hook registration, which matters far more.
+// costs the hook registration, which matters far more. A legacy shim that
+// cannot be written (see ensureHooks) is reported as 4 too, but only after
+// the skills, since the registration it follows has already landed.
 func runHookEnsure(args []string, stdout, stderr io.Writer) int {
-	rc := ensureHooks(args, stdout, stderr)
+	rc, shimErrs := ensureHooks(args, stdout, stderr)
 	if rc != 0 {
 		return rc
 	}
@@ -125,14 +143,24 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := installSkills(filepath.Join(home, ".claude")); err != nil {
 		fmt.Fprintf(stderr, "claudemux: installing skills: %v\n", err)
-		return 4
+		rc = 4
 	}
-	return 0
+	if len(shimErrs) > 0 {
+		fmt.Fprintf(stderr, "claudemux: hooks are registered in settings.json, but Claude Code sessions "+
+			"started before this upgrade still run the old hook files, and these could not be redirected:\n")
+		for _, err := range shimErrs {
+			fmt.Fprintf(stderr, "  %v\n", err)
+		}
+		rc = 4
+	}
+	return rc
 }
 
 // ensureHooks installs this binary into ~/.claude/hooks and registers its hook
 // commands and its statusline in settings.json: runHookEnsure minus the
-// skills, with the same exit codes.
+// skills, with the same exit codes. Legacy shims that could not be written do
+// not change the exit code here; they come back as shimErrs for runHookEnsure
+// to report once everything else is done.
 //
 // It also migrates installs from before the hooks were Go: entries naming the
 // old claudemux-*.sh scripts are removed (the Go commands are added in their
@@ -142,17 +170,17 @@ func runHookEnsure(args []string, stdout, stderr io.Writer) int {
 // every session already running when this upgrade lands keeps invoking the
 // old paths until it restarts, and a deleted script would fail every one of
 // its prompts.
-func ensureHooks(args []string, stdout, stderr io.Writer) int {
+func ensureHooks(args []string, stdout, stderr io.Writer) (rc int, shimErrs []error) {
 	fs := flag.NewFlagSet("hook ensure", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return 2, nil
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(stderr, "claudemux: resolving home dir: %v\n", err)
-		return 4
+		return 4, nil
 	}
 	claudeDir := filepath.Join(home, ".claude")
 	hooksDir := filepath.Join(claudeDir, "hooks")
@@ -166,18 +194,18 @@ func ensureHooks(args []string, stdout, stderr io.Writer) int {
 	case err == nil:
 		if err := json.Unmarshal(existing, &settings); err != nil {
 			fmt.Fprintf(stderr, "claudemux: %s does not parse (%v); refusing to touch it\n", settingsPath, err)
-			return 3
+			return 3, nil
 		}
 	case errors.Is(err, os.ErrNotExist):
 		existing = nil
 	default:
 		fmt.Fprintf(stderr, "claudemux: reading %s: %v\n", settingsPath, err)
-		return 4
+		return 4, nil
 	}
 
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		fmt.Fprintf(stderr, "claudemux: creating %s: %v\n", hooksDir, err)
-		return 4
+		return 4, nil
 	}
 
 	selfExe, err := os.Executable()
@@ -186,17 +214,20 @@ func ensureHooks(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "claudemux: locating this binary: %v\n", err)
-		return 4
+		return 4, nil
 	}
 	bin := filepath.Join(hooksDir, hookBinaryName)
 	if err := copyExecutableIfChanged(selfExe, bin); err != nil {
 		fmt.Fprintf(stderr, "claudemux: installing %s: %v\n", bin, err)
-		return 4
+		return 4, nil
 	}
 
 	changed := false
 	for _, h := range claudemuxHooks {
-		if removeHookEntries(settings, h.legacyScript) {
+		unquoted := unquotedHookCommandFor(bin, h)
+		if removeHookEntries(settings, func(c string) bool {
+			return filepath.Base(c) == h.legacyScript || c == unquoted
+		}) {
 			changed = true
 		}
 		if addHookEntries(settings, hookCommandFor(bin, h), h.events) {
@@ -204,46 +235,53 @@ func ensureHooks(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	legacyStatusline := filepath.Join(hooksDir, legacyStatuslineName) + " statusline"
-	if setStatusLine(settings, bin+" statusline", legacyStatusline, stderr) {
+	if setStatusLine(settings, shQuote(bin)+" statusline", stderr, legacyStatusline, bin+" statusline") {
 		changed = true
 	}
 
 	if changed {
+		backup := ""
 		if existing != nil {
-			backup := settingsPath + ".bak-" + strconv.FormatInt(time.Now().Unix(), 10)
+			backup = settingsPath + ".bak-" + strconv.FormatInt(time.Now().Unix(), 10)
 			if err := os.WriteFile(backup, existing, 0o644); err != nil {
 				fmt.Fprintf(stderr, "claudemux: writing backup %s: %v\n", backup, err)
-				return 4
+				return 4, nil
 			}
 		}
 		out, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "claudemux: encoding settings: %v\n", err)
-			return 4
+			return 4, nil
 		}
 		out = append(out, '\n')
-		if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
-			fmt.Fprintf(stderr, "claudemux: writing %s: %v\n", settingsPath, err)
-			return 4
+		// Atomically, so a crash or a full disk mid-write cannot leave Claude
+		// Code a truncated settings.json, and with the file's own mode, so a
+		// user who locked it down keeps it that way.
+		mode := os.FileMode(0o644)
+		if info, err := os.Stat(settingsPath); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := writeAtomic(settingsPath, out, mode); err != nil {
+			if backup != "" {
+				fmt.Fprintf(stderr, "claudemux: writing %s: %v (the previous version is in %s)\n", settingsPath, err, backup)
+			} else {
+				fmt.Fprintf(stderr, "claudemux: writing %s: %v\n", settingsPath, err)
+			}
+			return 4, nil
 		}
 		fmt.Fprintf(stdout, "claudemux: registered claudemux hooks in %s\n", settingsPath)
 	}
 
 	// After settings.json, so a shim that cannot be written never costs the
 	// registration itself.
-	if err := shimLegacyHookFiles(hooksDir, bin); err != nil {
-		fmt.Fprintf(stderr, "claudemux: %v\n", err)
-		return 4
-	}
-	return 0
+	return 0, shimLegacyHookFiles(hooksDir, bin)
 }
 
 // legacyShim is what an old hook file in ~/.claude/hooks becomes: a pass-
 // through into the Go command that replaced it, stdin, stdout and exit code
-// included. bin is single-quoted for the shell; a quote inside it is closed,
-// escaped and reopened.
+// included. bin is quoted for the shell with shQuote.
 func legacyShim(bin string, args string) []byte {
-	quoted := "'" + strings.ReplaceAll(bin, "'", `'\''`) + "'"
+	quoted := shQuote(bin)
 	return []byte("#!/bin/sh\n" +
 		"# Left by claudemux hook ensure for Claude Code sessions started before the\n" +
 		"# hooks became claudemux-head subcommands. Safe to delete once they exit.\n" +
@@ -253,13 +291,22 @@ func legacyShim(bin string, args string) []byte {
 // shimLegacyHookFiles rewrites each pre-Go hook file still present in
 // hooksDir as a legacyShim. A file that is absent stays absent — this exists
 // for sessions that are running the old commands, and a fresh install has
-// none — and one that already holds the shim is not rewritten.
-func shimLegacyHookFiles(hooksDir, bin string) error {
+// none — and one that already holds the shim is not rewritten. One file that
+// cannot be rewritten does not stop the rest; every failure is returned, in
+// file-name order.
+func shimLegacyHookFiles(hooksDir, bin string) []error {
 	targets := map[string]string{legacyStatuslineName: `"$@"`}
 	for _, h := range claudemuxHooks {
 		targets[h.legacyScript] = "hook " + h.name
 	}
-	for name, args := range targets {
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var errs []error
+	for _, name := range names {
+		args := targets[name]
 		path := filepath.Join(hooksDir, name)
 		cur, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -270,19 +317,19 @@ func shimLegacyHookFiles(hooksDir, bin string) error {
 			continue
 		}
 		if err := writeExecutableAtomic(path, want); err != nil {
-			return fmt.Errorf("replacing %s with a shim: %w", path, err)
+			errs = append(errs, fmt.Errorf("replacing %s with a shim: %w", path, err))
 		}
 	}
-	return nil
+	return errs
 }
 
-// removeHookEntries deletes, from every event, each hook whose command runs a
-// file named script — matched by basename, so whatever directory or
+// removeHookEntries deletes, from every event, each hook whose command match
+// accepts — for the bash scripts, by basename, so whatever directory or
 // interpreter prefix it was registered with — and reports whether anything
 // changed. A group left with no hooks is dropped, and an event left with no
 // groups is deleted, so no empty husk is left behind. Other hooks sharing a
 // group with the one removed stay where they are.
-func removeHookEntries(settings map[string]any, script string) bool {
+func removeHookEntries(settings map[string]any, match func(command string) bool) bool {
 	hooks, _ := settings["hooks"].(map[string]any)
 	changed := false
 	for event, v := range hooks {
@@ -301,7 +348,7 @@ func removeHookEntries(settings map[string]any, script string) bool {
 			kept := inner[:0:0]
 			for _, h := range inner {
 				hm, _ := h.(map[string]any)
-				if c, _ := hm["command"].(string); c != "" && filepath.Base(c) == script {
+				if c, _ := hm["command"].(string); c != "" && match(c) {
 					changed = true
 					continue
 				}
@@ -392,7 +439,7 @@ func hasHookCommand(groups []any, command string) bool {
 // so an
 // in-place rewrite is a coin flip that hook ensure loses at exactly the moment
 // the user is using Claude Code most. Losing it used to cost more than the
-// copy: runHookEnsure returns 4 on that error, before settings.json is
+// copy: ensureHooks returns 4 on that error, before settings.json is
 // written, so a single ETXTBSY silently dropped that launch's entire hook
 // registration. A rename needs write permission on the
 // directory, not on the file, cannot be observed half-done by a reader, and
@@ -432,24 +479,29 @@ func copyExecutableIfChanged(src, dst string) error {
 // statusLine is a single exclusive string: claiming it takes it away from
 // whoever had it. So the claim is narrow — an empty slot, abtop's shim (what
 // this feature exists to remove), or a slot we already own, which includes
-// legacy: the command from before the installed copy was renamed from
-// claudemux-statusline. Anything else is a
+// each legacy command: the one from before the installed copy was renamed
+// from claudemux-statusline, and the one from before its path was quoted.
+// Taking a slot over sets type and command on the existing object, so any
+// other key the user set there, such as padding, survives. Anything else is a
 // statusline the user chose, and we decline and say so rather than clobbering
 // it; the meters simply stay dark, which is recoverable, whereas a silently
 // destroyed statusline is not.
-func setStatusLine(settings map[string]any, command, legacy string, stderr io.Writer) bool {
+func setStatusLine(settings map[string]any, command string, stderr io.Writer, legacy ...string) bool {
 	existing, _ := settings["statusLine"].(map[string]any)
-	if existing != nil {
-		cur, _ := existing["command"].(string)
-		switch {
-		case cur == command:
-			return false // already ours
-		case cur != "" && cur != legacy && filepath.Base(cur) != abtopStatuslineName:
-			fmt.Fprintf(stderr, "claudemux: leaving your statusLine (%s) alone; "+
-				"account meters need claudemux's own statusline command, so they will stay unavailable\n", cur)
-			return false
-		}
+	if existing == nil {
+		settings["statusLine"] = map[string]any{"type": "command", "command": command}
+		return true
 	}
-	settings["statusLine"] = map[string]any{"type": "command", "command": command}
+	cur, _ := existing["command"].(string)
+	switch {
+	case cur == command:
+		return false // already ours
+	case cur != "" && !slices.Contains(legacy, cur) && filepath.Base(cur) != abtopStatuslineName:
+		fmt.Fprintf(stderr, "claudemux: leaving your statusLine (%s) alone; "+
+			"account meters need claudemux's own statusline command, so they will stay unavailable\n", cur)
+		return false
+	}
+	existing["type"] = "command"
+	existing["command"] = command
 	return true
 }
