@@ -2,42 +2,17 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-// worktreeHookPath locates hooks/claudemux-worktree.sh relative to this test
-// file, so the test does not depend on the working directory or on the script
-// having been installed.
-func worktreeHookPath(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Join(filepath.Dir(thisFile), "..", "..", "hooks", "claudemux-worktree.sh")
-}
-
-// runWorktreeHook feeds payload to the hook with the given environment and
-// returns its stdout. env entries are "K=V"; the child gets ONLY these, so a
-// marker leaking in from the developer's shell cannot mask a failure.
+// runWorktreeHook feeds payload to the worktree hook with ONLY the given
+// environment ("K=V") visible and returns its stdout, so a marker leaking in
+// from the developer's shell cannot mask a failure.
 func runWorktreeHook(t *testing.T, payload string, env ...string) string {
 	t.Helper()
-	cmd := exec.Command("bash", worktreeHookPath(t))
-	cmd.Stdin = strings.NewReader(payload)
-	// append to an empty slice, not `cmd.Env = env`: a variadic call with no
-	// entries passes a NIL slice, and os/exec reads nil as "inherit the
-	// parent's environment" — which handed the no-marker case the marker from
-	// a claudemux-launched shell and failed the test it was meant to isolate.
-	cmd.Env = append([]string{}, env...)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("hook exited non-zero: %v (stdout %q)", err, out)
-	}
-	return string(out)
+	return runHookWithEnv(t, "worktree", payload, env)
 }
 
 func TestWorktreeHookSilentWithoutMarker(t *testing.T) {

@@ -137,7 +137,7 @@ type model struct {
 	selfPane string
 	paneDir  string
 
-	// askDir is where hooks/claudemux-ask.sh drops pending-AskUserQuestion
+	// askDir is where the ask hook drops pending-AskUserQuestion
 	// markers. Tests point it at a temp dir; "" disables the override.
 	askDir string
 
@@ -205,7 +205,7 @@ type model struct {
 	// worktreeTab is the tab label derived from the worktree this session
 	// created for itself — its name with dashes turned back into spaces. Set
 	// only when the head OBSERVES the session move from outside a worktree into
-	// one, which is the signature of hooks/claudemux-worktree.sh having worked
+	// one, which is the signature of the worktree hook having worked
 	// and therefore of a task-derived name. A session already in a worktree at
 	// startup is left alone: its name predates this feature (or was made by
 	// hand), and rendering "lovely wandering lovelace" as the tab would be
@@ -470,7 +470,7 @@ type model struct {
 
 	// worktreePending records that bin/claudemux marked this session as wanting
 	// a worktree (CLAUDEMUX_WORKTREE_PENDING). The launcher no longer creates
-	// one; hooks/claudemux-worktree.sh asks the model to — right before its
+	// one; the worktree hook asks the model to — right before its
 	// first change, not before. A marked session is therefore EXPECTED to run
 	// turn after turn outside a worktree while it reads and investigates. The
 	// failure the marking exists to prevent is work landing in the SHARED

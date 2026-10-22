@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,21 +27,27 @@ func writeSettings(t *testing.T, contents string) string {
 	return p
 }
 
-// stubScript creates fake shipped scripts in one directory and returns the
-// path to claudemux-map.sh, for --script to point at. Every script in
-// hookScripts is written, because hook ensure resolves the others as siblings
-// of the --script path — a directory holding only the map script is not a
-// layout that occurs in any real install.
-func stubScript(t *testing.T) string {
+// installedHookBinary is where hook ensure puts its copy of this binary under
+// the current HOME — what every registered command runs.
+func installedHookBinary(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	for _, hs := range hookScripts {
-		p := filepath.Join(dir, hs.name)
-		if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, ".claude", "hooks", hookBinaryName)
+}
+
+// hookCmd is the registered command for the hook named name.
+func hookCmd(t *testing.T, name string) string {
+	t.Helper()
+	for _, h := range claudemuxHooks {
+		if h.name == name {
+			return hookCommandFor(installedHookBinary(t), h)
 		}
 	}
-	return filepath.Join(dir, hookScriptName)
+	t.Fatalf("no hook named %q", name)
+	return ""
 }
 
 func readSettings(t *testing.T, path string) map[string]any {
@@ -104,12 +111,28 @@ func hookGroupMatcher(t *testing.T, settings map[string]any, event, command stri
 	return "", false
 }
 
+func sameStrings(got []string, want ...string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, g := range got {
+		seen[g]++
+	}
+	for _, w := range want {
+		if seen[w] == 0 {
+			return false
+		}
+		seen[w]--
+	}
+	return true
+}
+
 func TestHookEnsureFreshInstall(t *testing.T) {
 	p := writeSettings(t, "") // no settings.json at all
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("runHookEnsure() = %d, want 0; stderr=%q", code, stderr.String())
 	}
 
@@ -117,64 +140,55 @@ func TestHookEnsureFreshInstall(t *testing.T) {
 
 	// SessionStart carries only the pane-map hook: the worktree hook has
 	// nothing to record before a prompt exists.
-	start := hookCommands(t, s, "SessionStart")
-	if len(start) != 1 || filepath.Base(start[0]) != "claudemux-map.sh" {
-		t.Errorf("SessionStart = %v, want exactly claudemux-map.sh", start)
+	if start := hookCommands(t, s, "SessionStart"); !sameStrings(start, hookCmd(t, "map")) {
+		t.Errorf("SessionStart = %v, want exactly the map hook", start)
 	}
 
-	// UserPromptSubmit carries all three scripts, and only those: an exact
+	// UserPromptSubmit carries all three hooks, and only those: an exact
 	// count catches a duplicate-registration bug that a "contains" check
 	// would miss.
-	ups := hookCommands(t, s, "UserPromptSubmit")
-	if len(ups) != 3 {
-		t.Fatalf("UserPromptSubmit commands = %v, want exactly 3 entries", ups)
-	}
-	sawMap := false
-	for _, c := range ups {
-		if filepath.Base(c) == "claudemux-map.sh" {
-			sawMap = true
-		}
-	}
-	if !sawMap {
-		t.Errorf("UserPromptSubmit = %v, want claudemux-map.sh registered", ups)
+	if ups := hookCommands(t, s, "UserPromptSubmit"); !sameStrings(ups, hookCmd(t, "map"), hookCmd(t, "worktree"), hookCmd(t, "ask")) {
+		t.Errorf("UserPromptSubmit = %v, want exactly map, worktree and ask", ups)
 	}
 }
 
-// The hook script must be copied to a STABLE path, not referenced where it
+// The hooks must run from a STABLE copy of this binary, not from wherever it
 // happened to be installed — a Homebrew libexec path would break on upgrade.
-func TestHookEnsureCopiesScriptToStablePath(t *testing.T) {
+func TestHookEnsureInstallsBinaryToStablePath(t *testing.T) {
 	writeSettings(t, "")
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("runHookEnsure() = %d, want 0", code)
 	}
 
-	home, _ := os.UserHomeDir()
-	installed := filepath.Join(home, ".claude", "hooks", "claudemux-map.sh")
+	installed := installedHookBinary(t)
 	info, err := os.Stat(installed)
 	if err != nil {
-		t.Fatalf("hook script not copied to %s: %v", installed, err)
+		t.Fatalf("binary not copied to %s: %v", installed, err)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		t.Errorf("installed hook is not executable (mode %v) — Claude Code cannot run it", info.Mode().Perm())
+		t.Errorf("installed binary is not executable (mode %v) — Claude Code cannot run it", info.Mode().Perm())
+	}
+	self, _ := os.Executable()
+	want, _ := os.ReadFile(self)
+	if got, _ := os.ReadFile(installed); !bytes.Equal(got, want) {
+		t.Error("installed binary is not a copy of the running one")
 	}
 }
 
 // Running twice must not duplicate the entries, and must not rewrite the file.
 func TestHookEnsureIsIdempotent(t *testing.T) {
 	p := writeSettings(t, "")
-	script := stubScript(t)
 
 	var b1, b2 bytes.Buffer
-	runHookEnsure([]string{"--script", script}, &b1, &b1)
+	runHookEnsure(nil, &b1, &b1)
 	first, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+	if code := runHookEnsure(nil, &b2, &b2); code != 0 {
 		t.Fatalf("second runHookEnsure() = %d, want 0", code)
 	}
 	second, err := os.ReadFile(p)
@@ -185,13 +199,19 @@ func TestHookEnsureIsIdempotent(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Error("settings.json changed on the second run — hook ensure must be a no-op when already present")
 	}
+	if b2.String() != "" {
+		t.Errorf("second run said %q, want silence", b2.String())
+	}
 	s := readSettings(t, p)
 	if got := len(hookCommands(t, s, "SessionStart")); got != 1 {
 		t.Errorf("SessionStart has %d commands after two runs, want 1 — the entry was duplicated", got)
 	}
+	if got := len(hookCommands(t, s, "UserPromptSubmit")); got != 3 {
+		t.Errorf("UserPromptSubmit has %d commands after two runs, want 3", got)
+	}
 }
 
-// The statusline artifact is this whole binary (potentially tens of MB), and
+// The installed binary is this whole binary (potentially tens of MB), and
 // hook ensure runs on every launch of bin/claudemux — so a second run must
 // not rewrite it when it is already current. copyExecutableIfChanged must
 // skip the write.
@@ -206,40 +226,38 @@ func TestHookEnsureIsIdempotent(t *testing.T) {
 // runHookEnsure returns 4. The exit code alone proves the write was
 // skipped, not merely that it wrote identical bytes again — and the byte
 // comparison confirms the destination still holds the current binary.
-func TestHookEnsureDoesNotRewriteUnchangedStatusline(t *testing.T) {
+func TestHookEnsureDoesNotRewriteUnchangedBinary(t *testing.T) {
 	writeSettings(t, "")
-	script := stubScript(t)
 
 	var b1, b2 bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &b1, &b1); code != 0 {
+	if code := runHookEnsure(nil, &b1, &b1); code != 0 {
 		t.Fatalf("first runHookEnsure() = %d, want 0 (stderr %s)", code, b1.String())
 	}
 
-	home, _ := os.UserHomeDir()
-	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
-	wantBytes, err := os.ReadFile(slPath)
+	binPath := installedHookBinary(t)
+	wantBytes, err := os.ReadFile(binPath)
 	if err != nil {
-		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
+		t.Fatalf("binary not installed at %s: %v", binPath, err)
 	}
 
-	if err := os.Chmod(slPath, 0o444); err != nil {
-		t.Fatalf("chmod %s read-only: %v", slPath, err)
+	if err := os.Chmod(binPath, 0o444); err != nil {
+		t.Fatalf("chmod %s read-only: %v", binPath, err)
 	}
 	// Restore write permission before t.TempDir()'s own cleanup tries to
 	// remove the directory tree; t.Cleanup runs LIFO, so this (registered
-	// after writeSettings/stubScript's t.TempDir calls) runs first.
-	t.Cleanup(func() { _ = os.Chmod(slPath, 0o755) })
+	// after writeSettings's t.TempDir call) runs first.
+	t.Cleanup(func() { _ = os.Chmod(binPath, 0o755) })
 
-	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
-		t.Fatalf("second runHookEnsure() = %d, want 0 — the write must be skipped when the artifact is already current, even with the destination read-only (stderr %s)", code, b2.String())
+	if code := runHookEnsure(nil, &b2, &b2); code != 0 {
+		t.Fatalf("second runHookEnsure() = %d, want 0 — the write must be skipped when the binary is already current, even with the destination read-only (stderr %s)", code, b2.String())
 	}
 
-	got, err := os.ReadFile(slPath)
+	got, err := os.ReadFile(binPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, wantBytes) {
-		t.Error("statusline artifact content changed after the second run, want it untouched")
+		t.Error("installed binary changed after the second run, want it untouched")
 	}
 }
 
@@ -260,10 +278,9 @@ func TestHookEnsurePreservesUnrelatedKeysAndHooks(t *testing.T) {
   }
 }`
 	p := writeSettings(t, orig)
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("runHookEnsure() = %d, want 0; stderr=%q", code, stderr.String())
 	}
 
@@ -280,37 +297,14 @@ func TestHookEnsurePreservesUnrelatedKeysAndHooks(t *testing.T) {
 	}
 
 	// Another tool's SessionStart hook must survive alongside ours.
-	cmds := hookCommands(t, s, "SessionStart")
-	var sawOther, sawOurs bool
-	for _, c := range cmds {
-		if c == "/other/tool.sh" {
-			sawOther = true
-		}
-		if filepath.Base(c) == "claudemux-map.sh" {
-			sawOurs = true
-		}
-	}
-	if !sawOther {
-		t.Error("another tool's SessionStart hook was clobbered")
-	}
-	if !sawOurs {
-		t.Error("our hook was not registered on SessionStart")
+	if cmds := hookCommands(t, s, "SessionStart"); !sameStrings(cmds, "/other/tool.sh", hookCmd(t, "map")) {
+		t.Errorf("SessionStart = %v, want the other tool's hook beside ours", cmds)
 	}
 
 	// An unrelated hook on an event we also register on must survive
-	// alongside ours (the ask hook now claims PreToolUse too).
-	pre := hookCommands(t, s, "PreToolUse")
-	var sawUnrelated, sawAsk bool
-	for _, c := range pre {
-		if c == "/unrelated/event.sh" {
-			sawUnrelated = true
-		}
-		if filepath.Base(c) == "claudemux-ask.sh" {
-			sawAsk = true
-		}
-	}
-	if !sawUnrelated || !sawAsk || len(pre) != 2 {
-		t.Errorf("PreToolUse = %v, want the unrelated hook preserved beside claudemux-ask.sh", pre)
+	// alongside ours (the ask hook claims PreToolUse too).
+	if pre := hookCommands(t, s, "PreToolUse"); !sameStrings(pre, "/unrelated/event.sh", hookCmd(t, "ask")) {
+		t.Errorf("PreToolUse = %v, want the unrelated hook preserved beside the ask hook", pre)
 	}
 }
 
@@ -319,10 +313,9 @@ func TestHookEnsurePreservesUnrelatedKeysAndHooks(t *testing.T) {
 func TestHookEnsureRefusesMalformedSettings(t *testing.T) {
 	orig := `{"model": "opus", TRUNCATED`
 	p := writeSettings(t, orig)
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	code := runHookEnsure([]string{"--script", script}, &stdout, &stderr)
+	code := runHookEnsure(nil, &stdout, &stderr)
 
 	if code != 3 {
 		t.Errorf("runHookEnsure() = %d, want 3 for a malformed settings.json", code)
@@ -340,23 +333,20 @@ func TestHookEnsureRefusesMalformedSettings(t *testing.T) {
 }
 
 // Malformed settings.json must leave the operation a COMPLETE no-op: not just
-// refusing to write the config, but also refusing to copy the hook script.
-// A half-done install (script copied but settings not updated) is worse than
-// no install at all — the hook directive points to a path that may disappear
-// or be out of sync.
+// refusing to write the config, but also refusing to install the binary or
+// shim anything. A half-done install (files in place but settings not
+// updated) is worse than no install at all.
 func TestHookEnsureMalformedSettingsCopiesNothing(t *testing.T) {
 	orig := `{"model": "opus", TRUNCATED`
 	settingsPath := writeSettings(t, orig)
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	code := runHookEnsure([]string{"--script", script}, &stdout, &stderr)
+	code := runHookEnsure(nil, &stdout, &stderr)
 
 	if code != 3 {
 		t.Fatalf("runHookEnsure() = %d, want 3 for a malformed settings.json", code)
 	}
 
-	// Verify settings.json was not touched
 	after, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)
@@ -365,43 +355,35 @@ func TestHookEnsureMalformedSettingsCopiesNothing(t *testing.T) {
 		t.Error("settings.json was modified despite being unparseable — it must be left exactly as found")
 	}
 
-	// Verify the hook script was not copied
-	home, _ := os.UserHomeDir()
-	hooksDir := filepath.Join(home, ".claude", "hooks")
-	installed := filepath.Join(hooksDir, hookScriptName)
-
-	if _, err := os.Stat(installed); !os.IsNotExist(err) {
-		t.Errorf("hook script was copied despite malformed config: %v — a half-done install is worse than none", err)
-	}
-
+	hooksDir := filepath.Dir(installedHookBinary(t))
 	if _, err := os.Stat(hooksDir); !os.IsNotExist(err) {
 		t.Errorf("hooks/ directory was created despite malformed config — a half-done install is worse than none")
 	}
 }
 
 // The exit-2 usage path must be exercised: an unknown flag should return 2
-// and report the error to stderr.
+// and report the error to stderr. `--script` is one now: it pointed at the
+// bash scripts this binary replaced, and nothing passes it any more.
 func TestHookEnsureUsageErrorOnUnknownFlag(t *testing.T) {
 	writeSettings(t, "")
 
-	var stdout, stderr bytes.Buffer
-	code := runHookEnsure([]string{"--bogus"}, &stdout, &stderr)
-
-	if code != 2 {
-		t.Errorf("runHookEnsure(--bogus) = %d, want 2 for usage error", code)
-	}
-	if stderr.String() == "" {
-		t.Error("stderr empty, want usage error reported")
+	for _, flag := range []string{"--bogus", "--script"} {
+		var stdout, stderr bytes.Buffer
+		if code := runHookEnsure([]string{flag, "x"}, &stdout, &stderr); code != 2 {
+			t.Errorf("runHookEnsure(%s) = %d, want 2 for usage error", flag, code)
+		}
+		if stderr.String() == "" {
+			t.Errorf("%s: stderr empty, want usage error reported", flag)
+		}
 	}
 }
 
 // A backup must exist before we overwrite a file that had content.
 func TestHookEnsureBacksUpBeforeWriting(t *testing.T) {
 	p := writeSettings(t, `{"model": "opus"}`)
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("runHookEnsure() = %d, want 0", code)
 	}
 
@@ -421,55 +403,40 @@ func TestHookEnsureBacksUpBeforeWriting(t *testing.T) {
 	}
 }
 
-func TestHookEnsureRegistersAllScripts(t *testing.T) {
+func TestHookEnsureRegistersAllHooks(t *testing.T) {
 	settingsPath := writeSettings(t, "")
-	script := stubScript(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("hook ensure = %d, want 0 (stderr %s)", code, stderr.String())
 	}
 
 	settings := readSettings(t, settingsPath)
 	ups := hookCommands(t, settings, "UserPromptSubmit")
-	if len(ups) != 3 {
-		t.Fatalf("UserPromptSubmit commands = %v, want 3 entries", ups)
-	}
-	var sawMap, sawWorktree, sawAsk bool
-	for _, c := range ups {
-		switch filepath.Base(c) {
-		case "claudemux-map.sh":
-			sawMap = true
-		case "claudemux-worktree.sh":
-			sawWorktree = true
-		case "claudemux-ask.sh":
-			sawAsk = true
-		}
-	}
-	if !sawMap || !sawWorktree || !sawAsk {
-		t.Errorf("UserPromptSubmit = %v, want all three scripts", ups)
+	if !sameStrings(ups, hookCmd(t, "map"), hookCmd(t, "worktree"), hookCmd(t, "ask")) {
+		t.Errorf("UserPromptSubmit = %v, want all three hooks", ups)
 	}
 
 	// The worktree hook has nothing to record at session start; registering it
 	// on SessionStart would inject its instruction before a prompt exists.
-	start := hookCommands(t, settings, "SessionStart")
-	if len(start) != 1 || filepath.Base(start[0]) != "claudemux-map.sh" {
-		t.Errorf("SessionStart = %v, want only claudemux-map.sh", start)
+	if start := hookCommands(t, settings, "SessionStart"); !sameStrings(start, hookCmd(t, "map")) {
+		t.Errorf("SessionStart = %v, want only the map hook", start)
 	}
 
 	// The ask hook needs the tool-call events, and must be alone there: no
-	// other claudemux script has business running on every tool call.
+	// other claudemux hook has business running on every tool call.
 	for _, event := range []string{"PreToolUse", "PostToolUse"} {
 		cmds := hookCommands(t, settings, event)
-		if len(cmds) != 1 || filepath.Base(cmds[0]) != "claudemux-ask.sh" {
-			t.Errorf("%s = %v, want only claudemux-ask.sh", event, cmds)
+		if !sameStrings(cmds, hookCmd(t, "ask")) {
+			t.Errorf("%s = %v, want only the ask hook", event, cmds)
+			continue
 		}
 		// Without a matcher this hook would run on every tool call of every
-		// session, spawning bash+jq twice per call just to exit at the
+		// session, spawning a process twice per call just to exit at the
 		// tool-name check.
 		matcher, hasKey := hookGroupMatcher(t, settings, event, cmds[0])
 		if !hasKey || matcher != "AskUserQuestion" {
-			t.Errorf("%s claudemux-ask.sh matcher = %q (present=%v), want \"AskUserQuestion\"", event, matcher, hasKey)
+			t.Errorf("%s ask hook matcher = %q (present=%v), want \"AskUserQuestion\"", event, matcher, hasKey)
 		}
 	}
 
@@ -477,135 +444,185 @@ func TestHookEnsureRegistersAllScripts(t *testing.T) {
 	// no matcher to stay cheap — and must not have one: every tool's dialog
 	// blocks the session the same way.
 	perm := hookCommands(t, settings, "PermissionRequest")
-	if len(perm) != 1 || filepath.Base(perm[0]) != "claudemux-ask.sh" {
-		t.Errorf("PermissionRequest = %v, want only claudemux-ask.sh", perm)
+	if !sameStrings(perm, hookCmd(t, "ask")) {
+		t.Errorf("PermissionRequest = %v, want only the ask hook", perm)
 	} else if matcher, hasKey := hookGroupMatcher(t, settings, "PermissionRequest", perm[0]); hasKey {
-		t.Errorf("PermissionRequest claudemux-ask.sh has matcher %q, want no matcher key", matcher)
+		t.Errorf("PermissionRequest ask hook has matcher %q, want no matcher key", matcher)
 	}
 
-	// UserPromptSubmit is not a tool-call event: none of the three scripts'
+	// UserPromptSubmit is not a tool-call event: none of the three hooks'
 	// entries there may carry a matcher key, empty or otherwise.
 	for _, c := range ups {
 		if matcher, hasKey := hookGroupMatcher(t, settings, "UserPromptSubmit", c); hasKey {
-			t.Errorf("UserPromptSubmit %s has matcher %q, want no matcher key at all", filepath.Base(c), matcher)
+			t.Errorf("UserPromptSubmit %s has matcher %q, want no matcher key at all", c, matcher)
 		}
 	}
 }
 
-func TestHookEnsureDoesNotDuplicateOnSecondRun(t *testing.T) {
-	settingsPath := writeSettings(t, "")
-	script := stubScript(t)
-
-	var stdout, stderr bytes.Buffer
-	for i := 0; i < 2; i++ {
-		if code := runHookEnsure([]string{"--script", script}, &stdout, &stderr); code != 0 {
-			t.Fatalf("run %d: hook ensure = %d (stderr %s)", i, code, stderr.String())
-		}
-	}
-
-	settings := readSettings(t, settingsPath)
-	if got := hookCommands(t, settings, "UserPromptSubmit"); len(got) != 3 {
-		t.Errorf("UserPromptSubmit after two runs = %v, want 3 entries", got)
-	}
+// legacySettings is a settings.json as the bash-script releases left it, with
+// another tool's hooks mixed in — one of them sharing a group with ours.
+func legacySettings(hooksDir string) string {
+	sh := func(name string) string { return filepath.Join(hooksDir, name) }
+	return `{
+  "model": "opus",
+  "statusLine": {"type": "command", "command": "` + sh("claudemux-statusline") + ` statusline"},
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "` + sh("claudemux-map.sh") + `"}]},
+      {"hooks": [{"type": "command", "command": "/other/tool.sh"}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "` + sh("claudemux-map.sh") + `"}]},
+      {"hooks": [{"type": "command", "command": "` + sh("claudemux-worktree.sh") + `"},
+                 {"type": "command", "command": "/other/prompt.sh"}]},
+      {"hooks": [{"type": "command", "command": "` + sh("claudemux-ask.sh") + `"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "` + sh("claudemux-ask.sh") + `"}]},
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "/other/bash-guard.sh"}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "` + sh("claudemux-ask.sh") + `"}]}
+    ],
+    "PermissionRequest": [
+      {"hooks": [{"type": "command", "command": "` + sh("claudemux-ask.sh") + `"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "bash ` + sh("claudemux-ask.sh") + `"}]}
+    ]
+  }
+}`
 }
 
-// If a later shipped script is missing, nothing must be copied and
-// settings.json must stay untouched — including the earlier script(s) that
-// would otherwise have resolved and copied fine. A half-done install (one
-// script live, settings unregistered) is worse than none: the old
-// single-script code could not produce that state, and the multi-script loop
-// must not either.
-func TestHookEnsureMissingScriptCopiesNothing(t *testing.T) {
-	writeSettings(t, "") // no settings.json at all
-
-	// Lay down only the FIRST shipped script; the second is missing — exactly
-	// the install.sh/release.yml gap this task's own addendum fixed.
-	dir := t.TempDir()
-	first := hookScripts[0]
-	if err := os.WriteFile(filepath.Join(dir, first.name), []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(dir, hookScriptName)
-
-	var stdout, stderr bytes.Buffer
-	code := runHookEnsure([]string{"--script", script}, &stdout, &stderr)
-	if code != 4 {
-		t.Fatalf("runHookEnsure() = %d, want 4 when a shipped script is missing (stderr %s)", code, stderr.String())
-	}
-
-	home, _ := os.UserHomeDir()
-
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
-	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
-		t.Errorf("settings.json exists (err=%v), want it never written when a shipped script is missing", err)
-	}
-
+// An install from before the Go hooks: every old script entry is replaced by
+// its Go command — none left, none duplicated — and nothing that is not ours
+// moves, including a hook that shared a group with one of ours.
+func TestHookEnsureMigratesLegacyScriptEntries(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
 	hooksDir := filepath.Join(home, ".claude", "hooks")
-	for _, hs := range hookScripts {
-		if _, err := os.Stat(filepath.Join(hooksDir, hs.name)); !os.IsNotExist(err) {
-			t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", hs.name, hooksDir)
-		}
-	}
-
-	// The statusline artifact must be absent too. The current code is safe by
-	// ordering — validation returns 4 strictly before any copy, including the
-	// statusline's — but that guarantee is only real if a test pins it; without
-	// this a future reordering that copied the statusline before validation
-	// finished would go undetected.
-	if _, err := os.Stat(filepath.Join(hooksDir, statuslineScriptName)); !os.IsNotExist(err) {
-		t.Errorf("%s was copied to %s despite a missing shipped script — a partial install is worse than none", statuslineScriptName, hooksDir)
-	}
-}
-
-// The development layout keeps the shipped scripts in the repo and puts only a
-// symlinked `claudemux` on PATH, while claudemux-head is a `go install` output
-// in GOBIN — so the scripts are NOT siblings of the running binary. Resolution
-// must fall through to the claudemux on PATH, exactly as shippedScriptPath
-// already does for project-color-resolve.sh.
-//
-// This is a regression test with a real scar: hook ensure resolved siblings of
-// the binary only. That was survivable while a missing script merely skipped one
-// hook, and stopped being survivable once validate-all-before-copy-any made any
-// single miss fatal — a dev checkout then registered NOTHING, losing the
-// pane-map hook along with the worktree hook.
-func TestHookEnsureResolvesScriptsViaClaudemuxOnPath(t *testing.T) {
-	writeSettings(t, "")
-
-	// Mirror the REPO's shape, not a flat directory: claudemux in bin/, the hook
-	// scripts in hooks/ beside it. A flat layout passes even without the hooks/
-	// candidate — which is exactly how the first attempt at this fix shipped
-	// green and still failed on a real checkout.
-	repo := t.TempDir()
-	binDir := filepath.Join(repo, "bin")
-	hooksDir := filepath.Join(repo, "hooks")
-	for _, d := range []string{binDir, hooksDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claudemux"),
-		[]byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, hs := range hookScripts {
-		if err := os.WriteFile(filepath.Join(hooksDir, hs.name),
-			[]byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(p, []byte(legacySettings(hooksDir)), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	pathDir := binDir
-	t.Setenv("PATH", pathDir)
 
 	var stdout, stderr bytes.Buffer
 	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("runHookEnsure() = %d, want 0 in the development layout (stderr %s)", code, stderr.String())
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	s := readSettings(t, p)
+
+	want := map[string][]string{
+		"SessionStart":      {hookCmd(t, "map"), "/other/tool.sh"},
+		"UserPromptSubmit":  {hookCmd(t, "map"), hookCmd(t, "worktree"), hookCmd(t, "ask"), "/other/prompt.sh"},
+		"PreToolUse":        {hookCmd(t, "ask"), "/other/bash-guard.sh"},
+		"PostToolUse":       {hookCmd(t, "ask")},
+		"PermissionRequest": {hookCmd(t, "ask")},
+	}
+	for event, cmds := range want {
+		if got := hookCommands(t, s, event); !sameStrings(got, cmds...) {
+			t.Errorf("%s = %v, want %v", event, got, cmds)
+		}
+	}
+	// The hand-added Stop entry ran a script that no longer ships; its group
+	// emptied, and so did the event, so neither is left as an empty husk.
+	if hooks := s["hooks"].(map[string]any); hooks["Stop"] != nil {
+		t.Errorf("Stop = %v, want the event removed once its only hook was", hooks["Stop"])
+	}
+	// The other tool's PreToolUse matcher is untouched, and ours is restored.
+	if m, _ := hookGroupMatcher(t, s, "PreToolUse", "/other/bash-guard.sh"); m != "Bash" {
+		t.Errorf("the other tool's PreToolUse matcher = %q, want \"Bash\"", m)
+	}
+	if m, _ := hookGroupMatcher(t, s, "PreToolUse", hookCmd(t, "ask")); m != "AskUserQuestion" {
+		t.Errorf("ask hook PreToolUse matcher = %q, want \"AskUserQuestion\"", m)
+	}
+	if cmd, _ := statusLineCommand(t, s); cmd != shQuote(installedHookBinary(t))+" statusline" {
+		t.Errorf("statusLine = %q, want the legacy claudemux statusline taken over", cmd)
+	}
+	if s["model"] != "opus" {
+		t.Errorf("model = %v, want it preserved", s["model"])
 	}
 
-	home, _ := os.UserHomeDir()
-	settings := readSettings(t, filepath.Join(home, ".claude", "settings.json"))
-	ups := hookCommands(t, settings, "UserPromptSubmit")
-	if len(ups) != 3 {
-		t.Errorf("UserPromptSubmit = %v, want all three scripts registered from the PATH-resolved layout", ups)
+	// A second run finds nothing left to migrate.
+	before, _ := os.ReadFile(p)
+	var again bytes.Buffer
+	if code := runHookEnsure(nil, &again, &again); code != 0 {
+		t.Fatalf("second runHookEnsure() = %d (stderr %s)", code, again.String())
+	}
+	if after, _ := os.ReadFile(p); !bytes.Equal(before, after) {
+		t.Error("settings.json changed on the run after the migration")
+	}
+}
+
+// Claude Code snapshots hook commands at session start, so sessions that were
+// running when the upgrade landed keep invoking the old files. Each old file
+// that is present becomes a shim into the new binary; none is created where
+// there was none.
+func TestHookEnsureShimsLegacyFilesThatExist(t *testing.T) {
+	writeSettings(t, "")
+	hooksDir := filepath.Dir(installedHookBinary(t))
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"claudemux-map.sh", "claudemux-statusline"} {
+		if err := os.WriteFile(filepath.Join(hooksDir, name), []byte("old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+
+	bin := installedHookBinary(t)
+	for name, wantArgs := range map[string]string{"claudemux-map.sh": "hook map", "claudemux-statusline": `"$@"`} {
+		got, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, legacyShim(bin, wantArgs)) {
+			t.Errorf("%s = %q, want the shim into %s %s", name, got, bin, wantArgs)
+		}
+	}
+	for _, name := range []string{"claudemux-ask.sh", "claudemux-worktree.sh"} {
+		if _, err := os.Stat(filepath.Join(hooksDir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s was created (err=%v); only files that already existed get a shim", name, err)
+		}
+	}
+}
+
+// The shim has to be a faithful pass-through: same stdin, same stdout, same
+// exit code — and a binary path with a space or a quote in it must survive
+// the shell.
+func TestLegacyShimPassesThrough(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	dir := filepath.Join(t.TempDir(), "it's a dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(dir, "claudemux-head")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"args:$*\"\ncat\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(dir, "claudemux-ask.sh")
+	if err := os.WriteFile(shim, legacyShim(fake, "hook ask"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(shim)
+	cmd.Stdin = strings.NewReader(`{"payload":1}`)
+	out, err := cmd.Output()
+	ee, ok := err.(*exec.ExitError)
+	if !ok || ee.ExitCode() != 7 {
+		t.Fatalf("shim exit = %v, want the wrapped command's 7", err)
+	}
+	if string(out) != "args:hook ask\n{\"payload\":1}" {
+		t.Errorf("shim stdout = %q", out)
 	}
 }
 
@@ -684,8 +701,401 @@ func TestSetStatusLineIdempotent(t *testing.T) {
 	}
 }
 
-// The statusline artifact is this whole ~16MB binary, and Claude Code executes
-// it on every statusline render of every session on the machine. An in-place
+// The statusline command from before the installed binary was renamed is
+// ours, not a third party's: it is taken over, silently.
+func TestSetStatusLineTakesOverLegacy(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/h/claudemux-statusline statusline",
+	}}
+	var errBuf bytes.Buffer
+	if !setStatusLine(settings, "/h/claudemux-head statusline", &errBuf, "/h/claudemux-statusline statusline") {
+		t.Fatal("setStatusLine reported no change, want it to take over the legacy command")
+	}
+	if cmd, _ := statusLineCommand(t, settings); cmd != "/h/claudemux-head statusline" {
+		t.Errorf("statusLine command = %q, want ours", cmd)
+	}
+	if errBuf.String() != "" {
+		t.Errorf("stderr = %q, want silence", errBuf.String())
+	}
+}
+
+// Taking over a slot we own swaps the command, not the object: anything else
+// the user set on their statusLine, such as padding, stays.
+func TestSetStatusLineTakeoverKeepsOtherKeys(t *testing.T) {
+	settings := map[string]any{"statusLine": map[string]any{
+		"type": "command", "command": "/h/claudemux-statusline statusline", "padding": 2.0,
+	}}
+	var errBuf bytes.Buffer
+	if !setStatusLine(settings, "/h/claudemux-head statusline", &errBuf, "/h/claudemux-statusline statusline") {
+		t.Fatal("setStatusLine reported no change, want it to take over the legacy command")
+	}
+	sl := settings["statusLine"].(map[string]any)
+	if sl["command"] != "/h/claudemux-head statusline" || sl["type"] != "command" {
+		t.Errorf("statusLine = %v, want our command", sl)
+	}
+	if sl["padding"] != 2.0 {
+		t.Errorf("statusLine padding = %v, want the user's 2 kept", sl["padding"])
+	}
+}
+
+// Claude Code runs every hook command through a shell, so the binary path has
+// to be quoted for it: shQuote must round-trip anything a HOME can contain.
+func TestShQuoteRoundTrips(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	for _, s := range []string{"/plain/path", "/with space/x", "/it's/x", `/a"b$c\d` + "`e`", "''", ""} {
+		out, err := exec.Command("sh", "-c", "printf %s "+shQuote(s)).Output()
+		if err != nil {
+			t.Fatalf("sh -c with shQuote(%q): %v", s, err)
+		}
+		if string(out) != s {
+			t.Errorf("shQuote(%q) came back from sh as %q", s, out)
+		}
+	}
+}
+
+// A HOME with a space (and a quote) in it: every registered command still runs
+// the installed binary, because the path is quoted for the shell Claude Code
+// runs it through.
+func TestHookEnsureQuotesTheBinaryPath(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "it's my home")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".claude", "settings.json")
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	s := readSettings(t, p)
+	bin := installedHookBinary(t)
+	if got := hookCommands(t, s, "PermissionRequest"); !sameStrings(got, shQuote(bin)+" hook ask") {
+		t.Errorf("PermissionRequest = %v, want the quoted %s hook ask", got, bin)
+	}
+	if cmd, _ := statusLineCommand(t, s); cmd != shQuote(bin)+" statusline" {
+		t.Errorf("statusLine = %q, want the quoted %s statusline", cmd, bin)
+	}
+
+	// And the shell really does run the right file with the right arguments.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	fake := filepath.Join(t.TempDir(), "a dir's name", hookBinaryName)
+	if err := os.MkdirAll(filepath.Dir(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"args:$*\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", hookCommandFor(fake, claudemuxHooks[0])).Output()
+	if err != nil {
+		t.Fatalf("sh -c %q: %v", hookCommandFor(fake, claudemuxHooks[0]), err)
+	}
+	if string(out) != "args:hook "+claudemuxHooks[0].name+"\n" {
+		t.Errorf("hook command printed %q", out)
+	}
+}
+
+// Releases before the path was quoted registered the bare form. Those entries
+// are ours and are replaced, not left beside the quoted ones to run twice.
+func TestHookEnsureMigratesUnquotedCommands(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	bin := filepath.Join(hooksDir, hookBinaryName)
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(p, []byte(`{
+  "statusLine": {"type": "command", "command": "`+bin+` statusline", "padding": 2},
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "`+bin+` hook map"}]}],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "`+bin+` hook map"}]},
+      {"hooks": [{"type": "command", "command": "`+bin+` hook worktree"}]},
+      {"hooks": [{"type": "command", "command": "`+bin+` hook ask"}]}
+    ],
+    "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "`+bin+` hook ask"}]}]
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	s := readSettings(t, p)
+	want := map[string][]string{
+		"SessionStart":      {hookCmd(t, "map")},
+		"UserPromptSubmit":  {hookCmd(t, "map"), hookCmd(t, "worktree"), hookCmd(t, "ask")},
+		"PreToolUse":        {hookCmd(t, "ask")},
+		"PostToolUse":       {hookCmd(t, "ask")},
+		"PermissionRequest": {hookCmd(t, "ask")},
+	}
+	for event, cmds := range want {
+		if got := hookCommands(t, s, event); !sameStrings(got, cmds...) {
+			t.Errorf("%s = %v, want %v", event, got, cmds)
+		}
+	}
+	sl, _ := s["statusLine"].(map[string]any)
+	if sl["command"] != shQuote(bin)+" statusline" {
+		t.Errorf("statusLine command = %v, want the quoted form", sl["command"])
+	}
+	if sl["padding"] != 2.0 {
+		t.Errorf("statusLine padding = %v, want it kept", sl["padding"])
+	}
+
+	before, _ := os.ReadFile(p)
+	var again bytes.Buffer
+	if code := runHookEnsure(nil, &again, &again); code != 0 {
+		t.Fatalf("second runHookEnsure() = %d (stderr %s)", code, again.String())
+	}
+	if after, _ := os.ReadFile(p); !bytes.Equal(before, after) {
+		t.Error("settings.json changed on the run after the migration")
+	}
+	if again.Len() != 0 {
+		t.Errorf("second run output = %q, want nothing", again.String())
+	}
+}
+
+// settings.json is replaced atomically, and a user who locked it down to 0600
+// keeps it that way.
+func TestHookEnsureKeepsSettingsMode(t *testing.T) {
+	p := writeSettings(t, `{"model": "opus"}`)
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("settings.json mode = %v, want the user's 0600 kept", info.Mode().Perm())
+	}
+	if readSettings(t, p)["model"] != "opus" {
+		t.Error("model lost")
+	}
+}
+
+// The backup holds the same contents as settings.json, env tokens included,
+// so it must be no more readable than the file it copies.
+func TestHookEnsureBackupKeepsSettingsMode(t *testing.T) {
+	p := writeSettings(t, `{"model": "opus"}`)
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	matches, err := filepath.Glob(p + ".bak-*")
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("backups = %v (err %v), want exactly 1", matches, err)
+	}
+	info, err := os.Stat(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("backup mode = %v, want settings.json's 0600", info.Mode().Perm())
+	}
+}
+
+// Dotfiles users keep settings.json as a symlink into their repo. The write
+// lands in the link's target; the link itself survives.
+func TestHookEnsureFollowsSymlinkedSettings(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	target := filepath.Join(t.TempDir(), "dotfiles-settings.json")
+	if err := os.WriteFile(target, []byte(legacySettings(hooksDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json mode = %v, want it still a symlink", info.Mode())
+	}
+	s := readSettings(t, target)
+	if got := hookCommands(t, s, "SessionStart"); !sameStrings(got, hookCmd(t, "map"), "/other/tool.sh") {
+		t.Errorf("target SessionStart = %v, want the migrated hooks", got)
+	}
+	if s["model"] != "opus" {
+		t.Errorf("model = %v, want it preserved", s["model"])
+	}
+}
+
+// A dotfiles link whose target does not exist yet (a fresh machine) gets its
+// target created; the link itself survives.
+func TestHookEnsureCreatesDanglingSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	dot := filepath.Join(root, "dot")
+	if err := os.MkdirAll(dot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.Symlink(filepath.Join("..", "..", "dot", "settings.json"), p); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("runHookEnsure() = %d, want 0 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json mode = %v, want it still a symlink", info.Mode())
+	}
+	s := readSettings(t, filepath.Join(dot, "settings.json"))
+	if got := hookCommands(t, s, "SessionStart"); !sameStrings(got, hookCmd(t, "map")) {
+		t.Errorf("target SessionStart = %v, want the registered map hook", got)
+	}
+}
+
+// A relative link inside a symlinked ~/.claude resolves from the directory it
+// really lives in, as the kernel does, not from the textual path.
+func TestHookEnsureRelativeLinkInSymlinkedClaudeDir(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	claudeDir := filepath.Join(root, "dotfiles", "claude")
+	common := filepath.Join(root, "dotfiles", "common")
+	for _, d := range []string{claudeDir, common} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(claudeDir, filepath.Join(home, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "common", "settings.json"), filepath.Join(claudeDir, "settings.json")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(common, "settings.json")
+	for _, existing := range []bool{false, true} {
+		if existing {
+			if err := os.WriteFile(target, []byte(`{"model": "opus"}`+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var stdout, stderr bytes.Buffer
+		if code := runHookEnsure(nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("existing=%v: runHookEnsure() = %d, want 0 (stderr %s)", existing, code, stderr.String())
+		}
+		info, err := os.Lstat(filepath.Join(claudeDir, "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("existing=%v: settings.json mode = %v, want it still a symlink", existing, info.Mode())
+		}
+		s := readSettings(t, target)
+		if got := hookCommands(t, s, "SessionStart"); !sameStrings(got, hookCmd(t, "map")) {
+			t.Errorf("existing=%v: target SessionStart = %v, want the registered map hook", existing, got)
+		}
+	}
+}
+
+// A link whose target cannot be created is refused rather than replaced by a
+// regular file.
+func TestHookEnsureRefusesUnwritableSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.Symlink(filepath.Join(root, "missing-dir", "settings.json"), p); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 4 {
+		t.Fatalf("runHookEnsure() = %d, want 4 (stderr %s)", code, stderr.String())
+	}
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings.json mode = %v, want it still a symlink", info.Mode())
+	}
+}
+
+// A legacy file that cannot be replaced by its shim is reported (exit 4, the
+// file named) but costs nothing else: settings.json is still migrated and the
+// skills are still installed.
+func TestHookEnsureShimFailureStillRegistersAndInstallsSkills(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	t.Setenv("HOME", home)
+	// A directory where the old script was: it "exists", so a shim is due,
+	// and no file can be renamed over it.
+	blocked := filepath.Join(hooksDir, "claudemux-ask.sh")
+	if err := os.MkdirAll(filepath.Join(blocked, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(p, []byte(legacySettings(hooksDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHookEnsure(nil, &stdout, &stderr); code != 4 {
+		t.Fatalf("runHookEnsure() = %d, want 4 (stderr %s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), blocked) {
+		t.Errorf("stderr = %q, want it to name %s", stderr.String(), blocked)
+	}
+	if !strings.Contains(stderr.String(), "registered") {
+		t.Errorf("stderr = %q, want it to say the hooks are registered", stderr.String())
+	}
+	if got := hookCommands(t, readSettings(t, p), "PermissionRequest"); !sameStrings(got, hookCmd(t, "ask")) {
+		t.Errorf("PermissionRequest = %v, want settings.json migrated anyway", got)
+	}
+	skills, err := os.ReadDir(filepath.Join(home, ".claude", "skills"))
+	if err != nil || len(skills) == 0 {
+		t.Errorf("skills not installed (entries %v, err %v)", skills, err)
+	}
+}
+
+// The installed binary is this whole ~16MB binary, and Claude Code executes it
+// on every statusline render and every hook of every session on the machine. An in-place
 // rewrite therefore races those renders, and losing the race means ETXTBSY —
 // at which point runHookEnsure returns 4 BEFORE setStatusLine runs and before
 // settings.json is written, so a single unlucky launch silently drops its
@@ -701,14 +1111,13 @@ func TestHookEnsureInstallsOverAnUnwritableStatusline(t *testing.T) {
 		t.Skip("root ignores the file mode this test depends on")
 	}
 	settingsPath := writeSettings(t, "")
-	script := stubScript(t)
 
 	var b1 bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &b1, &b1); code != 0 {
+	if code := runHookEnsure(nil, &b1, &b1); code != 0 {
 		t.Fatalf("first runHookEnsure() = %d, want 0 (stderr %s)", code, b1.String())
 	}
 	home, _ := os.UserHomeDir()
-	slPath := filepath.Join(home, ".claude", "hooks", statuslineScriptName)
+	slPath := filepath.Join(home, ".claude", "hooks", hookBinaryName)
 	wantBytes, err := os.ReadFile(slPath)
 	if err != nil {
 		t.Fatalf("statusline artifact not installed at %s: %v", slPath, err)
@@ -737,7 +1146,7 @@ func TestHookEnsureInstallsOverAnUnwritableStatusline(t *testing.T) {
 	}
 
 	var b2 bytes.Buffer
-	if code := runHookEnsure([]string{"--script", script}, &b2, &b2); code != 0 {
+	if code := runHookEnsure(nil, &b2, &b2); code != 0 {
 		t.Fatalf("runHookEnsure() = %d, want 0: a statusline artifact that cannot be opened for writing must be REPLACED, not fail the whole run (stderr %s)", code, b2.String())
 	}
 	sl, _ := readSettings(t, settingsPath)["statusLine"].(map[string]any)

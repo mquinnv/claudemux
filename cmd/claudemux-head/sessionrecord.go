@@ -81,7 +81,7 @@ func sessionRecordFile(dir, name string) string {
 }
 
 // writeSessionRecord writes r atomically (temp file + rename, the same
-// pattern as hooks/claudemux-map.sh) so a reader never sees half a record —
+// pattern as the pane-map hook) so a reader never sees half a record —
 // and a reboot mid-write leaves the previous record, not a truncated one.
 func writeSessionRecord(dir string, r sessionRecord) error {
 	if dir == "" {

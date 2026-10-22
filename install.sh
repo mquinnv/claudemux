@@ -76,10 +76,9 @@ echo "claudemux: checksum OK"
 mkdir -p "$PREFIX"
 tar -xzf "$tmp/$tarball" -C "$tmp"
 
-# All six files stay siblings: claudemux resolves project-color-resolve.sh, and
-# claudemux-head resolves claudemux-map.sh, claudemux-worktree.sh, and
-# claudemux-ask.sh, by looking next to themselves.
-for f in claudemux-head claudemux project-color-resolve.sh claudemux-map.sh claudemux-worktree.sh claudemux-ask.sh; do
+# All three files stay siblings: claudemux resolves project-color-resolve.sh by
+# looking next to itself. The Claude Code hooks are claudemux-head subcommands.
+for f in claudemux-head claudemux project-color-resolve.sh; do
   install -m 0755 "$tmp/$f" "$PREFIX/$f"
 done
 
@@ -145,10 +144,10 @@ fi
 
 # This installer is intentionally standalone (it does not use or require brew).
 # But if brew IS here, the formula is the better-managed option — it handles
-# tmux/jq/git and `brew upgrade` — so point the user at it without switching to it.
+# tmux/git and `brew upgrade` — so point the user at it without switching to it.
 if command -v brew >/dev/null 2>&1; then
   echo "claudemux: Homebrew detected — for managed upgrades and automatic"
-  echo "    tmux/jq/git, you may prefer:  brew install mquinnv/tap/claudemux"
+  echo "    tmux/git, you may prefer:  brew install mquinnv/tap/claudemux"
 fi
 
 echo "claudemux: done. Run: claudemux <project-dir>"
