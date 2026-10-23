@@ -1430,7 +1430,7 @@ func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
 // summary or prompt still gets a detail line for it, and the row count agrees.
 func TestSwDetailLineShowsDeferReason(t *testing.T) {
 	sess := swSession{Name: "api", Deferred: true, DeferReason: "Ana's review", Summary: "fixing"}
-	if got := ansi.Strip(swDetailLine(sess)); got != "◆ Ana's review · fixing" {
+	if got := ansi.Strip(swDetailLine(sess)); got != "Ana's review · fixing" {
 		t.Errorf("swDetailLine = %q", got)
 	}
 	bare := swSession{Name: "web", Deferred: true, DeferReason: "CI"}
@@ -1953,7 +1953,7 @@ func TestViewIndentsChildrenAndKeepsGrid(t *testing.T) {
 			pl = l
 		case strings.Contains(l, "ctopic"):
 			cl = l
-			if i+1 < len(lines) && !strings.HasPrefix(lines[i+1], "      kid summary") {
+			if i+1 < len(lines) && !strings.HasPrefix(lines[i+1], strings.Repeat(" ", swDetailIndent+2)+"kid summary") {
 				t.Errorf("child detail line = %q, want an extra 2-cell indent", lines[i+1])
 			}
 		}

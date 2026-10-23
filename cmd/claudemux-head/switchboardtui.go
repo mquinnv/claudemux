@@ -215,6 +215,10 @@ func swNameStyle(hex string, selected bool) lipgloss.Style {
 // swMarkerW is the marker cell's width: one glyph, no emoji.
 const swMarkerW = 1
 
+// swDetailIndent is the name column's offset on line 1 (" marker emoji name"),
+// where a row's detail line starts.
+const swDetailIndent = 1 + swMarkerW + 1 + emojiCellW + 1
+
 // swMarker renders a row's marker cell, exactly swMarkerW wide. It is the
 // attention flag and nothing else: ◆ deferred, an orange dot waiting, a grey
 // dot waiting but deliberately snoozed, blank otherwise. Deferred wins
@@ -1175,9 +1179,12 @@ func swDetailLine(sess swSession) string {
 	if phase := closingText(sess.Closing); phase != "" {
 		parts = append(parts, swCloseStyle.Render(phase))
 	}
+	// The blocker is plain dim text, not a cyan "◆ reason": the row's own
+	// marker and the group rule already say deferred, and a second cyan ◆
+	// one line down read as another deferred session nested under this one.
 	if sess.Deferred {
 		if reason := sanitizeDeferReason(sess.DeferReason); reason != "" {
-			parts = append(parts, swDeferStyle.Render("◆ "+reason))
+			parts = append(parts, swStatusStyle.Render(reason))
 		}
 	}
 	for _, s := range []string{sess.Summary, sess.Prompt} {
@@ -1373,7 +1380,10 @@ func (m swModel) View() string {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
-			line2 := "    " + strings.Repeat(" ", lipgloss.Width(prefix)) + detail
+			// It starts in the name column, past the marker and the emoji
+			// badge, so it reads as this row's continuation — indented any
+			// less, it sat where a child's tree prefix does and passed for one.
+			line2 := strings.Repeat(" ", swDetailIndent+lipgloss.Width(prefix)) + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}
