@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -98,7 +97,7 @@ func resolveLinkedWorktreeRoots(cwd string) []worktreeRoot {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	gitRevParseCalls.Add(1)
-	out, err := exec.CommandContext(ctx, "git", "-C", cwd,
+	out, err := gitCmd(ctx, cwd,
 		"worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return nil
@@ -210,7 +209,7 @@ func resolveGitWorktreeName(cwd string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	gitRevParseCalls.Add(1)
-	out, err := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse",
+	out, err := gitCmd(ctx, cwd, "rev-parse",
 		"--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel").Output()
 	if err != nil {
 		return ""
