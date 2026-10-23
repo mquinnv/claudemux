@@ -235,9 +235,17 @@ func askOverride(s State, events []Event, markerTime time.Time) State {
 }
 
 // lastConversationEvent returns the newest user or assistant event,
-// skipping bookkeeping types.
+// skipping bookkeeping types — and compaction summaries, which are
+// bookkeeping in a user record's clothing. The turn before one tells the
+// truth: across every compaction in this machine's transcripts (2026-10-22),
+// an idle or manual compaction follows an ended assistant turn (Idle), and an
+// auto-compaction mid-turn follows a tool_result (Thinking, until the
+// assistant turn that resumes the work).
 func lastConversationEvent(events []Event) (Event, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].IsCompactSummary {
+			continue
+		}
 		t := events[i].Type
 		if t == "user" || t == "assistant" {
 			return events[i], true
