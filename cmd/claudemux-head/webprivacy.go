@@ -262,7 +262,7 @@ func gitOrigin(ctx context.Context, dir string) string {
 	if dir == "" {
 		return ""
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin").Output()
+	out, err := gitCmd(ctx, dir, "remote", "get-url", "origin").Output()
 	if err != nil {
 		return ""
 	}

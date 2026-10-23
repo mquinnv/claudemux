@@ -67,7 +67,7 @@ func mainCheckoutFor(dir string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse",
+	out, err := gitCmd(ctx, dir, "rev-parse",
 		"--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return ""
@@ -92,7 +92,7 @@ func worktreeIsGone(ctx context.Context, workDir, mainCheckout string) bool {
 	if mainCheckout == "" {
 		return false
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", mainCheckout,
+	out, err := gitCmd(ctx, mainCheckout,
 		"worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return false
@@ -114,14 +114,14 @@ func gitCleanReason(ctx context.Context, dir string) string {
 		// wrong repository.
 		return "probe failed"
 	}
-	status, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
+	status, err := gitCmd(ctx, dir, "status", "--porcelain").Output()
 	if err != nil {
 		return "probe failed"
 	}
 	if len(bytes.TrimSpace(status)) > 0 {
 		return "dirty tree"
 	}
-	ahead, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-list", "--count", "@{upstream}..HEAD").Output()
+	ahead, err := gitCmd(ctx, dir, "rev-list", "--count", "@{upstream}..HEAD").Output()
 	if err != nil {
 		// rev-list fails when no upstream is configured — indistinguishable
 		// here from other failures, and both must block, so one reason

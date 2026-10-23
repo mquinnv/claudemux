@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -50,7 +49,7 @@ func mainStatusSnapshot(ctx context.Context, dir string) (status string, ok bool
 	if dir == "" {
 		return "", false
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
+	out, err := gitCmd(ctx, dir, "status", "--porcelain").Output()
 	if err != nil {
 		return "", false
 	}
