@@ -291,6 +291,7 @@ type swModel struct {
 	// path is unavailable or broken, which must never affect the gauges above.
 	usageCachePath  string
 	modelWindows    []ModelWindow
+	credits         PrepaidCredits
 	usageQuietUntil time.Time
 	// conductReq is the last head-requested toggle this lobby applied, kept as
 	// the already-applied marker: the head leaves its request published, so
@@ -437,7 +438,7 @@ func (m *swModel) toggleStandby() {
 // rows and a usage spawn can never delay a fleet poll.
 func (m swModel) Init() tea.Cmd {
 	return tea.Batch(swPollCmd(m.selfPane, m.rateLimitsPath),
-		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())))
+		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())), creditTick(time.Second))
 }
 
 // usageMaySpawn is the lobby's half of the head's gate: it may spawn a Claude
@@ -824,6 +825,11 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, swRelinkCmd(restored)
 		}
 		return m, nil
+	case creditTickMsg:
+		return m, creditsCmd(m.rateOK && exhaustedBudget(m.rateLimits, m.modelWindows, time.Now()))
+	case creditMsg:
+		m.credits = msg.credits
+		return m, creditTick(creditTTL)
 	case usageTickMsg:
 		// See the head's usageTickMsg case: the tick is a file read and never
 		// stops; usageMaySpawn is the only gate on spawning.
@@ -1203,7 +1209,7 @@ func swDetailLine(sess swSession) string {
 // surviving bars then widen past defaultBarW to consume the leftover columns.
 func swMetersLine(m swModel, now time.Time) string {
 	build := func(barW int) gaugeSet {
-		return rateGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW)
+		return creditGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW, m.credits)
 	}
 	if m.width <= 0 {
 		// No size yet: emit the baseline gauges unstyle rather than fitting
@@ -1225,10 +1231,7 @@ func swMetersLine(m swModel, now time.Time) string {
 	// comes from the gauge set rather than a constant now that per-model rows
 	// can add bars. Integer division leaves a few columns unspent rather than
 	// risking an overflow that clipLine would then chop.
-	barCount := len(parts)
-	if barCount > gs.barred {
-		barCount = gs.barred
-	}
+	barCount := gs.barCount(len(parts))
 	if barCount < 1 {
 		barCount = 1
 	}

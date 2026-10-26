@@ -272,6 +272,7 @@ type model struct {
 	// whenever the pull path is unavailable or broken, which must never affect
 	// the 5h/wk gauges above.
 	modelWindows []ModelWindow
+	credits      PrepaidCredits
 	// usageQuietUntil suspends the SPAWN half of the usage loop until the
 	// given time, after an answer that could produce nothing to render: a
 	// rate_limits_available:false verdict this pane fetched itself (API key,
@@ -964,7 +965,7 @@ func (m model) Init() tea.Cmd {
 	// first poll lands, so usageMaySpawn says no. That is the right answer
 	// anyway — a fleet coming up together would otherwise race to spawn before
 	// any of them knows whether it can render a meter line at all.
-	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))}
+	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())), creditTick(time.Second)}
 	// The project color is static for the life of a session, so it is published
 	// once here rather than from the per-tick publish path.
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
@@ -1946,6 +1947,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		removeSessionRecord(sessionRecordDir(), m.recordName)
 		return m, killSessionCmd(m.selfPane)
 
+	case creditTickMsg:
+		return m, creditsCmd(m.rateOK && exhaustedBudget(m.rateLimits, m.modelWindows, time.Now()))
+	case creditMsg:
+		m.credits = msg.credits
+		return m, creditTick(creditTTL)
 	case usageTickMsg:
 		// The tick itself never stops: it is a file read, and it is how a pane
 		// picks up rows another pane fetched. Whether it may also SPAWN is the
@@ -2345,7 +2351,11 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 			rightParts = rightParts[:len(rightParts)-1]
 		}
 		if len(rightParts) == 0 {
-			line = " " + left + " "
+			if m.credits.Enabled && exhaustedBudget(m.rateLimits, m.modelWindows, now) && len(rateGaugeParts(m, now, defaultBarW).parts) > 0 {
+				line = " " + rateGaugeParts(m, now, defaultBarW).parts[0] + " "
+			} else {
+				line = " " + left + " "
+			}
 		} else {
 			line = " " + left + " · " + right + " "
 		}
@@ -2364,6 +2374,21 @@ type gaugeSet struct {
 	// barred is how many LEADING parts carry a bar. The eta is the only
 	// bar-less part and is always last, so this is len(parts) or len(parts)-1.
 	barred int
+	// bars overrides the leading-bar convention when a balance label leads.
+	bars []bool
+}
+
+func (g gaugeSet) barCount(n int) int {
+	if g.bars == nil {
+		return min(n, g.barred)
+	}
+	count := 0
+	for i := 0; i < min(n, len(g.bars)); i++ {
+		if g.bars[i] {
+			count++
+		}
+	}
+	return count
 }
 
 // rateGaugeParts builds the right-group budget gauges — 5h, wk, any per-model
@@ -2377,7 +2402,7 @@ func rateGaugeParts(m model, now time.Time, barW int) gaugeSet {
 	if !m.rateOK {
 		return gaugeSet{}
 	}
-	return rateGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW)
+	return creditGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW, m.credits)
 }
 
 // rateGauges is the model-independent core of rateGaugeParts, shared with the
@@ -2646,6 +2671,15 @@ func renderMetersLine(m model, now time.Time) string {
 	}
 	build := func(barW int) gaugeSet {
 		gs := rateGaugeParts(m, now, barW)
+		if len(gs.bars) > 0 {
+			// Keep the credit label ahead of context too: a narrow head must
+			// still reveal that the exhausted budget is covered by credits.
+			return gaugeSet{
+				parts:  append([]string{gs.parts[0], ctxSegment(m, barW)}, gs.parts[1:]...),
+				barred: gs.barred + 1,
+				bars:   append([]bool{false, true}, gs.bars[1:]...),
+			}
+		}
 		// The ctx gauge is the head's own and always leads; it carries a bar,
 		// so it counts toward barred.
 		return gaugeSet{
@@ -2670,10 +2704,7 @@ func renderMetersLine(m model, now time.Time) string {
 	// space. barred comes from the gauge set rather than a constant now that
 	// per-model rows can add bars. Integer division leaves a few columns
 	// unspent rather than risking an overflow that clipLine would then chop.
-	barCount := len(parts)
-	if barCount > gs.barred {
-		barCount = gs.barred
-	}
+	barCount := gs.barCount(len(parts))
 	if barCount < 1 {
 		barCount = 1
 	}

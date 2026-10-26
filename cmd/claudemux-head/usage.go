@@ -18,7 +18,15 @@ import (
 type ModelWindow struct {
 	Name        string
 	UsedPercent int
+	Used        float64
 	ResetsAt    time.Time
+}
+
+func (w ModelWindow) usedExact() float64 {
+	if w.Used != 0 {
+		return w.Used
+	}
+	return float64(w.UsedPercent)
 }
 
 // PlanUsage is the subset of a get_usage response the meters render.
@@ -234,7 +242,7 @@ func parseUsageResponse(blob []byte, now time.Time) (PlanUsage, error) {
 		if name == "" || l.Percent == nil {
 			continue
 		}
-		w := ModelWindow{Name: name, UsedPercent: int(*l.Percent + 0.5)}
+		w := ModelWindow{Name: name, UsedPercent: int(*l.Percent + 0.5), Used: *l.Percent}
 		if t, err := time.Parse(time.RFC3339, l.ResetsAt); err == nil {
 			w.ResetsAt = t
 		}
@@ -262,9 +270,10 @@ type rawUsageCache struct {
 	FetchedAt int64 `json:"fetched_at"`
 	Available bool  `json:"available"`
 	Models    []struct {
-		Name        string `json:"name"`
-		UsedPercent int    `json:"used_percent"`
-		ResetsAt    int64  `json:"resets_at"`
+		Name        string  `json:"name"`
+		UsedPercent int     `json:"used_percent"`
+		Used        float64 `json:"used_exact,omitempty"`
+		ResetsAt    int64   `json:"resets_at"`
 	} `json:"models"`
 }
 
@@ -297,10 +306,11 @@ func writeUsageCache(path string, u PlanUsage) error {
 			resets = m.ResetsAt.Unix()
 		}
 		raw.Models = append(raw.Models, struct {
-			Name        string `json:"name"`
-			UsedPercent int    `json:"used_percent"`
-			ResetsAt    int64  `json:"resets_at"`
-		}{Name: m.Name, UsedPercent: m.UsedPercent, ResetsAt: resets})
+			Name        string  `json:"name"`
+			UsedPercent int     `json:"used_percent"`
+			Used        float64 `json:"used_exact,omitempty"`
+			ResetsAt    int64   `json:"resets_at"`
+		}{Name: m.Name, UsedPercent: m.UsedPercent, Used: m.Used, ResetsAt: resets})
 	}
 	return writeJSONAtomic(path, raw)
 }
@@ -319,7 +329,7 @@ func readUsageCache(path string, now time.Time) (PlanUsage, bool) {
 	}
 	u := PlanUsage{Available: raw.Available, FetchedAt: time.Unix(raw.FetchedAt, 0)}
 	for _, m := range raw.Models {
-		w := ModelWindow{Name: m.Name, UsedPercent: m.UsedPercent}
+		w := ModelWindow{Name: m.Name, UsedPercent: m.UsedPercent, Used: m.Used}
 		if m.ResetsAt != 0 {
 			w.ResetsAt = time.Unix(m.ResetsAt, 0)
 		}

@@ -669,6 +669,29 @@ that changes:
 the poller at a specific `claude` binary. If the whole thing is unavailable or broken, the
 `5h` and `wk` gauges are unaffected: the per-model rows are strictly additive.
 
+### Prepaid usage credits
+
+When a current 5-hour, weekly, or model window reaches 100% and usage credits
+are enabled, the head and terminal switchboard replace exhausted meters with
+**`USAGE CREDITS · $12.34 left`**. Other windows stay visible; the burn meter
+and time-to-empty projection disappear while the exhausted window is covered
+by credits. The balance label takes priority over the other account meters
+when the pane is narrow. The ordinary meters return when the window resets.
+
+This is the **prepaid credit balance**, not the remaining monthly spend
+allowance. While a window is exhausted, claudemux reads Claude's usage and
+prepaid-credit endpoints using the signed-in Claude profile. On macOS the
+token comes from Claude Code's Keychain entry, with its credentials file as
+fallback; other platforms use the credentials file. No token is logged or
+written to claudemux's cache, and claudemux never refreshes or changes credentials.
+The balance is cached for one minute per profile and organization, shared
+between heads. Failed reads also back off for a minute; an unavailable or stale
+balance is labeled `balance unavailable` instead of displaying old money as current.
+
+API-key, third-party-provider, custom-endpoint, and explicitly supplied OAuth-token
+sessions do not read the local subscriber's prepaid balance. If the local Claude
+profile cannot be resolved, the existing limit meters remain visible.
+
 
 ## Configuration
 
