@@ -17,6 +17,11 @@ func TestStayMarked(t *testing.T) {
 		"  run the tests\n\n#stay\n",
 		"#stay\tfix it",
 		"line one\nline two #stay",
+		"use #stay mid-prompt ok", // anywhere in prose counts
+		"you can delete the draft, we do already have access. #stay tell me what you need",
+		"paste:\n#stay\nmore log",              // its own line, outside any fence
+		"say `#stay` to skip, then #stay",      // quoted one ignored, bare one counts
+		"```\nlog line\n```\nnow fix it #stay", // after a closed fence
 	}
 	for _, p := range yes {
 		if !stayMarked(p) {
@@ -27,17 +32,20 @@ func TestStayMarked(t *testing.T) {
 		"",
 		"   ",
 		"run the tests",
-		"stay here",               // no hash
-		"# Stay",                  // markdown heading
-		"## stay\n\nsome text",    // heading, even lowercase
-		"fix it #stayed",          // longer word
-		"fix it #stay-alive",      // hyphenated tag
-		"fix it #stay.",           // punctuation glued on
-		"open page.html#stay",     // URL fragment
-		"say `#stay` to skip",     // quoted in backticks, mid-prompt
-		"fix it `#stay`",          // quoted in backticks, at the end
-		"use #stay mid-prompt ok", // mid-text: only first/last token counts
-		"paste:\n#stay\nmore log", // mid-text across lines
+		"stay here",            // no hash
+		"# Stay",               // markdown heading
+		"## stay\n\nsome text", // heading, even lowercase
+		"fix it #stayed",       // longer word
+		"fix it #stay-alive",   // hyphenated tag
+		"fix it #stay.",        // punctuation glued on
+		"open page.html#stay",  // URL fragment
+		"say `#stay` to skip",  // quoted in backticks, mid-prompt
+		"fix it `#stay`",       // quoted in backticks, at the end
+		"say ` #stay ` padded", // inline span with padding
+		"```\n#stay\n```",      // inside a fenced block
+		"look:\n```log\nfoo #stay bar\n```\ndone", // fence with a language tag
+		"unclosed:\n```\n#stay",                   // unclosed fence runs to the end
+		"fix it `#stay",                           // stray backtick glued on
 		"#stays",
 		"＃stay", // fullwidth hash
 	}

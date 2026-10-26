@@ -154,17 +154,17 @@ you stay where you are. Clearing a session to start fresh in it doesn't eject yo
 from it, even though `/clear` starts a new session id and the pane reads `Starting`
 for a beat while the new transcript appears — the conductor holds through that too.
 
-**Staying for one prompt: `#stay`.** End a prompt with `#stay` and sending it does *not* free the conductor to carry you on: you stay in the
+**Staying for one prompt: `#stay`.** Put `#stay` anywhere in a prompt and sending it does *not* free the conductor to carry you on: you stay in the
 session while Claude works that turn, and when the turn ends you're still there,
 waiting on yourself as usual. It's one-shot — the next prompt you send without the
 marker hands the session back normally. The marker counts only as a whole word
-(any case: `#stay`, `#Stay`, `#STAY`) that is the prompt's first or last word, so a
-markdown heading (`# Stay`), `#stayed`, a URL fragment (`page#stay`), a
-backtick-quoted `` `#stay` `` or a `#stay` in the middle of a pasted log never
-trigger it. Claude sees the marker too (Claude Code lets nothing rewrite a prompt);
-at the end of the prompt it reads as the tag it is. (A leading `#stay` counts as
-well, but some Claude Code versions take a prompt that starts with `#` as a memory
-note rather than a prompt, so the end is the safe spot.) While such a turn runs, the
+(any case: `#stay`, `#Stay`, `#STAY`) outside code, so a markdown heading
+(`# Stay`), `#stayed`, a URL fragment (`page#stay`), a backtick-quoted
+`` `#stay` `` or a `#stay` inside a fenced code block (a pasted log) never
+trigger it. Claude sees the marker too (Claude Code lets nothing rewrite a prompt)
+and reads it as the tag it is. (Avoid starting a prompt with it: some Claude Code
+versions take a prompt that starts with `#` as a memory note rather than a
+prompt.) While such a turn runs, the
 lobby's status line reads `staying on <session> (#stay)` and the session's status
 pane shows `⏸ #stay` in place of `⏵ conduct`. Deferring the session still carries
 you out, and walking away yourself still counts as walking away. To stay put across
