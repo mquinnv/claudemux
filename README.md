@@ -673,7 +673,7 @@ the poller at a specific `claude` binary. If the whole thing is unavailable or b
 
 When a current 5-hour, weekly, or model window reaches 100% and usage credits
 are enabled, the head and terminal switchboard replace exhausted meters with
-**`[⚡ USAGE CREDITS · $12.34 left]`** in bold amber, in the exhausted meter's
+**`[⚡ USAGE CREDITS · $12.34 left · $1.80/hr]`** in bold amber, in the exhausted meter's
 position. Other windows stay visible; the burn meter
 and time-to-empty projection disappear while the exhausted window is covered
 by credits. The balance label takes priority over the other account meters
@@ -687,9 +687,25 @@ token comes from Claude Code's Keychain entry, with its credentials file as
 fallback; other platforms use the credentials file. No token is logged or
 written to claudemux's cache, and claudemux never refreshes or changes credentials.
 The first exhausted-limit snapshot triggers a balance check immediately on
-startup. The balance is cached for one minute per profile and organization, shared
-between heads. Failed reads also back off for a minute; an unavailable or stale
-balance is labeled `balance unavailable` instead of displaying old money as current.
+startup. Network refreshes run at most once per minute per profile and
+organization. Heads and the switchboard re-read the shared cache every few
+seconds so they converge on the same result. Failed reads back off for a minute;
+the last successful amount stays visible as `last $12.34 (... ago; retrying)`.
+With no previous balance, the label reads `balance unavailable`.
+
+The burn figure uses the account's cumulative usage-credit spending over up to
+five minutes, after at least two minutes of history. Deposits and auto-reloads
+do not count as negative spending. A billing-counter reset, currency change,
+or a gap over three minutes starts measurement again. History is shared across
+heads and survives restarts. The rate reads `measuring $/hr` during warm-up, or
+`rate unavailable` if Claude has not supplied a spend counter. This covers the
+account's usage-credit spending, rather than an individual session.
+
+The spend counter and prepaid balance have separate endpoints. If Claude
+rate-limits the usage endpoint, claudemux backs that endpoint off for five
+minutes and continues refreshing the balance. A missing spend counter never
+discards a successfully fetched balance. A separate cache version also protects
+these values from heads still running an older binary during an upgrade.
 
 API-key, third-party-provider, custom-endpoint, and explicitly supplied OAuth-token
 sessions do not read the local subscriber's prepaid balance. If the local Claude

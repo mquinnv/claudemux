@@ -833,7 +833,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case creditMsg:
 		m.credits = mergeCreditResult(m.credits, msg.credits, time.Now())
 		m.creditsLoading = false
-		m.creditCheckedAt = msg.credits.FetchedAt
+		m.creditCheckedAt = creditReadStamp(msg.credits, time.Now())
 		return m, nil
 	case usageTickMsg:
 		// See the head's usageTickMsg case: the tick is a file read and never

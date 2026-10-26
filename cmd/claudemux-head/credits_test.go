@@ -34,7 +34,7 @@ func TestFetchPrepaidCredits(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/api/oauth/usage":
-					fmt.Fprint(w, `{"extra_usage":{"is_enabled":true}}`)
+					fmt.Fprint(w, `{"extra_usage":{"is_enabled":true,"used_credits":100,"currency":"USD"}}`)
 				case "/api/oauth/organizations/test-org/prepaid/credits":
 					fmt.Fprint(w, tc.body)
 				default:
@@ -49,6 +49,9 @@ func TestFetchPrepaidCredits(t *testing.T) {
 			}
 			if tc.wantOK && (!got.Enabled || got.Amount == nil || *got.Amount != tc.want) {
 				t.Fatalf("credits = %+v", got)
+			}
+			if tc.wantOK && got.Currency == "USD" && (got.Spent == nil || *got.Spent != 100) {
+				t.Fatal("missing cumulative spending counter")
 			}
 		})
 	}
@@ -103,7 +106,7 @@ func TestCreditGaugeRequiresEnabledAndCurrentBalance(t *testing.T) {
 	}
 	m.credits.Enabled = true
 	m.credits.FetchedAt = now.Add(-10 * time.Minute)
-	if s := strings.Join(rateGaugeParts(m, now, 10).parts, " "); strings.Contains(s, "$5.00") {
+	if s := strings.Join(rateGaugeParts(m, now, 10).parts, " "); !strings.Contains(s, "last $5.00") || strings.Contains(s, "$5.00 left") {
 		t.Fatalf("stale balance shown as current: %q", s)
 	}
 	m.credits.FetchedAt = now
@@ -131,8 +134,8 @@ func TestCreditCacheRefreshAndFailure(t *testing.T) {
 		t.Fatalf("cache did not share the answer: calls=%d, %+v", calls, second)
 	}
 	failed := refreshCreditCache(context.Background(), path, now.Add(creditTTL), fetch)
-	if calls != 2 || failed.Amount != nil || !failed.Enabled {
-		t.Fatalf("failure retained a balance or lost credit mode: calls=%d %+v", calls, failed)
+	if calls != 2 || failed.Amount == nil || !failed.RefreshFailed || !failed.Enabled {
+		t.Fatalf("failure lost the last balance or credit mode: calls=%d %+v", calls, failed)
 	}
 	_ = refreshCreditCache(context.Background(), path, now.Add(creditTTL+time.Second), fetch)
 	if calls != 2 {
@@ -222,7 +225,7 @@ func TestExplicitBearerCannotReadLocalCreditCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash := sha256.Sum256([]byte(dir + "\x00local-org"))
-	path := filepath.Join(dir, "claudemux", fmt.Sprintf("credits-%x.json", hash[:8]))
+	path := filepath.Join(dir, "claudemux", fmt.Sprintf("credits-v2-%x.json", hash[:8]))
 	amount := 1234.0
 	if err := writeJSONAtomic(path, PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: time.Now()}); err != nil {
 		t.Fatal(err)
@@ -302,14 +305,14 @@ func TestCreditFetchStartsWithFirstExhaustedSnapshot(t *testing.T) {
 	}
 }
 
-func TestUnavailableCreditResultKeepsModeWithoutOldBalance(t *testing.T) {
+func TestUnavailableCreditResultLabelsLastBalance(t *testing.T) {
 	now := time.Now()
 	amount := 1000.0
 	m := model{credits: PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now}}
 	u, _ := m.Update(creditMsg{})
 	m = u.(model)
-	if !m.credits.Enabled || m.credits.Amount != nil {
-		t.Fatal("unavailable read restored percentage mode or kept old money")
+	if !m.credits.Enabled || m.credits.Amount == nil || !m.credits.RefreshFailed {
+		t.Fatal("unavailable read lost last balance or failed to label it")
 	}
 }
 
@@ -317,11 +320,11 @@ func TestCreditRefreshCadenceAndSingleFlight(t *testing.T) {
 	now := time.Now()
 	rl := RateLimits{SevenDay: Window{UsedPercent: 100, ResetsAt: now.Add(time.Hour)}}
 	loading := false
-	if startCreditRefresh(true, rl, nil, &loading, now.Add(-59*time.Second), now) != nil || loading {
-		t.Fatal("refreshed inside minute")
+	if startCreditRefresh(true, rl, nil, &loading, now.Add(-4*time.Second), now) != nil || loading {
+		t.Fatal("reread cache too quickly")
 	}
-	if startCreditRefresh(true, rl, nil, &loading, now.Add(-time.Minute), now) == nil || !loading {
-		t.Fatal("minute refresh was skipped")
+	if startCreditRefresh(true, rl, nil, &loading, now.Add(-5*time.Second), now) == nil || !loading {
+		t.Fatal("shared cache reread was skipped")
 	}
 	if startCreditRefresh(true, rl, nil, &loading, time.Time{}, now) != nil {
 		t.Fatal("overlapped an in-flight fetch")

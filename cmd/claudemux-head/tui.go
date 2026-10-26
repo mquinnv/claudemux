@@ -1961,7 +1961,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case creditMsg:
 		m.credits = mergeCreditResult(m.credits, msg.credits, time.Now())
 		m.creditsLoading = false
-		m.creditCheckedAt = msg.credits.FetchedAt
+		m.creditCheckedAt = creditReadStamp(msg.credits, time.Now())
 		return m, nil
 	case usageTickMsg:
 		// The tick itself never stops: it is a file read, and it is how a pane
