@@ -1212,36 +1212,9 @@ func swMetersLine(m swModel, now time.Time) string {
 		return creditGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW, m.credits)
 	}
 	if m.width <= 0 {
-		// No size yet: emit the baseline gauges unstyle rather than fitting
-		// to a width we don't know.
 		return " " + strings.Join(build(defaultBarW).parts, " · ")
 	}
-	avail := m.width - 2 // columns inside the " "..." " padding below
-	if avail < 1 {
-		avail = 1
-	}
-	gs := build(defaultBarW)
-	parts := gs.parts
-	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
-		parts = parts[:len(parts)-1]
-	}
-
-	// Only the bar-carrying parts share the slack — the trailing eta segment is
-	// plain text, so its share would just become trailing blank space. barred
-	// comes from the gauge set rather than a constant now that per-model rows
-	// can add bars. Integer division leaves a few columns unspent rather than
-	// risking an overflow that clipLine would then chop.
-	barCount := gs.barCount(len(parts))
-	if barCount < 1 {
-		barCount = 1
-	}
-	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
-		wide := build(defaultBarW + grow).parts[:len(parts)]
-		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
-			parts = wide
-		}
-	}
-	return statusbarStyle.Width(m.width).Render(clipLine(" "+strings.Join(parts, " · ")+" ", m.width))
+	return statusbarStyle.Width(m.width).Render(clipLine(" "+fitGaugeLine(build, max(1, m.width-2))+" ", m.width))
 }
 
 func (m swModel) View() string {

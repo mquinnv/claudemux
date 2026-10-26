@@ -673,10 +673,12 @@ the poller at a specific `claude` binary. If the whole thing is unavailable or b
 
 When a current 5-hour, weekly, or model window reaches 100% and usage credits
 are enabled, the head and terminal switchboard replace exhausted meters with
-**`USAGE CREDITS · $12.34 left`**. Other windows stay visible; the burn meter
+**`[⚡ USAGE CREDITS · $12.34 left]`** in bold amber, in the exhausted meter's
+position. Other windows stay visible; the burn meter
 and time-to-empty projection disappear while the exhausted window is covered
 by credits. The balance label takes priority over the other account meters
-when the pane is narrow. The ordinary meters return when the window resets.
+when the pane is narrow, without moving it ahead of the other meters when
+there is room. The ordinary meters return when the window resets.
 
 This is the **prepaid credit balance**, not the remaining monthly spend
 allowance. While a window is exhausted, claudemux reads Claude's usage and
@@ -1045,6 +1047,12 @@ binary on disk changes underneath it; the conductor's escort, snoozes, and
 paused-session state survive that restart via a short-lived handoff file at
 `~/.claude/claudemux/conductor-handoff.json`, read once on startup and ignored
 if it's older than 30s.
+
+**Keyboard cheatsheet.** Press `?` in the head to show its keyboard shortcuts.
+The list fits the pane's height; use `↑`/`↓` or `j`/`k` to scroll, `Page Up`/
+`Page Down` to page, and `Home`/`End` to jump. Press `?`, `Esc`, or `q` to
+close the cheatsheet and return to the head. Session-action keys are inactive
+while help is open; `Ctrl+C` still quits the head.
 
 `q`, `ctrl+c` and `esc` quit instead, and quitting **closes the pane**: the head
 is the pane's program, and a clean exit is not the failure that

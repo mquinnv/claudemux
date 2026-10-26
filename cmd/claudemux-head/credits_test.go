@@ -198,6 +198,20 @@ func TestNarrowHeadPrioritizesCreditsOverContext(t *testing.T) {
 	}
 }
 
+func TestCreditsStayInExhaustedMeterPosition(t *testing.T) {
+	now := time.Now()
+	amount := 1234.0
+	m := model{width: 180, rateOK: true, rateLimits: RateLimits{
+		FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(time.Hour)},
+		SevenDay: Window{UsedPercent: 100, ResetsAt: now.Add(time.Hour)},
+	}, modelWindows: []ModelWindow{{Name: "Fable", UsedPercent: 50, ResetsAt: now.Add(time.Hour)}}, credits: PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now}}
+	line := ansi.Strip(renderMetersLine(m, now))
+	ctx, fh, credits, fable := strings.Index(line, "ctx "), strings.Index(line, "5h "), strings.Index(line, "USAGE CREDITS"), strings.Index(line, "fable ")
+	if ctx < 0 || fh <= ctx || credits <= fh || fable <= credits {
+		t.Fatalf("weekly slot moved: %q", line)
+	}
+}
+
 func TestExplicitBearerCannotReadLocalCreditCache(t *testing.T) {
 	for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_LOCAL_OAUTH_API_BASE"} {
 		t.Setenv(key, "")

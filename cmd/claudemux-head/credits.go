@@ -17,6 +17,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Amount is the prepaid balance in currency minor units, not the monthly
@@ -286,20 +287,28 @@ func creditGauges(rl RateLimits, models []ModelWindow, samples []pctSample, now 
 	if !credits.Enabled || !exhaustedBudget(rl, models, now) {
 		return gs
 	}
-	parts := []string{promptEmphasisStyle.Render(creditBalanceText(credits, now))}
-	bars := []bool{false}
+	parts := []string{}
+	bars := []bool{}
+	creditIndex := -1
 	for i, p := range gs.parts {
 		if i == 1 || i >= gs.barred {
 			continue
 		} // burn and ETA are no longer meaningful
-		if i == 0 && exhaustedWindow(rl.FiveHour, now) || i == 2 && exhaustedWindow(rl.SevenDay, now) {
-			continue
+		exhausted := i == 0 && exhaustedWindow(rl.FiveHour, now) || i == 2 && exhaustedWindow(rl.SevenDay, now)
+		if i >= 3 {
+			exhausted = models[i-3].usedExact() >= 100 && models[i-3].ResetsAt.After(now)
 		}
-		if i >= 3 && models[i-3].usedExact() >= 100 && models[i-3].ResetsAt.After(now) {
+		if exhausted {
+			if creditIndex < 0 {
+				creditIndex = len(parts)
+				style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "#9A4D00", Dark: "#FFD75F"})
+				parts = append(parts, style.Render("[⚡ "+creditBalanceText(credits, now)+"]"))
+				bars = append(bars, false)
+			}
 			continue
 		}
 		parts = append(parts, p)
 		bars = append(bars, true)
 	}
-	return gaugeSet{parts: parts, barred: len(parts) - 1, bars: bars}
+	return gaugeSet{parts: parts, barred: len(parts) - 1, bars: bars, creditIndex: creditIndex}
 }

@@ -310,12 +310,14 @@ type model struct {
 	conductPendingUntil time.Time
 
 	// UI
-	lastUpdate time.Time
-	width      int
-	height     int
-	ready      bool
-	polling    bool
-	summarizer *Summarizer
+	lastUpdate  time.Time
+	width       int
+	height      int
+	ready       bool
+	helpVisible bool
+	helpOffset  int
+	polling     bool
+	summarizer  *Summarizer
 	// summaryCfg is kept so a keyless startup can retry summarizer
 	// construction later (see shouldAcquireSummarizer): the common cause is a
 	// locked 1Password FIFO at launch, which unlocks minutes later.
@@ -1412,6 +1414,9 @@ func (m model) acquireSummarizer() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.helpVisible {
+			return m.headHelpKey(msg)
+		}
 		if m.deferPrompting {
 			return m.deferPromptKey(msg)
 		}
@@ -1419,6 +1424,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.claudeRestartArmedKey(msg.String())
 		}
 		switch msg.String() {
+		case "?":
+			m.helpVisible = true
+			m.helpOffset = 0
+			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "c":
@@ -2012,6 +2021,9 @@ func (m model) View() string {
 	if !m.ready {
 		return "Loading..."
 	}
+	if m.helpVisible {
+		return renderHeadHelp(m.width, m.height, m.helpOffset)
+	}
 
 	// Pin the status block to the TOP of the pane: state and meters lead,
 	// prompt context follows as room allows. Below height 2 there's no room
@@ -2318,7 +2330,8 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	}
 	leftParts = append(leftParts, ctxSegment(m, defaultBarW))
 
-	rightParts := rateGaugeParts(m, now, defaultBarW).parts
+	gs := rateGaugeParts(m, now, defaultBarW)
+	rightParts := gs.parts
 
 	left := strings.Join(leftParts, " · ")
 	right := strings.Join(rightParts, " · ")
@@ -2340,6 +2353,15 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 		// Tight but everything fits inline with a single ` · ` joiner.
 		line = " " + left + " · " + right + " "
 	default:
+		if gs.bars != nil {
+			right = selectedGauges(gs, fitGaugeIndexes(gs, m.width-leftW-5))
+			if leftW+lipgloss.Width(right)+5 <= m.width {
+				line = " " + left + " · " + right + " "
+			} else {
+				line = " " + gs.parts[gs.creditIndex] + " "
+			}
+			break
+		}
 		// Too narrow even inline. Drop right-group items from the end
 		// (eta → model rows → wk → burn → 5h) until packing left + " · " + right
 		// fits.
@@ -2351,11 +2373,7 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 			rightParts = rightParts[:len(rightParts)-1]
 		}
 		if len(rightParts) == 0 {
-			if m.credits.Enabled && exhaustedBudget(m.rateLimits, m.modelWindows, now) && len(rateGaugeParts(m, now, defaultBarW).parts) > 0 {
-				line = " " + rateGaugeParts(m, now, defaultBarW).parts[0] + " "
-			} else {
-				line = " " + left + " "
-			}
+			line = " " + left + " "
 		} else {
 			line = " " + left + " · " + right + " "
 		}
@@ -2363,10 +2381,8 @@ func renderStatusbar(m model, now time.Time, chip string) string {
 	return statusbarStyle.Width(m.width).Render(clipLine(line, m.width))
 }
 
-// gaugeSet is the right-group gauges plus how many of them carry a progress
-// bar. Callers drop parts from the END and then widen the surviving bars, so
-// they need the bar count: it used to be a hardcoded constant, which was only
-// correct while 5h and wk were the only bars in the group.
+// gaugeSet holds meter slots and the bars to widen when fitting them.
+// A credit replacement stays in its original slot and survives narrowing.
 type gaugeSet struct {
 	// parts are in the fixed order callers drop from the end of:
 	// 5h, wk, model rows…, eta.
@@ -2374,21 +2390,9 @@ type gaugeSet struct {
 	// barred is how many LEADING parts carry a bar. The eta is the only
 	// bar-less part and is always last, so this is len(parts) or len(parts)-1.
 	barred int
-	// bars overrides the leading-bar convention when a balance label leads.
-	bars []bool
-}
-
-func (g gaugeSet) barCount(n int) int {
-	if g.bars == nil {
-		return min(n, g.barred)
-	}
-	count := 0
-	for i := 0; i < min(n, len(g.bars)); i++ {
-		if g.bars[i] {
-			count++
-		}
-	}
-	return count
+	// bars overrides the leading-bar convention for a credit replacement.
+	bars        []bool
+	creditIndex int // protected from width fitting when bars is non-nil
 }
 
 // rateGaugeParts builds the right-group budget gauges — 5h, wk, any per-model
@@ -2659,62 +2663,20 @@ func renderStateLine(m model, now time.Time) string {
 // bar followed by the same right-group budget gauges renderStatusbar packs
 // on the right (5h, wk, per-model rows, eta), here joined left-to-right with
 // " · " (no right-alignment needed since it has the full line to itself).
-// When the line overflows the pane width, gauges drop from the end in today's
-// order (eta → model rows → wk → burn → 5h); the ctx gauge always stays. Unlike the
-// packed statusbar, the surviving bars then widen past defaultBarW to consume
-// the leftover columns, so the meters fill the pane rather than stranding it
-// as padding.
+// Width fitting drops from the end while protecting a credit replacement.
+// Surviving bars widen to consume the leftover columns.
 func renderMetersLine(m model, now time.Time) string {
-	avail := m.width - 2 // columns inside the " "..." " padding below
-	if avail < 1 {
-		avail = 1
-	}
+	avail := max(1, m.width-2)
 	build := func(barW int) gaugeSet {
 		gs := rateGaugeParts(m, now, barW)
-		if len(gs.bars) > 0 {
-			// Keep the credit label ahead of context too: a narrow head must
-			// still reveal that the exhausted budget is covered by credits.
-			return gaugeSet{
-				parts:  append([]string{gs.parts[0], ctxSegment(m, barW)}, gs.parts[1:]...),
-				barred: gs.barred + 1,
-				bars:   append([]bool{false, true}, gs.bars[1:]...),
-			}
+		out := gaugeSet{parts: append([]string{ctxSegment(m, barW)}, gs.parts...), barred: gs.barred + 1}
+		if gs.bars != nil {
+			out.bars = append([]bool{true}, gs.bars...)
+			out.creditIndex = gs.creditIndex + 1
 		}
-		// The ctx gauge is the head's own and always leads; it carries a bar,
-		// so it counts toward barred.
-		return gaugeSet{
-			parts:  append([]string{ctxSegment(m, barW)}, gs.parts...),
-			barred: gs.barred + 1,
-		}
+		return out
 	}
-
-	// First decide how many gauges fit at the baseline bar width, dropping
-	// from the end as before. Only the bars flex below, so gauge count is
-	// settled here and never changes as they widen.
-	gs := build(defaultBarW)
-	parts := gs.parts
-	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, " · ")) > avail {
-		parts = parts[:len(parts)-1]
-	}
-
-	// Spend the leftover columns widening every surviving bar equally: this
-	// line has the pane to itself, so a 10-cell bar wastes most of it on a
-	// wide pane. Only the parts that carry bars share the slack — the trailing
-	// eta segment is plain text, so its share would just become trailing blank
-	// space. barred comes from the gauge set rather than a constant now that
-	// per-model rows can add bars. Integer division leaves a few columns
-	// unspent rather than risking an overflow that clipLine would then chop.
-	barCount := gs.barCount(len(parts))
-	if barCount < 1 {
-		barCount = 1
-	}
-	if grow := (avail - lipgloss.Width(strings.Join(parts, " · "))) / barCount; grow > 0 {
-		wide := build(defaultBarW + grow).parts[:len(parts)]
-		if lipgloss.Width(strings.Join(wide, " · ")) <= avail {
-			parts = wide
-		}
-	}
-	return statusbarStyle.Width(m.width).Render(clipLine(" "+strings.Join(parts, " · ")+" ", m.width))
+	return statusbarStyle.Width(m.width).Render(clipLine(" "+fitGaugeLine(build, avail)+" ", m.width))
 }
 
 // renderBar draws a styled progress bar at pct (0-100) with given width and
