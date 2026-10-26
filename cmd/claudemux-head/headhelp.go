@@ -2,76 +2,119 @@ package main
 
 import (
 	"fmt"
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"strings"
 )
 
 var headShortcuts = []string{
-	"R         Reload head from installed binary",
-	"?         Open / close this cheatsheet",
-	"s         Refresh summary now",
-	"r         Pin / unpin tab title",
-	"Space     Toggle fleet conduct mode (lobby required)",
-	"d / D     Toggle defer / edit blocker",
-	"t         Open a shell beside Claude",
-	"p         Switch to parent session",
-	"c         Restart Claude: c resumes, n starts fresh; Esc cancels",
-	"x         Arm wrap-up; press x again when ready to close session",
-	"X         Arm direct session close; press X again to confirm",
-	"Esc       Cancel armed close; otherwise quit head",
-	"q/Ctrl+C  Quit head (closes this pane)",
+	"R Reload head", "? Help", "s Refresh summary", "r Pin/unpin tab",
+	"Space Conduct/standby", "d Defer", "D Edit blocker", "t Open shell", "p Parent session",
+	"c Restart Claude: c resume / n fresh / Esc cancel",
+	"x Wrap up; x again when ready closes session", "X Direct close (press twice)",
+	"Esc Cancel armed close / quit head", "q/Ctrl+C Quit head (closes pane)",
 }
 
-func headHelpRows(height int) int {
-	if height < 3 {
-		return 1
+var switchboardShortcuts = []string{
+	"j/k/↑↓ Select", "Enter Jump to session", "Esc Back to last session", "Space Conduct/standby",
+	"p Toggle preview", "n New session", "d Defer", "D Edit blocker",
+	"R Reload switchboard", "Ctrl+R Reload all heads", "? Help", "q/Ctrl+C Quit switchboard",
+	"Restore offer: r restore all / s select / x dismiss",
+	"Restore picker: Space toggle / Enter restore / Esc back",
+}
+
+// Pack complete shortcut entries across the available width before adding
+// rows. A wide four-row head can show every shortcut without scrolling.
+func shortcutLines(entries []string, width int) []string {
+	avail := max(1, width-2)
+	lines := []string{}
+	line := ""
+	for _, entry := range entries {
+		entry = clipLine(entry, avail)
+		next := entry
+		if line != "" {
+			next = line + " · " + entry
+		}
+		if line != "" && lipgloss.Width(next) > avail {
+			lines = append(lines, line)
+			line = entry
+		} else {
+			line = next
+		}
 	}
-	return height - 2
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func helpBodyRows(height int) int { return max(1, height-1) }
+
+func shortcutOffset(key string, offset, total, rows int) int {
+	switch key {
+	case "down", "j":
+		offset++
+	case "up", "k":
+		offset--
+	case "pgdown", " ":
+		offset += rows
+	case "pgup":
+		offset -= rows
+	case "home", "g":
+		offset = 0
+	case "end", "G":
+		offset = total
+	}
+	return max(0, min(offset, max(0, total-rows)))
 }
 
 func (m model) headHelpKey(msg tea.KeyMsg) (model, tea.Cmd) {
-	rows := headHelpRows(m.height)
 	switch msg.String() {
 	case "?", "esc", "q":
 		m.helpVisible = false
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
-	case "down", "j":
-		m.helpOffset++
-	case "up", "k":
-		m.helpOffset--
-	case "pgdown", " ":
-		m.helpOffset += rows
-	case "pgup":
-		m.helpOffset -= rows
-	case "home", "g":
-		m.helpOffset = 0
-	case "end", "G":
-		m.helpOffset = len(headShortcuts)
 	}
-	m.helpOffset = max(0, min(m.helpOffset, max(0, len(headShortcuts)-rows)))
+	m.helpOffset = shortcutOffset(msg.String(), m.helpOffset, len(shortcutLines(headShortcuts, m.width)), helpBodyRows(m.height))
+	return m, nil
+}
+
+func (m swModel) switchboardHelpKey(msg tea.KeyMsg) (swModel, tea.Cmd) {
+	switch msg.String() {
+	case "?", "esc", "q":
+		m.helpVisible = false
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	m.helpOffset = shortcutOffset(msg.String(), m.helpOffset, len(shortcutLines(switchboardShortcuts, m.width)), helpBodyRows(m.height))
 	return m, nil
 }
 
 func renderHeadHelp(width, height, offset int) string {
+	return renderShortcutHelp("Keyboard shortcuts", headShortcuts, width, height, offset)
+}
+
+func renderShortcutHelp(title string, entries []string, width, height, offset int) string {
 	if height < 1 || width < 1 {
 		return ""
 	}
-	rows := headHelpRows(height)
-	offset = max(0, min(offset, max(0, len(headShortcuts)-rows)))
-	end := min(offset+rows, len(headShortcuts))
+	body := shortcutLines(entries, width)
+	rows := helpBodyRows(height)
+	offset = max(0, min(offset, max(0, len(body)-rows)))
+	end := min(offset+rows, len(body))
 	lines := []string{}
-	if height >= 3 {
-		lines = append(lines, promptEmphasisStyle.Render("Keyboard shortcuts"))
-	}
-	lines = append(lines, headShortcuts[offset:end]...)
 	if height >= 2 {
-		lines = append(lines, fmt.Sprintf("?/Esc/q close · ↑↓ scroll · %d–%d/%d", offset+1, end, len(headShortcuts)))
+		header := title + " · ?/Esc/q close"
+		if len(body) > rows {
+			header += fmt.Sprintf(" · ↑↓ more %d–%d/%d", offset+1, end, len(body))
+		}
+		lines = append(lines, promptEmphasisStyle.Render(header))
 	}
+	lines = append(lines, body[offset:end]...)
 	for i, line := range lines {
-		lines[i] = clipLine(" "+line, max(1, width))
+		lines[i] = clipLine(" "+line, width)
 	}
 	return strings.Join(lines, "\n")
 }

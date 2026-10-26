@@ -268,8 +268,8 @@ func TestSwitchboardCreditGaugeAndUpdates(t *testing.T) {
 	m := swRateModel(now, 65)
 	m.rateLimits.SevenDay.UsedPercent = 100
 	updated, cmd := m.Update(creditMsg{PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now}})
-	if cmd == nil {
-		t.Fatal("balance update stopped the polling loop")
+	if cmd != nil {
+		t.Fatal("balance update started a second timer instead of using the limits poll")
 	}
 	line := ansi.Strip(swMetersLine(updated.(swModel), now))
 	if !strings.Contains(line, "USAGE CREDITS · $25.00 left") || strings.Contains(line, "100%") {
@@ -277,7 +277,104 @@ func TestSwitchboardCreditGaugeAndUpdates(t *testing.T) {
 	}
 	head := model{}
 	h, cmd := head.Update(creditMsg{PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now}})
-	if cmd == nil || h.(model).credits.Amount == nil {
-		t.Fatal("head failed to store balance and keep polling")
+	if cmd != nil || h.(model).credits.Amount == nil {
+		t.Fatal("head failed to store balance or started an extra timer")
+	}
+}
+
+func TestCreditFetchStartsWithFirstExhaustedSnapshot(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{SevenDay: Window{UsedPercent: 100, ResetsAt: now.Add(time.Hour)}}
+	m := model{}
+	updated, _ := m.Update(dataMsg{time: now, rateLimits: rl})
+	m = updated.(model)
+	if !m.creditsLoading {
+		t.Fatal("head did not start fetching as soon as rates arrived")
+	}
+	updated, _ = m.Update(dataMsg{time: now.Add(time.Second), rateLimits: rl})
+	if !updated.(model).creditsLoading {
+		t.Fatal("second head snapshot dropped in-flight fetch")
+	}
+	sw := swModel{}
+	s, _ := sw.Update(swSnapshotMsg{at: now, rl: rl, err: errors.New("tmux unavailable")})
+	if !s.(swModel).creditsLoading {
+		t.Fatal("switchboard did not fetch credits when rates arrived")
+	}
+}
+
+func TestUnavailableCreditResultKeepsModeWithoutOldBalance(t *testing.T) {
+	now := time.Now()
+	amount := 1000.0
+	m := model{credits: PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now}}
+	u, _ := m.Update(creditMsg{})
+	m = u.(model)
+	if !m.credits.Enabled || m.credits.Amount != nil {
+		t.Fatal("unavailable read restored percentage mode or kept old money")
+	}
+}
+
+func TestCreditRefreshCadenceAndSingleFlight(t *testing.T) {
+	now := time.Now()
+	rl := RateLimits{SevenDay: Window{UsedPercent: 100, ResetsAt: now.Add(time.Hour)}}
+	loading := false
+	if startCreditRefresh(true, rl, nil, &loading, now.Add(-59*time.Second), now) != nil || loading {
+		t.Fatal("refreshed inside minute")
+	}
+	if startCreditRefresh(true, rl, nil, &loading, now.Add(-time.Minute), now) == nil || !loading {
+		t.Fatal("minute refresh was skipped")
+	}
+	if startCreditRefresh(true, rl, nil, &loading, time.Time{}, now) != nil {
+		t.Fatal("overlapped an in-flight fetch")
+	}
+	knownOff := mergeCreditResult(PrepaidCredits{Enabled: true}, PrepaidCredits{FetchedAt: now}, now)
+	if knownOff.Enabled {
+		t.Fatal("a successful disabled verdict did not clear credit mode")
+	}
+}
+
+func TestStartupLockLoserReadsWinningBalanceOnNextPoll(t *testing.T) {
+	now := time.Now()
+	amount := 500.0
+	for _, stale := range []bool{false, true} {
+		t.Run(fmt.Sprint(stale), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "credits.json")
+			if stale {
+				if err := writeJSONAtomic(path, PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now.Add(-3 * time.Minute)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(path+".lock", nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			loser := refreshCreditCache(context.Background(), path, now, func(context.Context) (PrepaidCredits, error) {
+				t.Fatal("lock loser fetched")
+				return PrepaidCredits{}, nil
+			})
+			rl := RateLimits{SevenDay: Window{UsedPercent: 100, ResetsAt: now.Add(time.Hour)}}
+			m := model{rateOK: true, rateLimits: rl}
+			u, _ := m.Update(creditMsg{loser})
+			m = u.(model)
+			if startCreditRefresh(true, rl, nil, &m.creditsLoading, m.creditCheckedAt, now.Add(time.Second)) == nil {
+				t.Fatal("head waited a minute after losing lock")
+			}
+			sw := swModel{}
+			s, _ := sw.Update(creditMsg{loser})
+			sw = s.(swModel)
+			if startCreditRefresh(true, rl, nil, &sw.creditsLoading, sw.creditCheckedAt, now.Add(time.Second)) == nil {
+				t.Fatal("switchboard waited a minute after losing lock")
+			}
+			winner := PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now.Add(time.Second)}
+			if err := writeJSONAtomic(path, winner); err != nil {
+				t.Fatal(err)
+			}
+			got := refreshCreditCache(context.Background(), path, now.Add(2*time.Second), func(context.Context) (PrepaidCredits, error) {
+				t.Fatal("fresh winning cache should avoid fetch")
+				return PrepaidCredits{}, nil
+			})
+			u, _ = m.Update(creditMsg{got})
+			if u.(model).credits.Amount == nil {
+				t.Fatal("winning balance not picked up")
+			}
+		})
 	}
 }

@@ -205,11 +205,27 @@ func refreshCreditCache(ctx context.Context, path string, now time.Time, fetch f
 	return out
 }
 
-type creditTickMsg struct{}
 type creditMsg struct{ credits PrepaidCredits }
 
-func creditTick(after time.Duration) tea.Cmd {
-	return tea.Tick(after, func(time.Time) tea.Msg { return creditTickMsg{} })
+// Use the first exhausted limits snapshot, rather than a timer that can run
+// before startup has loaded those limits. Subsequent polls gate by the minute
+// and never overlap an in-flight balance read.
+func startCreditRefresh(rateOK bool, rl RateLimits, models []ModelWindow, loading *bool, checkedAt, now time.Time) tea.Cmd {
+	if !rateOK || *loading || !exhaustedBudget(rl, models, now) {
+		return nil
+	}
+	if age := now.Sub(checkedAt); !checkedAt.IsZero() && age >= 0 && age < creditTTL {
+		return nil
+	}
+	*loading = true
+	return creditsCmd(true)
+}
+
+func mergeCreditResult(previous, next PrepaidCredits, now time.Time) PrepaidCredits {
+	if next.FetchedAt.IsZero() && previous.Enabled {
+		return PrepaidCredits{Enabled: true, FetchedAt: now}
+	}
+	return next
 }
 
 func exhaustedWindow(w Window, now time.Time) bool {

@@ -271,8 +271,10 @@ type model struct {
 	// modelWindows are the per-model weekly limits from the usage cache. Empty
 	// whenever the pull path is unavailable or broken, which must never affect
 	// the 5h/wk gauges above.
-	modelWindows []ModelWindow
-	credits      PrepaidCredits
+	modelWindows    []ModelWindow
+	credits         PrepaidCredits
+	creditsLoading  bool
+	creditCheckedAt time.Time
 	// usageQuietUntil suspends the SPAWN half of the usage loop until the
 	// given time, after an answer that could produce nothing to render: a
 	// rate_limits_available:false verdict this pane fetched itself (API key,
@@ -967,7 +969,7 @@ func (m model) Init() tea.Cmd {
 	// first poll lands, so usageMaySpawn says no. That is the right answer
 	// anyway — a fleet coming up together would otherwise race to spawn before
 	// any of them knows whether it can render a meter line at all.
-	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())), creditTick(time.Second)}
+	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))}
 	// The project color is static for the life of a session, so it is published
 	// once here rather than from the per-tick publish path.
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
@@ -1730,7 +1732,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recomputeFromEvents(msg.time)
 		pubCmd := m.maybePublishState(msg.time)
 		infoCmds := m.maybePublishInfo()
-		allPub := tea.Batch(append(infoCmds, pubCmd)...)
+		allPub := tea.Batch(append(infoCmds, pubCmd, startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.time))...)
 		m.lastUpdate = msg.time
 		m.autoArmTeardown(prevTyped, msg.time)
 		// A ready gate is evidence gathered at the moment it opened, not a
@@ -1956,11 +1958,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		removeSessionRecord(sessionRecordDir(), m.recordName)
 		return m, killSessionCmd(m.selfPane)
 
-	case creditTickMsg:
-		return m, creditsCmd(m.rateOK && exhaustedBudget(m.rateLimits, m.modelWindows, time.Now()))
 	case creditMsg:
-		m.credits = msg.credits
-		return m, creditTick(creditTTL)
+		m.credits = mergeCreditResult(m.credits, msg.credits, time.Now())
+		m.creditsLoading = false
+		m.creditCheckedAt = msg.credits.FetchedAt
+		return m, nil
 	case usageTickMsg:
 		// The tick itself never stops: it is a file read, and it is how a pane
 		// picks up rows another pane fetched. Whether it may also SPAWN is the

@@ -54,3 +54,40 @@ func TestHelpSwallowsSessionActions(t *testing.T) {
 		}
 	}
 }
+
+func TestWideHeadHelpUsesAllAvailableWidth(t *testing.T) {
+	text := ansi.Strip(renderHeadHelp(180, 4, 0))
+	for _, entry := range headShortcuts {
+		if !strings.Contains(text, entry) {
+			t.Errorf("shortcut %q missing from wide help: %q", entry, text)
+		}
+	}
+}
+
+func TestSwitchboardQuestionMarkHelp(t *testing.T) {
+	m := swModel{width: 120, height: 18}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = updated.(swModel)
+	if cmd != nil || !strings.Contains(ansi.Strip(m.View()), "Switchboard shortcuts") {
+		t.Fatal("switchboard did not open help")
+	}
+	if text := ansi.Strip(m.View()); !strings.Contains(text, "Ctrl+R Reload all heads") || !strings.Contains(text, "p Toggle preview") {
+		t.Fatal("help omitted switchboard-specific shortcuts")
+	}
+	keys := []tea.KeyMsg{{Type: tea.KeyCtrlR}, {Type: tea.KeySpace}}
+	for _, key := range []rune{'n', 'd', 'D', 'p', 'R'} {
+		keys = append(keys, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+	}
+	for _, key := range keys {
+		updated, cmd = m.Update(key)
+		m = updated.(swModel)
+		if cmd != nil || m.creating || m.deferring || m.restart || m.fleetRestarting {
+			t.Fatalf("help dispatched %q", key.String())
+		}
+	}
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(swModel)
+	if cmd != nil || strings.Contains(ansi.Strip(m.View()), "Switchboard shortcuts") {
+		t.Fatal("escape failed to close switchboard help")
+	}
+}

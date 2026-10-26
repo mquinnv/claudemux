@@ -292,6 +292,10 @@ type swModel struct {
 	usageCachePath  string
 	modelWindows    []ModelWindow
 	credits         PrepaidCredits
+	creditsLoading  bool
+	creditCheckedAt time.Time
+	helpVisible     bool
+	helpOffset      int
 	usageQuietUntil time.Time
 	// conductReq is the last head-requested toggle this lobby applied, kept as
 	// the already-applied marker: the head leaves its request published, so
@@ -438,7 +442,7 @@ func (m *swModel) toggleStandby() {
 // rows and a usage spawn can never delay a fleet poll.
 func (m swModel) Init() tea.Cmd {
 	return tea.Batch(swPollCmd(m.selfPane, m.rateLimitsPath),
-		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())), creditTick(time.Second))
+		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())))
 }
 
 // usageMaySpawn is the lobby's half of the head's gate: it may spawn a Claude
@@ -715,11 +719,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the heads' staleness window (conductStaleAfter) is sized against this
 		// beat, and mode toggles republish immediately on their own.
 		pub := publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
+		creditCmd := startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.at)
 		// Schedule the next tick from here, not from swTickMsg: polls never
 		// overlap, and a slow tmux stretches the interval instead of queueing.
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
-			return m, tea.Batch(swNextTick(), pub)
+			return m, tea.Batch(swNextTick(), pub, creditCmd)
 		}
 		m.lastErr = ""
 		// The selection follows the session, not the index it used to sit at:
@@ -772,10 +777,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// while a launch is in flight would race the switch the launch is
 		// about to issue itself.
 		pv := m.previewCmd()
-		if !m.standby && !m.creating && !m.createBusy && !m.deferring && !(m.restore != nil && m.restore.picking) {
+		if !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
-					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan)
+					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan, creditCmd)
 			}
 		} else if m.standby {
 			// step() is what keeps the driven client current, and in standby
@@ -790,7 +795,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// next step is what tells a replaced client from a walk-away.
 			m.cond.resolveClient(m.snap)
 		}
-		return m, tea.Batch(swNextTick(), pv, pub, restoreScan)
+		return m, tea.Batch(swNextTick(), pv, pub, restoreScan, creditCmd)
 	case swRestoreScanMsg:
 		m.restore = msg.offer
 		return m, nil
@@ -825,11 +830,11 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, swRelinkCmd(restored)
 		}
 		return m, nil
-	case creditTickMsg:
-		return m, creditsCmd(m.rateOK && exhaustedBudget(m.rateLimits, m.modelWindows, time.Now()))
 	case creditMsg:
-		m.credits = msg.credits
-		return m, creditTick(creditTTL)
+		m.credits = mergeCreditResult(m.credits, msg.credits, time.Now())
+		m.creditsLoading = false
+		m.creditCheckedAt = msg.credits.FetchedAt
+		return m, nil
 	case usageTickMsg:
 		// See the head's usageTickMsg case: the tick is a file read and never
 		// stops; usageMaySpawn is the only gate on spawning.
@@ -904,6 +909,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if m.helpVisible {
+			return m.switchboardHelpKey(msg)
+		}
 		if m.creating {
 			switch msg.String() {
 			case "esc", "ctrl+c":
@@ -992,6 +1000,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch msg.String() {
+		case "?":
+			m.helpVisible = true
+			m.helpOffset = 0
+			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "R":
@@ -1218,6 +1230,9 @@ func swMetersLine(m swModel, now time.Time) string {
 }
 
 func (m swModel) View() string {
+	if m.helpVisible {
+		return renderShortcutHelp("Switchboard shortcuts", switchboardShortcuts, m.width, m.height, m.helpOffset)
+	}
 	now := time.Now()
 	var b strings.Builder
 	title := swTitleStyle.Render("claudemux switchboard") + "  " + swModeBadge(m.standby, m.cond.phase)
@@ -1459,7 +1474,7 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · R restart · ^R restart all · q quit"
+	footerText := "? keys · space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
 	}

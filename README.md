@@ -686,7 +686,8 @@ prepaid-credit endpoints using the signed-in Claude profile. On macOS the
 token comes from Claude Code's Keychain entry, with its credentials file as
 fallback; other platforms use the credentials file. No token is logged or
 written to claudemux's cache, and claudemux never refreshes or changes credentials.
-The balance is cached for one minute per profile and organization, shared
+The first exhausted-limit snapshot triggers a balance check immediately on
+startup. The balance is cached for one minute per profile and organization, shared
 between heads. Failed reads also back off for a minute; an unavailable or stale
 balance is labeled `balance unavailable` instead of displaying old money as current.
 
@@ -1048,11 +1049,13 @@ paused-session state survive that restart via a short-lived handoff file at
 `~/.claude/claudemux/conductor-handoff.json`, read once on startup and ignored
 if it's older than 30s.
 
-**Keyboard cheatsheet.** Press `?` in the head to show its keyboard shortcuts.
-The list fits the pane's height; use `↑`/`↓` or `j`/`k` to scroll, `Page Up`/
+**Keyboard cheatsheet.** Press `?` in the head or switchboard to show its own
+keyboard shortcuts. Entries pack across the full width, so a wide four-row head
+shows the whole cheatsheet. If the pane is too small, use `↑`/`↓` or `j`/`k` to scroll, `Page Up`/
 `Page Down` to page, and `Home`/`End` to jump. Press `?`, `Esc`, or `q` to
 close the cheatsheet and return to the head. Session-action keys are inactive
-while help is open; `Ctrl+C` still quits the head.
+while help is open; `Ctrl+C` still quits. The switchboard pauses conducting
+while its cheatsheet is open.
 
 `q`, `ctrl+c` and `esc` quit instead, and quitting **closes the pane**: the head
 is the pane's program, and a clean exit is not the failure that
