@@ -23,15 +23,16 @@ import (
 // Amount is the prepaid balance in currency minor units, not the monthly
 // spending allowance. A nil amount is unknown; zero is a real empty balance.
 type PrepaidCredits struct {
-	Enabled       bool                `json:"enabled"`
-	Amount        *float64            `json:"amount,omitempty"`
-	Currency      string              `json:"currency,omitempty"`
-	FetchedAt     time.Time           `json:"fetched_at"`
-	Spent         *float64            `json:"spent,omitempty"`
-	Samples       []creditSpendSample `json:"spend_samples,omitempty"`
-	BalanceAt     time.Time           `json:"balance_at,omitempty"`
-	RefreshFailed bool                `json:"refresh_failed,omitempty"`
-	UsageRetryAt  time.Time           `json:"usage_retry_at,omitempty"`
+	Enabled        bool                  `json:"enabled"`
+	Amount         *float64              `json:"amount,omitempty"`
+	Currency       string                `json:"currency,omitempty"`
+	FetchedAt      time.Time             `json:"fetched_at"`
+	Spent          *float64              `json:"spent,omitempty"`
+	Samples        []creditSpendSample   `json:"spend_samples,omitempty"`
+	BalanceAt      time.Time             `json:"balance_at,omitempty"`
+	RefreshFailed  bool                  `json:"refresh_failed,omitempty"`
+	UsageRetryAt   time.Time             `json:"usage_retry_at,omitempty"`
+	BalanceSamples []creditBalanceSample `json:"-"`
 }
 
 const creditTTL = time.Minute
@@ -83,11 +84,11 @@ func fetchPrepaidCreditStatus(ctx context.Context, client *http.Client, base str
 		out.UsageRetryAt = usageRetryAt
 		usageErr = errors.New("usage counter cooling down")
 	} else {
+		// Availability metadata is slow-changing. Burn estimates use the
+		// already fetched balance and must not create minute-by-minute calls
+		// to this separate, restrictive endpoint.
+		out.UsageRetryAt = now.Add(usageTTL)
 		usageErr = get("/api/oauth/usage", &usage)
-		var status creditHTTPStatus
-		if errors.As(usageErr, &status) && status == 429 {
-			out.UsageRetryAt = now.Add(5 * time.Minute)
-		}
 	}
 	if usageErr == nil {
 		if usage.Extra == nil {
@@ -207,6 +208,9 @@ func readCreditCache(path string) PrepaidCredits {
 		out.RefreshFailed = true
 		out.Samples = nil
 	}
+	if history := readCreditBalanceHistory(path); history.Currency == out.Currency {
+		out.BalanceSamples = history.Samples
+	}
 	return out
 }
 
@@ -219,7 +223,7 @@ func creditFresh(c PrepaidCredits, now time.Time) bool {
 func refreshCreditCache(ctx context.Context, path string, now time.Time, fetch func(context.Context) (PrepaidCredits, error)) PrepaidCredits {
 	previous := readCreditCache(path)
 	if age := now.Sub(previous.FetchedAt); age >= 0 && age < creditTTL {
-		return previous
+		return recordCreditBalanceHistory(path, previous)
 	}
 	if os.MkdirAll(filepath.Dir(path), 0700) != nil {
 		return PrepaidCredits{}
@@ -230,13 +234,13 @@ func refreshCreditCache(ctx context.Context, path string, now time.Time, fetch f
 		if st, e := os.Stat(lock); e == nil && now.Sub(st.ModTime()) > usageLockStale {
 			_ = os.Remove(lock)
 		}
-		return previous
+		return recordCreditBalanceHistory(path, previous)
 	}
 	f.Close()
 	defer os.Remove(lock)
 	// Another head may have populated the cache just before we got the lock.
 	if latest := readCreditCache(path); now.Sub(latest.FetchedAt) >= 0 && now.Sub(latest.FetchedAt) < creditTTL {
-		return latest
+		return recordCreditBalanceHistory(path, latest)
 	}
 	out, err := fetch(ctx)
 	if err != nil {
@@ -264,6 +268,7 @@ func refreshCreditCache(ctx context.Context, path string, now time.Time, fetch f
 		out.BalanceAt = out.FetchedAt
 	}
 	out = recordCreditSpend(previous, out)
+	out = recordCreditBalanceHistory(path, out)
 	_ = writeJSONAtomic(path, out)
 	return out
 }
@@ -367,8 +372,8 @@ func creditBalanceText(c PrepaidCredits, now time.Time) string {
 	if rate, ok := creditSpendRate(c, now); ok {
 		return text + " · " + formatCreditMoney(rate, c.Currency) + "/hr"
 	}
-	if c.Spent == nil {
-		return text + " · rate unavailable"
+	if rate, ok := creditBalanceRate(c, now); ok {
+		return text + " · ≈" + formatCreditMoney(rate, c.Currency) + "/hr"
 	}
 	unit := c.Currency
 	if unit == "USD" {

@@ -693,18 +693,23 @@ seconds so they converge on the same result. Failed reads back off for a minute;
 the last successful amount stays visible as `last $12.34 (... ago; retrying)`.
 With no previous balance, the label reads `balance unavailable`.
 
-The burn figure uses the account's cumulative usage-credit spending over up to
-five minutes, after at least two minutes of history. Deposits and auto-reloads
-do not count as negative spending. A billing-counter reset, currency change,
-or a gap over three minutes starts measurement again. History is shared across
-heads and survives restarts. The rate reads `measuring $/hr` during warm-up, or
-`rate unavailable` if Claude has not supplied a spend counter. This covers the
-account's usage-credit spending, rather than an individual session.
+The burn figure normally estimates the net balance decrease over up to five
+minutes, after at least two minutes of observations: `≈$1.80/hr`. It uses the
+balance snapshots already fetched, with no additional network requests.
+An observed balance increase (such as a top-up), currency change, or gap over
+three minutes starts measurement again. It is an estimate: other balance
+adjustments can affect it. If a usable cumulative spend-counter history is
+already available, that supplies an exact counter-derived rate instead.
+History is shared across heads in a separate local file, survives restarts,
+and cannot be erased by older heads writing their balance cache. The rate
+reads `measuring $/hr` while history builds. This covers the account balance,
+rather than an individual session.
 
-The spend counter and prepaid balance have separate endpoints. If Claude
-rate-limits the usage endpoint, claudemux backs that endpoint off for five
-minutes and continues refreshing the balance. A missing spend counter never
-discards a successfully fetched balance. A separate cache version also protects
+Usage metadata and prepaid balance have separate endpoints. The credit reader
+asks for usage metadata at most once per 15 minutes, whether the request succeeds
+or fails; the existing per-model usage reader has its own 15-minute cadence.
+Missing usage metadata never blocks the balance-derived estimate or discards
+a successfully fetched balance. A separate cache version also protects
 these values from heads still running an older binary during an upgrade.
 
 API-key, third-party-provider, custom-endpoint, and explicitly supplied OAuth-token
