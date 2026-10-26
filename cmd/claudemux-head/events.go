@@ -144,7 +144,18 @@ type Event struct {
 	// expires) leaves it as the newest turn indefinitely. See
 	// lastConversationEvent and genuinePrompt.
 	IsCompactSummary bool
-	RawLine          string
+	// PeerBrief marks a `user` record carrying a request another Claude
+	// session sent (claudemux-handoff, SendMessage to a peer). The harness
+	// writes it isMeta with `origin.kind: "peer"` and `fromMode: "prompting"`,
+	// and wraps the text in a <cross-session-message> envelope plus a
+	// permissions caveat; UserText holds the clean `origin.body` instead. A
+	// session launched by a handoff has no human prompt at all, so without
+	// this its summary has no first prompt to anchor on (2026-10-26: two
+	// pr-loop peers of remix-3 were labelled after a skill-lookup detour).
+	// Subagent hand-backs share the kind but set `handback: true`; they are
+	// reports, not requests, and never set this.
+	PeerBrief bool
+	RawLine   string
 }
 
 type EventReader struct {
@@ -345,6 +356,12 @@ func parseEvent(line string) (Event, bool) {
 		// because its shape varies per tool — see extractLaunch.
 		ToolUseResult json.RawMessage `json:"toolUseResult"`
 		ContinuedIn   string          `json:"continuedInSessionId"` // present on type=continued-in
+		Origin        struct {
+			Kind     string `json:"kind"`
+			FromMode string `json:"fromMode"`
+			Handback bool   `json:"handback"`
+			Body     string `json:"body"`
+		} `json:"origin"`
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Event{}, false
@@ -386,6 +403,12 @@ func parseEvent(line string) (Event, bool) {
 			ev.Usage = msg.Usage
 			extractContent(&ev, msg.Content)
 		}
+	}
+
+	if o := raw.Origin; raw.Type == "user" && raw.IsMeta && o.Kind == "peer" &&
+		o.FromMode == "prompting" && !o.Handback && strings.TrimSpace(o.Body) != "" {
+		ev.PeerBrief = true
+		ev.UserText = o.Body
 	}
 	return ev, true
 }

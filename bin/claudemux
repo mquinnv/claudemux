@@ -6,7 +6,8 @@
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
 # Environments), zoxide (directory-query resolution), iTerm2 (tab coloring).
 #
-# Each directory gets its own session named after the directory basename.
+# Each directory gets its own session named after the directory basename (an
+# agent-<hex> worktree is named after its branch instead; see session_base_name).
 # Layout: claudemux-head is always a full-width pane, as many rows tall as its
 # configured context rows need (`head.rows`, 4 by default); `launch.layout`
 # in config.yml then chooses where claude and the optional shell go —
@@ -879,10 +880,34 @@ record_parent() {
   return 0
 }
 
+# session_base_name DIR — the session name DIR gets by default: its basename,
+# except for a worktree Claude Code named after an agent id
+# (.claude/worktrees/agent-<hex>, left behind by an `isolation: worktree`
+# subagent and later handed off to its own session). That basename says
+# nothing, so such a directory is named after the branch it has checked out,
+# minus any feature/-style prefix: feature/crm-831-softphone-dock-position
+# becomes crm-831-softphone-dock-position. tmux forbids "." and ":" in session
+# names and git already forbids ":", so a "." becomes a dash. A detached HEAD,
+# or a branch that is itself only the agent id (worktree-agent-<hex>), keeps
+# the basename.
+session_base_name() {
+  local base branch
+  base="$(basename "$1")"
+  if [[ "$base" =~ ^agent-[0-9a-f]{8,}$ ]]; then
+    branch="$(git -C "$1" branch --show-current 2>/dev/null || true)"
+    branch="${branch##*/}"
+    branch="${branch//./-}"
+    if [ -n "$branch" ] && ! [[ "$branch" =~ agent-[0-9a-f]{8,} ]]; then
+      base="$branch"
+    fi
+  fi
+  printf '%s\n' "$base"
+}
+
 create_session() {
   local work_dir="$1"
   local session_name clone_suffix=""
-  session_name="$(basename "$work_dir")"
+  session_name="$(session_base_name "$work_dir")"
   if [ -n "$EXACT_NAME" ]; then
     # Restore: the name is the whole point, so a clash is an error rather than
     # an attach or a -2 suffix.

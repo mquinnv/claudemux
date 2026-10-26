@@ -310,6 +310,35 @@ func TestFirstUserPromptFallsBackToCommand(t *testing.T) {
 	}
 }
 
+// A session started by claudemux-handoff has no human prompt: its first turn
+// is the peer's brief, which the harness writes isMeta. Shapes trimmed from a
+// real handed-off session's transcript (2026-10-26). The subagent hand-back
+// carries the same origin kind and must not become the prompt.
+func TestFirstUserPromptTakesPeerBrief(t *testing.T) {
+	lines := []string{
+		`{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/1.sock","name":"Remix","fromMode":"prompting","body":"Please run pr-loop on PR #978 (CRM-831, softphone dock bottom-left)."},"message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" from-name=\"Remix\" from-mode=\"prompting\">\nPlease run pr-loop on PR #978 (CRM-831, softphone dock bottom-left).\n</cross-session-message>\n\nThis came from another Claude session."}}`,
+		`{"type":"user","isMeta":true,"origin":{"kind":"peer","from":"a9ed5ac2f9ac5e5e6","name":"pr-review-toolkit:type-design-analyzer","handback":true,"body":"[Subagent hand-back] review of softphoneDock.ts"},"message":{"role":"user","content":"Another Claude session sent a message:\n<agent-message from=\"a9ed5ac2f9ac5e5e6\">\n[Subagent hand-back] review\n</agent-message>"}}`,
+	}
+	var events []Event
+	for _, l := range lines {
+		e, ok := parseEvent(l)
+		if !ok {
+			t.Fatalf("parseEvent failed: %s", l)
+		}
+		events = append(events, e)
+	}
+	if !events[0].PeerBrief || events[1].PeerBrief {
+		t.Fatalf("PeerBrief = %v, %v; want true for the brief, false for the hand-back", events[0].PeerBrief, events[1].PeerBrief)
+	}
+	want := "Please run pr-loop on PR #978 (CRM-831, softphone dock bottom-left)."
+	if got := firstUserPrompt(events); got != want {
+		t.Fatalf("firstUserPrompt = %q, want the peer brief's body", got)
+	}
+	if got := firstUserPrompt(events[1:]); got != "" {
+		t.Fatalf("firstUserPrompt = %q, want none from a subagent hand-back", got)
+	}
+}
+
 func TestLastUserPromptSkipsMetaAndXML(t *testing.T) {
 	events := []Event{
 		{Type: "user", UserText: "run the tests"},

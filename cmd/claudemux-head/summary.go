@@ -123,7 +123,15 @@ Call the summarize tool with these fields:
   process. Writing a spec or plan, executing a plan, dispatching subagents,
   running tests, reviewing, or committing is how the work is done, never what
   it is for: "implement feature from spec and plan via subagent execution" is
-  a wrong topic; the feature that plan builds is the right one.
+  a wrong topic; the feature that plan builds is the right one. The same goes
+  for a skill or loop run against a PR or ticket: for "run pr-loop on PR #978
+  (softphone dock bottom-left)" the topic is the softphone dock, not pr-loop.
+  A first reply about tooling (a renamed skill, a missing command, a setup
+  hiccup) is a detour too; it never outranks a first prompt that names its
+  subject.
+
+  The first prompt may be a brief from another Claude session rather than
+  from the human. Treat it exactly like a human's first prompt.
 
 - now: what it is doing RIGHT NOW — the current step. Derive it from the END of
   the transcript.

@@ -616,6 +616,17 @@ func TestSystemPromptDescribesTab(t *testing.T) {
 	}
 }
 
+// A handed-off pr-loop session was once labelled "team-core pr-loop skill":
+// the topic came from the skill it ran and the first reply's skill-rename
+// detour, not the PR's subject. Keep the rule that names that case.
+func TestSystemPromptTreatsSkillRunsAsProcess(t *testing.T) {
+	for _, want := range []string{"pr-loop", "renamed skill", "another Claude session"} {
+		if !strings.Contains(summarySystemPrompt, want) {
+			t.Errorf("summarySystemPrompt does not mention %q", want)
+		}
+	}
+}
+
 func TestSummarizeErrorsOnEmptyTab(t *testing.T) {
 	d := &fakeDoer{body: toolUseResponseWithTab("fixing the worktree chip", "running tests", "")}
 	s := testSummarizer(d)

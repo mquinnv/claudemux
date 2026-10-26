@@ -168,6 +168,50 @@ func TestLauncherRecordsParentOnlyFromClaudePane(t *testing.T) {
 	}
 }
 
+// A handed-off session in a subagent's leftover worktree was once named
+// "agent-aa1d2408f0f27fdfd" in the lobby; its branch said what it was for.
+func TestLauncherSessionBaseNameUsesBranchForAgentWorktrees(t *testing.T) {
+	src, err := os.ReadFile(launcherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, ok := shellFuncBody(string(src), "session_base_name")
+	if !ok {
+		t.Fatal("session_base_name not found")
+	}
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+	wt := repo + "/.claude/worktrees/"
+	git("worktree", "add", "-q", "-b", "feature/crm-1.2-x", wt+"agent-aa1d2408f0f27fdfd")
+	git("worktree", "add", "-q", "-b", "worktree-agent-a9acdef44c950392b", wt+"agent-a9acdef44c950392b")
+	git("worktree", "add", "-q", "-b", "feature/other", wt+"lead-visibility")
+
+	for dir, want := range map[string]string{
+		wt + "agent-aa1d2408f0f27fdfd": "crm-1-2-x",
+		wt + "agent-a9acdef44c950392b": "agent-a9acdef44c950392b",
+		wt + "lead-visibility":         "lead-visibility",
+		repo + "/not-a-repo-agent":     "not-a-repo-agent",
+	} {
+		script := "session_base_name() {\n" + body + "\n}\nsession_base_name \"$1\""
+		out, err := exec.Command("bash", "-c", script, "bash", dir).CombinedOutput()
+		if err != nil {
+			t.Fatalf("session_base_name %s: %v\n%s", dir, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("session_base_name %s = %q, want %q", dir, got, want)
+		}
+	}
+}
+
 func TestLauncherSyntax(t *testing.T) {
 	if out, err := exec.Command("bash", "-n", launcherPath).CombinedOutput(); err != nil {
 		t.Fatalf("bash -n: %v\n%s", err, out)

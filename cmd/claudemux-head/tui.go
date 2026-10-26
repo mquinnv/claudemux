@@ -861,12 +861,14 @@ func lastUsage(events []Event) *Usage {
 // Harness bookkeeping also arrives as user turns: isMeta caveat notices,
 // injected task notifications / system reminders (text starts with "<" —
 // humans don't open messages with XML). Slash commands pass; callers that
-// want to de-prioritize them do so themselves.
+// want to de-prioritize them do so themselves. A peer session's brief is the
+// one isMeta record that counts: it is the request a handed-off session was
+// started for, standing in for the human's (see Event.PeerBrief).
 func genuinePrompt(e Event) bool {
 	if e.Type != "last-prompt" && e.Type != "user" {
 		return false
 	}
-	if e.IsMeta || e.IsCompactSummary || e.UserText == "" {
+	if (e.IsMeta && !e.PeerBrief) || e.IsCompactSummary || e.UserText == "" {
 		return false
 	}
 	return !strings.HasPrefix(strings.TrimSpace(e.UserText), "<")
