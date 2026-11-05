@@ -49,6 +49,9 @@ func swBigFleetModel(n int) swModel {
 		})
 	}
 	m.snap.Sessions = sessions
+	// Pinned: a fleet this size crowds the box, which would otherwise close on
+	// its own. These tests are about scrolling beside the box.
+	m.previewPinned = true
 	return m
 }
 
@@ -129,5 +132,75 @@ func TestSwModelHiddenPreviewSkipsCaptures(t *testing.T) {
 	m.previewHidden = true
 	if _, cmd := swPress(m, 'j'); cmd != nil {
 		t.Error("moving the selection with the preview hidden must not capture")
+	}
+}
+
+// A fleet that no longer fits beside the box closes the box on its own: seeing
+// every session matters more than seeing one session's screen.
+func TestSwModelPreviewClosesWhenFleetOutgrowsIt(t *testing.T) {
+	m := swBigFleetModel(30)
+	m.previewPinned = false
+	raw := m.View()
+	view := ansi.Strip(raw)
+	if strings.Contains(view, "┌") {
+		t.Errorf("a box that crowds the fleet must close on its own:\n%s", view)
+	}
+	swAssertFits(t, m, raw)
+	pinned := strings.Count(ansi.Strip(swBigFleetModel(30).View()), "sess-")
+	if got := strings.Count(view, "sess-"); got <= pinned {
+		t.Errorf("the closed box must give its rows to the list (%d with box, %d without)", pinned, got)
+	}
+	if _, cmd := swPress(m, 'j'); cmd != nil {
+		t.Error("a box closed for crowding must not capture")
+	}
+}
+
+// A fleet that fits beside the box leaves it open, exactly as before.
+func TestSwModelPreviewStaysOpenWhenFleetFits(t *testing.T) {
+	m := swBigFleetModel(3)
+	m.previewPinned = false
+	m.followSelection()
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "┌") {
+		t.Errorf("a fleet that fits must keep the box:\n%s", view)
+	}
+}
+
+// p reopens a box that closed itself, and it stays open (pinned) while the
+// fleet still overflows; p again hides it as usual.
+func TestSwModelPReopensAutoClosedPreview(t *testing.T) {
+	m := swBigFleetModel(30)
+	m.previewPinned = false
+	next, cmd := swPress(m, 'p')
+	m = next.(swModel)
+	if !m.previewPinned || m.previewHidden || cmd == nil {
+		t.Fatalf("p on an auto-closed box must pin it open and capture (pinned=%v hidden=%v cmd=%v)",
+			m.previewPinned, m.previewHidden, cmd != nil)
+	}
+	next, _ = swPress(m, 'j')
+	m = next.(swModel)
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "┌") {
+		t.Errorf("a pinned box must survive moving the selection:\n%s", view)
+	}
+	next, _ = swPress(m, 'p')
+	m = next.(swModel)
+	if !m.previewHidden || m.previewPinned {
+		t.Errorf("p on an open box must hide it and drop the pin (hidden=%v pinned=%v)", m.previewHidden, m.previewPinned)
+	}
+}
+
+// The pin lasts only while the fleet overflows: once it fits again the pin is
+// dropped, so the next time the fleet outgrows the box it closes on its own.
+func TestSwModelPinClearsWhenFleetFitsAgain(t *testing.T) {
+	m := swBigFleetModel(30)
+	m.snap.Sessions = m.snap.Sessions[:3]
+	m.sel = 0
+	m.followSelection()
+	if m.previewPinned {
+		t.Fatal("the pin must clear once the fleet fits beside the box")
+	}
+	m.snap.Sessions = swBigFleetModel(30).snap.Sessions
+	m.followSelection()
+	if view := ansi.Strip(m.View()); strings.Contains(view, "┌") {
+		t.Errorf("after the pin cleared, an outgrown box must close again:\n%s", view)
 	}
 }
