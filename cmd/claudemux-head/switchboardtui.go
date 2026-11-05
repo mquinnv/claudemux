@@ -504,7 +504,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 			return msg
 		}
 		clientOut, err := swTmux(ctx, "list-clients", "-F",
-			"#{client_name}\t#{client_session}")
+			"#{client_name}\t#{client_session}\t#{client_last_session}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -737,6 +737,11 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		selName := ""
 		if m.sel >= 0 && m.sel < len(m.snap.Sessions) {
 			selName = m.snap.Sessions[m.sel].Name
+		}
+		// ...except when a client has just come back to the lobby: then the
+		// cursor jumps to the session it left (swArrivedFrom).
+		if from := swArrivedFrom(m.snap, msg.snap, m.cond.client); from != "" {
+			selName = from
 		}
 		m.snap = msg.snap
 		if m.web != nil {

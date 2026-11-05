@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -107,6 +108,10 @@ type swSnapshot struct {
 	Sessions []swSession
 	Lobby    string            // session owning selfPane; "" if not found
 	Clients  map[string]string // client name -> session it is attached to
+	// ClientLast: client name -> the session it was on before its current
+	// one (#{client_last_session}), so a client that just landed on the
+	// lobby says where it came from. Absent when tmux reports none.
+	ClientLast map[string]string
 }
 
 // isWaiting reports whether a published state means "paused waiting on
@@ -157,9 +162,9 @@ const (
 //
 //	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay} #{@claudemux_description} #{@claudemux_closing} #{session_created} #{@claudemux_parent} #{@claudemux_parent_created}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
-//	clientOut: #{client_name} #{client_session}
+//	clientOut: #{client_name} #{client_session} #{client_last_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
-	snap := swSnapshot{Clients: map[string]string{}}
+	snap := swSnapshot{Clients: map[string]string{}, ClientLast: map[string]string{}}
 
 	heads := map[string]bool{}
 	topics := map[string]string{}
@@ -256,12 +261,65 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(clientOut, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 2 || f[0] == "" {
+		// The last-session field is optional so two-field listings (older
+		// fixtures) still parse.
+		if len(f) < 2 || len(f) > 3 || f[0] == "" {
 			continue
 		}
 		snap.Clients[f[0]] = f[1]
+		if len(f) == 3 && f[2] != "" {
+			snap.ClientLast[f[0]] = f[2]
+		}
 	}
 	return snap
+}
+
+// swArrivedFrom names the fleet session a client just left to come to the
+// lobby, so the cursor can land on it: returning to the switchboard (prefix+S,
+// or the conductor handing back) should show the session you were just in,
+// not wherever the cursor happened to sit. A client counts as arriving when
+// next has it on the lobby and prev did not (prev is the zero snapshot on the
+// lobby's first poll). Its origin is tmux's last session for it, falling back
+// to the session prev saw it on. preferred (the conductor's client) wins when
+// several arrive in one poll; otherwise the lowest client name, for
+// determinism. "" when nobody arrived or the origin is not in the fleet.
+func swArrivedFrom(prev, next swSnapshot, preferred string) string {
+	if next.Lobby == "" {
+		return ""
+	}
+	origin := func(client string) string {
+		if next.Clients[client] != next.Lobby {
+			return ""
+		}
+		before, seen := prev.Clients[client]
+		if seen && before == next.Lobby {
+			return ""
+		}
+		from := next.ClientLast[client]
+		if _, ok := next.session(from); !ok {
+			from = before
+		}
+		if _, ok := next.session(from); !ok {
+			return ""
+		}
+		return from
+	}
+	if preferred != "" {
+		if from := origin(preferred); from != "" {
+			return from
+		}
+	}
+	names := make([]string, 0, len(next.Clients))
+	for name := range next.Clients {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if from := origin(name); from != "" {
+			return from
+		}
+	}
+	return ""
 }
 
 // swGroup is which of the lobby's lists a session is shown in.
