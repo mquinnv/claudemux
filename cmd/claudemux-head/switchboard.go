@@ -85,15 +85,18 @@ type swSession struct {
 	ParentCreated int64
 	// The fields below are derived by swArrangeFamilies, never parsed.
 	// Depth is 0 for a top-level row; TreePrefix is the tree-glyph string drawn
-	// before the name ("" at depth 0, 2 cells per level); FamilyGroup is the
+	// before the name ("" at depth 0, 2 cells per level); DetailPrefix is the
+	// glyph string drawn before the row's detail line, continuing the tree's
+	// vertical bars past it; FamilyGroup is the
 	// group of the block the row is drawn in (the lowest group of any family
 	// member, which can differ from swGroupOf for a lone deferred parent);
 	// From names the launching session when the link did not hold (parent gone
 	// or its name reused), "" otherwise.
-	Depth       int
-	TreePrefix  string
-	FamilyGroup swGroup
-	From        string
+	Depth        int
+	TreePrefix   string
+	DetailPrefix string
+	FamilyGroup  swGroup
+	From         string
 }
 
 type swSnapshot struct {

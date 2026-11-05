@@ -2008,3 +2008,43 @@ func TestViewDeepNestingKeepsGrid(t *testing.T) {
 		t.Errorf("deepest row lost its name cell: %q", dl)
 	}
 }
+
+// A detail line continues the tree's vertical bars: an earlier sibling's
+// detail line keeps the bar down to the next sibling's tee, and a parent's
+// detail line carries a bar down into its first child.
+func TestViewDetailLinesContinueTreeBars(t *testing.T) {
+	now := time.Now()
+	m := newSwModel("%9")
+	m.width, m.height = 140, 30
+	row := func(name string, created int64, parent string, pcreated int64) swSession {
+		return swSession{Name: name, State: "Idle", Since: now, Context: 40, Topic: name + "-topic",
+			Created: created, Parent: parent, ParentCreated: pcreated, Model: "claude-opus-4-7",
+			Summary: name + " summary"}
+	}
+	m.snap = swSnapshot{Sessions: swArrangeFamilies([]swSession{
+		row("root", 10, "", 0),
+		row("mid", 20, "root", 10),
+		row("a", 30, "mid", 20),
+		row("b", 40, "mid", 20),
+	})}
+	ind := strings.Repeat(" ", swDetailIndent)
+	want := map[string]string{
+		"root summary": ind + "│ root summary",
+		"mid summary":  ind + "  │ mid summary",
+		"a summary":    ind + "  │ a summary",
+		"b summary":    ind + "    b summary",
+	}
+	for _, l := range strings.Split(ansi.Strip(m.View()), "\n") {
+		for k, w := range want {
+			if strings.Contains(l, k) {
+				if !strings.HasPrefix(l, w) {
+					t.Errorf("detail line = %q, want prefix %q", l, w)
+				}
+				delete(want, k)
+			}
+		}
+	}
+	for k := range want {
+		t.Errorf("no detail line for %q", k)
+	}
+}

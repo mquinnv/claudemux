@@ -147,7 +147,7 @@ func (p *webPrivacy) visible(sessions []swSession) []swSession {
 		if s.Depth != newDepth {
 			// Re-rooted: the glyph string described the old nesting. The
 			// page draws by Depth alone and never reads it.
-			s.TreePrefix = ""
+			s.TreePrefix, s.DetailPrefix = "", ""
 		}
 		s.Depth = newDepth
 		if s.From != "" {
