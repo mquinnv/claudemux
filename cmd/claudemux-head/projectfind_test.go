@@ -268,3 +268,55 @@ func TestRunProjectFindWrongArgCount(t *testing.T) {
 		}
 	}
 }
+
+// The exact pass runs before zoxide, so it must never answer with a prefix or
+// substring hit: those are zoxide's to beat. "pa" must not pick "password".
+func TestFindProjectExactIgnoresPrefixAndSubstring(t *testing.T) {
+	root := mkProjects(t, "1password-bridge", "panel")
+	if got, ok := findProjectExact([]string{root}, "pa"); ok {
+		t.Errorf("findProjectExact() = %q, want no match for prefix/substring-only hits", got)
+	}
+}
+
+func TestFindProjectExactFindsNestedExact(t *testing.T) {
+	root := mkProjects(t, "1password-bridge", "beejax/sites/pa")
+	sites := filepath.Join(root, "beejax", "sites")
+	got, ok := findProjectExact([]string{root, sites}, "PA")
+	if !ok {
+		t.Fatal("findProjectExact() ok = false, want the directory named exactly pa")
+	}
+	if want := filepath.Join(sites, "pa"); got != want {
+		t.Errorf("findProjectExact() = %q, want %q", got, want)
+	}
+}
+
+func TestRunProjectFindExactFlag(t *testing.T) {
+	projects := mkProjects(t, "pa", "panel")
+	root := t.TempDir()
+	dir := filepath.Join(root, "claudemux")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := "launch:\n  project_dirs:\n    - " + projects + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", root)
+
+	var stdout, stderr bytes.Buffer
+	if code := runProjectFind([]string{"--exact", "pa"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("runProjectFind(--exact pa) = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got, want := strings.TrimSpace(stdout.String()), filepath.Join(projects, "pa"); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runProjectFind([]string{"--exact", "pan"}, &stdout, &stderr); code != 1 {
+		t.Errorf("runProjectFind(--exact pan) = %d, want 1 — a prefix hit is not exact", code)
+	}
+	if stdout.String() != "" || stderr.String() != "" {
+		t.Errorf("stdout = %q, stderr = %q, want both empty on a miss", stdout.String(), stderr.String())
+	}
+}

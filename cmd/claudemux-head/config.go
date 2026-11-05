@@ -176,10 +176,11 @@ type LaunchConfig struct {
 	// Empty (the default) is a plain shell — the behavior this key was added
 	// to make optional.
 	ShellCommand string `yaml:"shell_command"`
-	// ProjectDirs are the roots bin/claudemux searches when a launch query is
-	// neither a real directory nor a zoxide hit — the last resort before the
-	// launcher gives up. Ships empty, which keeps resolution exactly as it was
-	// before this existed: a query zoxide misses still fails.
+	// ProjectDirs are the roots bin/claudemux searches by name for a launch
+	// query that is not a real directory: an exact name match before zoxide,
+	// prefix/substring matches after zoxide misses, as the last resort before
+	// the launcher gives up. Ships empty, which keeps resolution exactly as it
+	// was before this existed: a query zoxide misses still fails.
 	//
 	// Searched in the order written, and that order is meaningful — it breaks
 	// ties between equally good matches (see findProject). loadConfig expands

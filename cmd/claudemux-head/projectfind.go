@@ -29,13 +29,26 @@ const projectMatchDepth = 2
 // findProject returns the best project directory under roots for query, or
 // ok=false when nothing matches.
 //
-// This is the last step of bin/claudemux's resolve_dir, reached only when the
-// query is neither a real directory nor a zoxide hit. It must therefore be
-// decisive: it either names one directory to launch into, or says nothing at
-// all. Ambiguity is resolved rather than reported — see projectCandidate.less
-// for the ordering, which is total, so the same query always resolves to the
-// same project.
+// bin/claudemux's resolve_dir calls this twice. First exact-only, BEFORE
+// zoxide: a directory literally named after the query is what the user meant,
+// and zoxide matches substrings anywhere in the last path component, so a
+// short query like "pa" would otherwise be answered by a more frecent
+// "1password-webcatalog-bridge". Then, after zoxide misses, with every tier.
+// Either way it must be decisive: it names one directory to launch into, or
+// says nothing at all. Ambiguity is resolved rather than reported — see
+// projectCandidate.less for the ordering, which is total, so the same query
+// always resolves to the same project.
 func findProject(roots []string, query string) (string, bool) {
+	return findProjectTier(roots, query, matchSubstring)
+}
+
+// findProjectExact is findProject restricted to exact basename matches.
+func findProjectExact(roots []string, query string) (string, bool) {
+	return findProjectTier(roots, query, matchExact)
+}
+
+// findProjectTier is findProject ignoring every match worse than maxTier.
+func findProjectTier(roots []string, query string, maxTier int) (string, bool) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return "", false
@@ -46,7 +59,7 @@ func findProject(roots []string, query string) (string, bool) {
 	for i, root := range roots {
 		walkProjectRoot(root, 1, func(path, name string, depth int) {
 			tier := matchTier(strings.ToLower(name), q)
-			if tier == matchNone {
+			if tier > maxTier {
 				return
 			}
 			c := projectCandidate{path: path, tier: tier, depth: depth, root: i}
@@ -139,22 +152,31 @@ func (c projectCandidate) less(other projectCandidate) bool {
 	}
 }
 
-// runProjectFind implements `claudemux-head project find <query>` and returns
-// the process exit code.
+// runProjectFind implements `claudemux-head project find [--exact] <query>`
+// and returns the process exit code. --exact accepts only a directory named
+// exactly <query> (case-insensitively); the launcher asks that before zoxide.
+// An older binary rejects --exact as a usage error (2), which the launcher
+// treats as "no match" — so a new script on an old binary just keeps the old
+// directory-then-zoxide order.
 //
 // The codes mirror `config get`'s, because bin/claudemux reads them the same
 // way:
 //
 //	0 — found; the absolute directory on stdout
-//	1 — no match; NOTHING on stdout or stderr. Every call that gets here is a
-//	    query zoxide already missed, so "no project either" is the ordinary
-//	    outcome and the launcher prints its own message about it.
+//	1 — no match; NOTHING on stdout or stderr. A miss is the ordinary outcome
+//	    (the exact pass misses on every fuzzy query; the fallback pass only runs
+//	    after zoxide missed too), and the launcher prints its own message.
 //	2 — usage error (wrong argument count)
 //	3 — config.yml exists but does not parse. Kept distinct from 1 so a broken
 //	    config surfaces instead of looking like an unmatched query.
 func runProjectFind(args []string, stdout, stderr io.Writer) int {
+	exact := false
+	if len(args) > 0 && args[0] == "--exact" {
+		exact = true
+		args = args[1:]
+	}
 	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: claudemux-head project find <query>")
+		fmt.Fprintln(stderr, "usage: claudemux-head project find [--exact] <query>")
 		return 2
 	}
 
@@ -164,7 +186,11 @@ func runProjectFind(args []string, stdout, stderr io.Writer) int {
 		return 3
 	}
 
-	dir, ok := findProject(cfg.Launch.ProjectDirs, args[0])
+	find := findProject
+	if exact {
+		find = findProjectExact
+	}
+	dir, ok := find(cfg.Launch.ProjectDirs, args[0])
 	if !ok {
 		return 1
 	}
