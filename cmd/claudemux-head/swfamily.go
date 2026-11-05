@@ -32,7 +32,7 @@ const (
 
 // swArrangeFamilies reorders the fleet so each family is one contiguous block,
 // parents above children, and fills in the tree fields (Depth, TreePrefix,
-// FamilyGroup, From) the renderers read. The input order is tmux's
+// DetailPrefix, FamilyGroup, From) the renderers read. The input order is tmux's
 // list-sessions order and is the tie-break everywhere a rule leaves a choice,
 // so a session joining or leaving a family moves that block and leaves every
 // other row where the user last saw it.
@@ -145,6 +145,14 @@ func swArrangeFamilies(sessions []swSession) []swSession {
 		s.FamilyGroup = g
 		s.From = from[i]
 		s.TreePrefix = prefix
+		// The detail line under this row carries the same vertical lines
+		// down: every ancestor bar still running (cont), plus a bar into this
+		// row's own children when it has any. Without them the tree's lines
+		// break at every two-line row.
+		s.DetailPrefix = cont
+		if len(kids[i]) > 0 {
+			s.DetailPrefix += swGlyphBar
+		}
 		out = append(out, s)
 		for j, k := range kids[i] {
 			glyph, next := swGlyphTee, cont+swGlyphBar

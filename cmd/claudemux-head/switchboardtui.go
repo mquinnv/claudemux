@@ -1374,7 +1374,11 @@ func (m swModel) View() string {
 			// It starts in the name column, past the marker and the emoji
 			// badge, so it reads as this row's continuation — indented any
 			// less, it sat where a child's tree prefix does and passed for one.
-			line2 := strings.Repeat(" ", swDetailIndent+lipgloss.Width(prefix)) + detail
+			// The prefix continues the tree's bars down past this row, and is
+			// clipped by the same leading cells line 1's prefix lost so the
+			// bars stay under the glyphs they continue.
+			dprefix := ansi.TruncateLeft(sess.DetailPrefix, lipgloss.Width(sess.TreePrefix)-lipgloss.Width(prefix), "")
+			line2 := strings.Repeat(" ", swDetailIndent) + swStatusStyle.Render(dprefix) + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}
