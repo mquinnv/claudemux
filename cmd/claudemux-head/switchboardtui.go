@@ -1117,8 +1117,10 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // detail line (see swDetailLine) to show under it, one when it has none.
 // Derived from the same function View renders, so the two cannot disagree —
 // if they did, the list cap below would be wrong by one row per session.
-func swSessionRows(sess swSession) int {
-	if swDetailLine(sess) != "" {
+// reasonInline says the blocker is drawn on line 1 (swInlineReason), so it
+// does not by itself earn the row a second line.
+func swSessionRows(sess swSession, reasonInline bool) int {
+	if swDetailLine(sess, reasonInline) != "" {
 		return 2
 	}
 	return 1
@@ -1187,8 +1189,9 @@ func swDividerLine(label string, width int) string {
 // " · " and omitting whichever are empty; "" when all are. The phase and the
 // blocker lead because clipLine truncates from the right — on a narrow lobby
 // it is the summary that gives way, not the one thing saying why the session
-// is listed where it is.
-func swDetailLine(sess swSession) string {
+// is listed where it is. reasonInline drops the blocker here because line 1
+// already carries it after the badge (swInlineReason).
+func swDetailLine(sess swSession, reasonInline bool) string {
 	var parts []string
 	// An orphan's tag leads: its parent's name is why the session is not
 	// drawn under anything, and it has nowhere else on the row to say so.
@@ -1198,12 +1201,12 @@ func swDetailLine(sess swSession) string {
 	if phase := closingText(sess.Closing); phase != "" {
 		parts = append(parts, swCloseStyle.Render(phase))
 	}
-	// The blocker is plain dim text, not a cyan "◆ reason": the row's own
-	// marker and the group rule already say deferred, and a second cyan ◆
-	// one line down read as another deferred session nested under this one.
-	if sess.Deferred {
+	// The blocker is in the defer hue, loud like the badge it explains, but
+	// with no ◆: a second ◆ one line down read as another deferred session
+	// nested under this one.
+	if sess.Deferred && !reasonInline {
 		if reason := sanitizeDeferReason(sess.DeferReason); reason != "" {
-			parts = append(parts, swStatusStyle.Render(reason))
+			parts = append(parts, swDeferStyle.Render(reason))
 		}
 	}
 	for _, s := range []string{sess.Summary, sess.Prompt} {
@@ -1228,6 +1231,46 @@ func swMetersLine(m swModel, now time.Time) string {
 		return " " + strings.Join(build(defaultBarW).parts, " · ")
 	}
 	return statusbarStyle.Width(m.width).Render(clipLine(" "+fitGaugeLine(build, max(1, m.width-2))+" ", m.width))
+}
+
+// rowTopicW is the topic column's width for this render. One width for the
+// whole render, so the topic column is a column. The badge's width is
+// reserved whenever ANY session in the fleet is deferred or closing, not just
+// on that session's own row — every row must agree on topicW, so a per-row
+// reserve would shear the grid the same way an unreserved one truncates the
+// badge (see swTopicW). One reserve covers both badges: a row wears at most
+// one, and the wider. View and listWindow both call it, so the row count
+// listWindow budgets (which depends on where blockers fit) matches View.
+func (m swModel) rowTopicW() int {
+	reserve := 0
+	for _, sess := range m.snap.Sessions {
+		if sess.Deferred || sess.Closing != "" {
+			reserve = max(lipgloss.Width(swDeferBadgeText(false)), swCloseBadgeW)
+			break
+		}
+	}
+	return swTopicW(m.width, reserve)
+}
+
+// swInlineReason is the defer blocker to draw on line 1, after the DEFER or
+// WAIT badge, or "" when it goes on line 2 instead: no blocker, a row that
+// wears no defer badge (closing wins the badge), an unknown width, or a pane
+// too narrow for the whole blocker past the badge. All or nothing — a blocker
+// cut short on line 1 would hide words line 2 had room for.
+func swInlineReason(sess swSession, width, topicW int) string {
+	if width <= 0 || swGroupOf(sess) != swGroupDeferred {
+		return ""
+	}
+	reason := sanitizeDeferReason(sess.DeferReason)
+	if reason == "" {
+		return ""
+	}
+	// Line 1 is exactly swRowChromeW, the topic column, and the badge.
+	used := swRowChromeW + topicW + lipgloss.Width(swDeferBadgeText(sess.DeferWait))
+	if used+1+lipgloss.Width(reason) > width {
+		return ""
+	}
+	return reason
 }
 
 func (m swModel) View() string {
@@ -1277,25 +1320,8 @@ func (m swModel) View() string {
 		b.WriteString(swUnknownStyle.Render("no claudemux sessions") + "\n")
 	}
 
-	anyBadge := false
-	for _, sess := range m.snap.Sessions {
-		if sess.Deferred || sess.Closing != "" {
-			anyBadge = true
-		}
-	}
 	lay, start, end := m.listWindow()
-
-	// One width for the whole render, so the topic column is a column. The
-	// badge's width is reserved whenever ANY session in the fleet is
-	// deferred or closing, not just on that session's own row — every row
-	// must agree on topicW, so a per-row reserve would shear the grid the
-	// same way an unreserved one truncates the badge (see swTopicW). One
-	// reserve covers both badges: a row wears at most one, and the wider.
-	reserve := 0
-	if anyBadge {
-		reserve = max(lipgloss.Width(swDeferBadgeText(false)), swCloseBadgeW)
-	}
-	topicW := swTopicW(m.width, reserve)
+	topicW := m.rowTopicW()
 
 	for i := start; i < end; i++ {
 		sess := m.snap.Sessions[i]
@@ -1354,6 +1380,12 @@ func (m swModel) View() string {
 		case swGroupDeferred:
 			badge = swDeferBadgeText(sess.DeferWait)
 		}
+		// The blocker rides after the badge when the whole of it fits there,
+		// and moves to line 2 when it does not.
+		inline := swInlineReason(sess, m.width, topicW)
+		if inline != "" {
+			badge += " " + swDeferStyle.Render(inline)
+		}
 		line := fmt.Sprintf(" %s %s %s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
@@ -1368,7 +1400,7 @@ func (m swModel) View() string {
 
 		// Line 2: defer blocker · summary · prompt, whichever are set;
 		// omitted entirely when none are (see swDetailLine).
-		if detail := swDetailLine(sess); detail != "" {
+		if detail := swDetailLine(sess, inline != ""); detail != "" {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
@@ -1508,9 +1540,10 @@ func (m swModel) View() string {
 // footer lines, where no key could reach it.
 func (m swModel) listWindow() (lay swLayout, start, end int) {
 	want := 0
+	topicW := m.rowTopicW()
 	rows := make([]int, len(m.snap.Sessions))
 	for i, sess := range m.snap.Sessions {
-		rows[i] = swSessionRows(sess)
+		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width, topicW) != "")
 		// A divider rides on the row it sits above, so it is budgeted
 		// wherever that row is: View draws it whenever that row is drawn, and
 		// an unbudgeted line here would push the bottom of the pane off.

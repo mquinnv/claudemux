@@ -1430,15 +1430,15 @@ func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
 // summary or prompt still gets a detail line for it, and the row count agrees.
 func TestSwDetailLineShowsDeferReason(t *testing.T) {
 	sess := swSession{Name: "api", Deferred: true, DeferReason: "Ana's review", Summary: "fixing"}
-	if got := ansi.Strip(swDetailLine(sess)); got != "Ana's review · fixing" {
+	if got := ansi.Strip(swDetailLine(sess, false)); got != "Ana's review · fixing" {
 		t.Errorf("swDetailLine = %q", got)
 	}
 	bare := swSession{Name: "web", Deferred: true, DeferReason: "CI"}
-	if swSessionRows(bare) != 2 {
+	if swSessionRows(bare, false) != 2 {
 		t.Error("a deferred row with a blocker needs its detail line counted")
 	}
 	stale := swSession{Name: "web", DeferReason: "CI"}
-	if swDetailLine(stale) != "" || swSessionRows(stale) != 1 {
+	if swDetailLine(stale, false) != "" || swSessionRows(stale, false) != 1 {
 		t.Error("a reason without the defer mark must not render")
 	}
 }
@@ -1925,11 +1925,11 @@ func TestSwDividerAtUsesFamilyGroup(t *testing.T) {
 
 // The orphan tag leads the detail line, ahead of the summary.
 func TestSwDetailLineOrphanTagLeads(t *testing.T) {
-	got := ansi.Strip(swDetailLine(swSession{From: "iai-admin", Summary: "x"}))
+	got := ansi.Strip(swDetailLine(swSession{From: "iai-admin", Summary: "x"}, false))
 	if !strings.HasPrefix(got, "← iai-admin · x") {
 		t.Errorf("detail line = %q, want it to start with the orphan tag", got)
 	}
-	if got := ansi.Strip(swDetailLine(swSession{Summary: "x"})); strings.Contains(got, "←") {
+	if got := ansi.Strip(swDetailLine(swSession{Summary: "x"}, false)); strings.Contains(got, "←") {
 		t.Errorf("no parent, yet detail line = %q", got)
 	}
 }
@@ -2046,5 +2046,51 @@ func TestViewDetailLinesContinueTreeBars(t *testing.T) {
 	}
 	for k := range want {
 		t.Errorf("no detail line for %q", k)
+	}
+}
+
+// A deferred row's blocker sits after its DEFER badge on line 1 when the pane
+// has room for all of it, and the row then needs no detail line for it; on a
+// pane too narrow it falls back to line 2, in the defer hue either way.
+func TestViewDeferReasonInlineWhenRoom(t *testing.T) {
+	now := time.Now()
+	sess := swSession{Name: "api", State: "Idle", Since: now, Context: 40, Topic: "atopic",
+		Model: "claude-opus-4-7", Deferred: true, DeferReason: "Ana's review"}
+	render := func(width int) []string {
+		m := newSwModel("%9")
+		m.width, m.height = width, 24
+		m.snap = swSnapshot{Sessions: []swSession{sess}}
+		return strings.Split(ansi.Strip(m.View()), "\n")
+	}
+	find := func(lines []string) (int, string) {
+		for i, l := range lines {
+			if strings.Contains(l, "atopic") {
+				return i, l
+			}
+		}
+		t.Fatal("row not rendered")
+		return 0, ""
+	}
+
+	wide := render(220)
+	i, l := find(wide)
+	if !strings.HasSuffix(strings.TrimRight(l, " "), " DEFER  Ana's review") {
+		t.Errorf("wide line 1 = %q, want the blocker after the badge", l)
+	}
+	if i+1 < len(wide) && strings.Contains(wide[i+1], "Ana's review") {
+		t.Errorf("blocker drawn twice; line 2 = %q", wide[i+1])
+	}
+
+	narrow := render(swRowChromeW + swTopicColMinW + 8)
+	i, l = find(narrow)
+	if strings.Contains(l, "Ana's review") {
+		t.Errorf("narrow line 1 = %q, want the blocker on line 2", l)
+	}
+	if i+1 >= len(narrow) || !strings.Contains(narrow[i+1], "Ana's review") {
+		t.Errorf("narrow pane lost the blocker")
+	}
+
+	if !strings.Contains(swDetailLine(sess, false), swDeferStyle.Render("Ana's review")) {
+		t.Error("line-2 blocker is not in the defer hue")
 	}
 }

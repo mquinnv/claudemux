@@ -190,11 +190,11 @@ func TestClosingText(t *testing.T) {
 
 func TestSwDetailLineLeadsWithClosingPhase(t *testing.T) {
 	sess := swSession{Name: "api", Closing: "ready", Summary: "wrapping up the branch"}
-	got := ansi.Strip(swDetailLine(sess))
+	got := ansi.Strip(swDetailLine(sess, false))
 	if want := "⏻ press x to tear down · wrapping up the branch"; got != want {
 		t.Errorf("detail = %q, want %q", got, want)
 	}
-	if swSessionRows(swSession{Name: "bare", Closing: "wrapup"}) != 2 {
+	if swSessionRows(swSession{Name: "bare", Closing: "wrapup"}, false) != 2 {
 		t.Error("a closing row always has a detail line: the phase")
 	}
 }
