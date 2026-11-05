@@ -611,6 +611,7 @@ func TestSwModelViewOneRowShortDropsBoxAndShowsFleet(t *testing.T) {
 func TestSwModelViewSmallestPreviewHeightStillShowsASessionRow(t *testing.T) {
 	m := swPreviewModel()
 	m.height = 17
+	m.previewPinned = true // the fleet doesn't fit beside the box at this height
 	view := ansi.Strip(m.View())
 	if !strings.Contains(view, "┌") {
 		t.Errorf("height 17 should be tall enough to show the preview box:\n%s", view)
@@ -646,6 +647,7 @@ func TestSwModelViewCapsListForPreview(t *testing.T) {
 		})
 	}
 	m.snap.Sessions = sessions
+	m.previewPinned = true // reopened with p; unpinned, a crowding box closes
 	raw := m.View()
 	view := ansi.Strip(raw)
 	if !strings.Contains(view, "more") {

@@ -317,6 +317,11 @@ type swModel struct {
 	// previewHidden is the p toggle: no box and no captures, so the whole
 	// pane below the chrome goes to the fleet list.
 	previewHidden bool
+	// previewPinned keeps the box open while it crowds the fleet. Without it
+	// the box closes on its own whenever showing it would push sessions out of
+	// sight (see previewOffFor); p on a box closed that way pins it open.
+	// followSelection clears the pin once the fleet fits again.
+	previewPinned bool
 	// scroll is the index of the first session the list renders. It only
 	// moves when the selection would otherwise leave the visible window (see
 	// swListWindow), so j/k inside the window never shifts the rows under the
@@ -466,7 +471,7 @@ func (m swModel) selectedPane() string {
 // screen under another's title while the new capture is in flight.
 func (m *swModel) previewCmd() tea.Cmd {
 	pane := m.selectedPane()
-	if m.previewHidden {
+	if m.previewOff() {
 		pane = ""
 	}
 	if pane != m.previewPane {
@@ -1070,8 +1075,13 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p":
 			// Hide or restore the preview box. Showing it again requests a
 			// capture straight away rather than leaving the box blank until
-			// the next poll.
-			m.previewHidden = !m.previewHidden
+			// the next poll. Restoring also pins it, so a box that closed
+			// itself because the fleet outgrew it really does reopen.
+			if m.previewOff() {
+				m.previewHidden, m.previewPinned = false, true
+			} else {
+				m.previewHidden, m.previewPinned = true, false
+			}
 			m.followSelection()
 			cmd := m.previewCmd()
 			return m, cmd
@@ -1539,21 +1549,9 @@ func (m swModel) View() string {
 // a large fleet simply ran off the bottom of the pane with the status and
 // footer lines, where no key could reach it.
 func (m swModel) listWindow() (lay swLayout, start, end int) {
-	want := 0
-	topicW := m.rowTopicW()
-	rows := make([]int, len(m.snap.Sessions))
-	for i, sess := range m.snap.Sessions {
-		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width, topicW) != "")
-		// A divider rides on the row it sits above, so it is budgeted
-		// wherever that row is: View draws it whenever that row is drawn, and
-		// an unbudgeted line here would push the bottom of the pane off.
-		if swDividerAt(m.snap.Sessions, i) != "" {
-			rows[i]++
-		}
-		want += rows[i]
-	}
-	if !m.previewHidden {
-		lay = computePreviewLayout(m.height, m.lastErr != "", m.rateOK, m.restore != nil && !m.restore.picking, want)
+	rows, want := m.listRows()
+	if !m.previewOffFor(want) {
+		lay = m.boxLayout(want)
 	}
 	limit := lay.ListRows
 	if !lay.Show {
@@ -1585,9 +1583,64 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 	return lay, start, end
 }
 
+// boxLayout is the layout with the preview box drawn, for a list that wants
+// want rows.
+func (m swModel) boxLayout(want int) swLayout {
+	return computePreviewLayout(m.height, m.lastErr != "", m.rateOK, m.restore != nil && !m.restore.picking, want)
+}
+
+// previewCrowds reports whether drawing the box would leave the fleet too few
+// rows to render whole, scrolling part of it out of sight under the box.
+func (m swModel) previewCrowds(want int) bool {
+	lay := m.boxLayout(want)
+	return lay.Show && lay.ListRows < want
+}
+
+// previewOffFor reports whether the box is off for a list wanting want rows:
+// hidden with p, or closed on its own because it would crowd the fleet.
+// Seeing every session matters more than seeing one session's screen, so a
+// crowding box closes unless the user reopened it with p (previewPinned).
+func (m swModel) previewOffFor(want int) bool {
+	if m.previewHidden {
+		return true
+	}
+	return !m.previewPinned && m.previewCrowds(want)
+}
+
+// previewOff is previewOffFor the fleet as it stands.
+func (m swModel) previewOff() bool {
+	_, want := m.listRows()
+	return m.previewOffFor(want)
+}
+
+// listRows is each session's row count in the list, its divider included, and
+// their total: what the fleet needs to render whole.
+func (m swModel) listRows() (rows []int, want int) {
+	topicW := m.rowTopicW()
+	rows = make([]int, len(m.snap.Sessions))
+	for i, sess := range m.snap.Sessions {
+		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width, topicW) != "")
+		// A divider rides on the row it sits above, so it is budgeted
+		// wherever that row is: View draws it whenever that row is drawn, and
+		// an unbudgeted line here would push the bottom of the pane off.
+		if swDividerAt(m.snap.Sessions, i) != "" {
+			rows[i]++
+		}
+		want += rows[i]
+	}
+	return rows, want
+}
+
 // followSelection re-derives the scroll offset after anything that can move
 // the selection or change the list's room: a key, a poll, a resize, a toggle.
+// It also drops a p-pin once the fleet fits beside the box again, so the next
+// time the fleet outgrows it the box closes on its own once more.
 func (m *swModel) followSelection() {
+	if m.previewPinned {
+		if _, want := m.listRows(); !m.previewCrowds(want) {
+			m.previewPinned = false
+		}
+	}
 	_, m.scroll, _ = m.listWindow()
 }
 

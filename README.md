@@ -384,7 +384,11 @@ cursor, so you can see what's actually happening before you jump to it. It
 follows the selection (`j`/`k` refreshes it immediately, not just on the next
 poll) and is read-only — nothing about previewing a session touches it. On a
 pane too short to show both the box and the fleet, the box is dropped and the
-lobby renders exactly as it would with no preview at all.
+lobby renders exactly as it would with no preview at all. The box also closes
+on its own whenever the fleet grows too long to fit beside it, because seeing
+every session matters more than seeing one. `p` reopens it, and it stays open
+until the fleet fits again. After that, the next time the fleet outgrows the
+box, it closes again.
 
 Press `n` to start a **new session** without leaving the lobby: the status
 line becomes a prompt, you type a project directory, zoxide query, or project
