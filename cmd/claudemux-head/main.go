@@ -59,15 +59,15 @@ func main() {
 		os.Exit(2)
 	}
 
-	// `project find` is the last step of bin/claudemux's resolve_dir: it turns
-	// a launch query zoxide could not place into a directory under the user's
-	// configured launch.project_dirs. Dispatched here for the same reason
+	// `project find` is how bin/claudemux's resolve_dir searches the user's
+	// configured launch.project_dirs: `--exact` before zoxide, the full
+	// exact/prefix/substring search after zoxide misses. Dispatched here for the same reason
 	// `config` is — the launcher calls it as a bare first argument.
 	if len(os.Args) > 1 && os.Args[1] == "project" {
 		if len(os.Args) > 2 && os.Args[2] == "find" {
 			os.Exit(runProjectFind(os.Args[3:], os.Stdout, os.Stderr))
 		}
-		fmt.Fprintln(os.Stderr, "usage: claudemux-head project find <query>")
+		fmt.Fprintln(os.Stderr, "usage: claudemux-head project find [--exact] <query>")
 		os.Exit(2)
 	}
 

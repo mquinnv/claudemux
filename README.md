@@ -854,10 +854,13 @@ web:
   `-w`, the same way name/color only apply at creation. Combine with `-n` to force a
   new session if you need `-w`/`-W` to take effect.
 - `launch.project_dirs` — consumed by `claudemux`, not the TUI. The roots to search by
-  name when a launch query is neither a real directory nor a zoxide hit — the fallback
-  that keeps `claudemux <name>` (and the switchboard's `n` key) from simply failing on a
-  repo you have never opened from the shell. Ships empty, which leaves resolution exactly
-  as it was: directory, then zoxide, then nothing.
+  name for a launch query that is not a real directory. A directory named *exactly* the
+  query wins before zoxide is consulted (zoxide matches substrings, so `pa` would
+  otherwise open a more frecent `1password-…` repo over a project called `pa`); prefix
+  and substring matches come after zoxide misses — the fallback that keeps
+  `claudemux <name>` (and the switchboard's `n` key) from simply failing on a repo you
+  have never opened from the shell. Ships empty, which leaves resolution exactly as it
+  was: directory, then zoxide, then nothing.
 
   ```yaml
   launch:

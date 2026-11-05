@@ -143,15 +143,18 @@ ensure_hook() {
 ensure_hook
 
 # resolve_dir QUERY — echo an existing directory for QUERY, trying in order:
-# QUERY itself if it's a real dir, the best zoxide match, then the best project
-# under launch.project_dirs. Non-zero exit if all three miss.
+# QUERY itself if it's a real dir, a directory under launch.project_dirs named
+# exactly QUERY, the best zoxide match, then the best prefix/substring project
+# under launch.project_dirs. Non-zero exit if all of them miss.
 #
-# The project search is last because it is the only one that can name a
-# directory you have never opened: zoxide's frecency is a better answer than a
-# name match whenever it has one, and this is the fallback for the case it
-# doesn't — a repo you just cloned, or one you have only ever visited from an
-# editor. project_find_dir owns talking to the head binary; the matching rules
-# themselves live in cmd/claudemux-head/projectfind.go.
+# An exact project name goes before zoxide because zoxide matches substrings
+# anywhere in the last path component: `pa` would otherwise open a more
+# frecent ~/Projects/1password-webcatalog-bridge instead of the project
+# literally called pa. For anything fuzzier, zoxide's frecency is a better
+# answer than a name match, so the rest of the project search stays last — the
+# fallback for a repo you just cloned, or one you have only ever visited from
+# an editor. project_find_dir owns talking to the head binary; the matching
+# rules themselves live in cmd/claudemux-head/projectfind.go.
 resolve_dir() {
   local q="$1"
   # A leading ~ has to be expanded here, not left to the shell: callers that
@@ -171,6 +174,11 @@ resolve_dir() {
     (cd "$q" && pwd)
     return 0
   fi
+  project_find_dir --exact "$q"
+  if [ -n "$PROJECT_FIND_HIT" ] && [ -d "$PROJECT_FIND_HIT" ]; then
+    echo "$PROJECT_FIND_HIT"
+    return 0
+  fi
   local hit
   if command -v zoxide >/dev/null 2>&1; then
     hit="$(zoxide query -- "$q" 2>/dev/null || true)"
@@ -179,29 +187,35 @@ resolve_dir() {
       return 0
     fi
   fi
-  hit="$(project_find_dir "$q")"
-  if [ -n "$hit" ] && [ -d "$hit" ]; then
-    echo "$hit"
+  project_find_dir "$q"
+  if [ -n "$PROJECT_FIND_HIT" ] && [ -d "$PROJECT_FIND_HIT" ]; then
+    echo "$PROJECT_FIND_HIT"
     return 0
   fi
   return 1
 }
 
-# project_find_dir QUERY — echo the best directory for QUERY under
-# launch.project_dirs, or nothing at all.
+# project_find_dir [--exact] QUERY — set PROJECT_FIND_HIT to the best
+# directory for QUERY under launch.project_dirs, or to the empty string.
+# --exact accepts only a directory named exactly QUERY.
+#
+# It sets a variable instead of printing because resolve_dir calls it twice:
+# run in a command substitution, each call would be its own subshell, the
+# CH_CONFIG_ERR flag set by the first would be lost, and a broken config.yml
+# would be reported twice for one launch.
 #
 # Its exit codes are inspected rather than discarded, for the same reason
 # ch_config_get inspects `config get`'s — and everything but a broken config is
 # deliberately silent:
 #
-#   1 — nothing matched. Every call that gets here is a query zoxide already
-#       missed, so this is the ordinary outcome; resolve_dir's caller prints
-#       its own message once all three lookups have failed.
+#   1 — nothing matched. The ordinary outcome: the exact pass misses on every
+#       fuzzy query, and the fallback pass only runs after zoxide missed too.
+#       resolve_dir's caller prints its own message once every lookup failed.
 #   2 — an installed claudemux-head older than this script, which has never
-#       heard of `project find` and says so on stderr. Reporting that on every
-#       unresolved query — including a plain typo from someone who has not
-#       configured project_dirs at all — would be noise, so an old binary just
-#       resolves nothing, exactly as this worked before the setting existed.
+#       heard of `project find` (or of --exact) and says so on stderr.
+#       Reporting that on every unresolved query — including a plain typo from
+#       someone who has not configured project_dirs at all — would be noise, so
+#       an old binary just resolves nothing, exactly as this worked before.
 #   3 — a config.yml that does not parse. That one must surface, or a typo in
 #       the config is indistinguishable from a query that simply missed.
 #
@@ -211,16 +225,17 @@ resolve_dir() {
 # launch that already printed the diagnostic (maybe_onboard reads
 # launch.layout before we get here) from printing it a second time.
 project_find_dir() {
+  PROJECT_FIND_HIT=""
   command -v claudemux-head >/dev/null 2>&1 || return 0
   local err out rc=0
   err="$(mktemp)"
-  out="$(claudemux-head project find "$1" 2>"$err")" || rc=$?
+  out="$(claudemux-head project find "$@" 2>"$err")" || rc=$?
   if [ "$rc" -eq 3 ] && [ -z "$CH_CONFIG_ERR" ]; then
     cat "$err" >&2
     CH_CONFIG_ERR=1
   fi
   rm -f "$err"
-  [ "$rc" -eq 0 ] && printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] && PROJECT_FIND_HIT="$out"
   return 0
 }
 
