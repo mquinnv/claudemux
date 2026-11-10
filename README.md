@@ -408,7 +408,19 @@ Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `d` toggles defer on the selected
 row, `D` edits that row's blocker, `p` hides or shows the preview box, `Esc`
 returns to the session you came from (tmux's per-client last session), `n`
-starts a new session, `q` quits.
+starts a new session, `/` finds a session by name, `q` quits.
+
+`/` opens a find prompt on the status line. As you type, the selection jumps to
+the session whose name matches best (a prefix first, then the start of a later
+word, then any substring, then the letters in order, so `rmx` finds `remix`),
+and rows that don't match dim. `↑`/`↓` (or `Tab`) step through the matches,
+`Enter` jumps to the selected one, and `Esc` puts the cursor back where it was.
+The conductor holds off while the prompt is open.
+
+A session that has opened or linked a pull request shows its number (`#123`)
+right after its name. The head reads it from the `pr-link` record Claude Code
+writes to the transcript, keeps the newest one, and publishes it as
+`@claudemux_pr`. The web status page links it to GitHub.
 
 A fleet longer than the pane scrolls: the list follows the selection, and a
 `↑ N more · ↓ N more` line says how many sessions are off screen in each

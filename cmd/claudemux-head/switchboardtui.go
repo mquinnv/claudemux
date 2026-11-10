@@ -338,6 +338,12 @@ type swModel struct {
 	createInput string
 	createBusy  bool
 	createErr   string
+	// Find mode (`/`, swfind.go): the status line collects a query and the
+	// selection follows the best-matching session name. findPrevName is the
+	// session selected when it opened, for esc to return to.
+	finding      bool
+	findInput    string
+	findPrevName string
 	// Defer input mode (`d` on a row that isn't deferred, or `D` on any row):
 	// the status line collects the blocker, like creating does a query. The
 	// target and name are captured at the keypress, not re-read from the
@@ -420,7 +426,7 @@ func newSwModel(selfPane string) swModel {
 // across the exec instead.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
 	restoring := m.restore != nil && (m.restore.busy || m.restore.picking)
-	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting && !restoring &&
+	return !m.standby && !m.creating && !m.finding && !m.createBusy && !m.deferring && !m.fleetRestarting && !restoring &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
@@ -791,7 +797,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// while a launch is in flight would race the switch the launch is
 		// about to issue itself.
 		pv := m.previewCmd()
-		if !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
+		if !m.standby && !m.creating && !m.finding && !m.createBusy && !m.deferring && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
 					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan, creditCmd)
@@ -957,6 +963,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.finding {
+			return m.findKey(msg)
+		}
 		if m.deferring {
 			switch msg.String() {
 			case "esc", "ctrl+c":
@@ -1020,6 +1029,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "/":
+			// Guarded like the row keys: nothing to find in an empty fleet.
+			if len(m.snap.Sessions) > 0 {
+				m.startFind()
+			}
+			return m, nil
 		case "R":
 			// Same contract as the session head's R: quit, and let
 			// runSwitchboard re-exec the binary from disk.
@@ -1366,6 +1381,15 @@ func (m swModel) View() string {
 	lay, start, end := m.listWindow()
 	topicW := m.rowTopicW()
 	prW := m.rowPRW()
+	// findHit holds the rows a live find query matches; nil when no query is
+	// being typed, so nothing dims.
+	var findHit map[int]bool
+	if m.finding && m.findInput != "" {
+		findHit = map[int]bool{}
+		for _, idx := range swFindMatches(m.snap.Sessions, m.findInput) {
+			findHit[idx] = true
+		}
+	}
 
 	for i := start; i < end; i++ {
 		sess := m.snap.Sessions[i]
@@ -1413,7 +1437,13 @@ func (m swModel) View() string {
 		// A child's tree prefix is dim and comes out of the same column, so
 		// the name shrinks by the prefix's width and the grid holds.
 		prefix, nameW := swFitTreePrefix(sess.TreePrefix)
-		name := swStatusStyle.Render(prefix) + swNameStyle(sess.Color, i == m.sel).
+		nameStyle := swNameStyle(sess.Color, i == m.sel)
+		// While finding, a name the query does not match greys out, so the
+		// matches stand out without the list reshuffling under the cursor.
+		if findHit != nil && !findHit[i] && i != m.sel {
+			nameStyle = swUnknownStyle
+		}
+		name := swStatusStyle.Render(prefix) + nameStyle.
 			Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
 		// The badge names the group the row is listed in (swGroupOf), so a
 		// session that is both closing and deferred wears the closing badge.
@@ -1532,6 +1562,9 @@ func (m swModel) View() string {
 	case m.creating:
 		status = "new session: " + m.createInput + "▌"
 		statusStyled = false // unstyled so the typed query stands out
+	case m.finding:
+		status = m.findStatus()
+		statusStyled = false
 	case m.deferring:
 		verb := "defer "
 		if m.deferEditing {
@@ -1563,9 +1596,12 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "? keys · space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · R restart · ^R restart all · q quit"
+	footerText := "? keys · space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · / find · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
+	}
+	if m.finding {
+		footerText = "type a name · ↑↓ next match · enter jump · esc cancel"
 	}
 	if m.deferring {
 		footerText = "enter defer · esc cancel"
