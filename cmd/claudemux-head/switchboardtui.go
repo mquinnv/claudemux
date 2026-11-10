@@ -178,6 +178,9 @@ var (
 	// matches the head pane's promptEmphasisStyle and the arrival banner,
 	// which has always drawn the topic bold and first.
 	swTopicStyle = lipgloss.NewStyle().Bold(true)
+	// swPRStyle tints a row's PR number in GitHub's open-PR green, so it reads
+	// as a PR reference rather than one more grey column.
+	swPRStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("71"))
 	// Mode badge and status-line tints: conduct-vs-standby must be readable at
 	// a glance from either end of the screen, not inferable from one faint
 	// word at the bottom.
@@ -335,6 +338,12 @@ type swModel struct {
 	createInput string
 	createBusy  bool
 	createErr   string
+	// Find mode (`/`, swfind.go): the status line collects a query and the
+	// selection follows the best-matching session name. findPrevName is the
+	// session selected when it opened, for esc to return to.
+	finding      bool
+	findInput    string
+	findPrevName string
 	// Defer input mode (`d` on a row that isn't deferred, or `D` on any row):
 	// the status line collects the blocker, like creating does a query. The
 	// target and name are captured at the keypress, not re-read from the
@@ -417,7 +426,7 @@ func newSwModel(selfPane string) swModel {
 // across the exec instead.
 func (m *swModel) shouldAutoRestart(now time.Time) bool {
 	restoring := m.restore != nil && (m.restore.busy || m.restore.picking)
-	return !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.fleetRestarting && !restoring &&
+	return !m.standby && !m.creating && !m.finding && !m.createBusy && !m.deferring && !m.fleetRestarting && !restoring &&
 		m.launchBinOK && binChanged(m.launchBin, now)
 }
 
@@ -497,7 +506,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}")
+			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}	#{"+infoPROption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -788,7 +797,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// while a launch is in flight would race the switch the launch is
 		// about to issue itself.
 		pv := m.previewCmd()
-		if !m.standby && !m.creating && !m.createBusy && !m.deferring && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
+		if !m.standby && !m.creating && !m.finding && !m.createBusy && !m.deferring && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
 			if act, ok := m.cond.step(m.snap, time.Now()); ok {
 				return m, tea.Batch(swNextTick(),
 					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan, creditCmd)
@@ -954,6 +963,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.finding {
+			return m.findKey(msg)
+		}
 		if m.deferring {
 			switch msg.String() {
 			case "esc", "ctrl+c":
@@ -1017,6 +1029,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "/":
+			// Guarded like the row keys: nothing to find in an empty fleet.
+			if len(m.snap.Sessions) > 0 {
+				m.startFind()
+			}
+			return m, nil
 		case "R":
 			// Same contract as the session head's R: quit, and let
 			// runSwitchboard re-exec the binary from disk.
@@ -1264,7 +1282,32 @@ func (m swModel) rowTopicW() int {
 			break
 		}
 	}
-	return swTopicW(m.width, reserve)
+	return swTopicW(m.width, reserve+m.rowPRW())
+}
+
+// swPRText is a row's PR cell text, "#N", or "" when the session has linked
+// no PR.
+func swPRText(sess swSession) string {
+	if sess.PRNumber <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d", sess.PRNumber)
+}
+
+// rowPRW is the PR column's width for this render, its leading space
+// included: 0 when no session in the fleet has a PR, so a fleet without PRs
+// lays out exactly as it did before the column existed. Fleet-wide for the
+// same reason as rowTopicW's badge reserve — every row must agree on it, or
+// the badges after it shear.
+func (m swModel) rowPRW() int {
+	w := 0
+	for _, sess := range m.snap.Sessions {
+		w = max(w, lipgloss.Width(swPRText(sess)))
+	}
+	if w == 0 {
+		return 0
+	}
+	return 1 + w
 }
 
 // swInlineReason is the defer blocker to draw on line 1, after the DEFER or
@@ -1337,6 +1380,16 @@ func (m swModel) View() string {
 
 	lay, start, end := m.listWindow()
 	topicW := m.rowTopicW()
+	prW := m.rowPRW()
+	// findHit holds the rows a live find query matches; nil when no query is
+	// being typed, so nothing dims.
+	var findHit map[int]bool
+	if m.finding && m.findInput != "" {
+		findHit = map[int]bool{}
+		for _, idx := range swFindMatches(m.snap.Sessions, m.findInput) {
+			findHit[idx] = true
+		}
+	}
 
 	for i := start; i < end; i++ {
 		sess := m.snap.Sessions[i]
@@ -1384,7 +1437,13 @@ func (m swModel) View() string {
 		// A child's tree prefix is dim and comes out of the same column, so
 		// the name shrinks by the prefix's width and the grid holds.
 		prefix, nameW := swFitTreePrefix(sess.TreePrefix)
-		name := swStatusStyle.Render(prefix) + swNameStyle(sess.Color, i == m.sel).
+		nameStyle := swNameStyle(sess.Color, i == m.sel)
+		// While finding, a name the query does not match greys out, so the
+		// matches stand out without the list reshuffling under the cursor.
+		if findHit != nil && !findHit[i] && i != m.sel {
+			nameStyle = swUnknownStyle
+		}
+		name := swStatusStyle.Render(prefix) + nameStyle.
 			Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
 		// The badge names the group the row is listed in (swGroupOf), so a
 		// session that is both closing and deferred wears the closing badge.
@@ -1397,11 +1456,19 @@ func (m swModel) View() string {
 		}
 		// The blocker rides after the badge when the whole of it fits there,
 		// and moves to line 2 when it does not.
-		inline := swInlineReason(sess, m.width, topicW)
+		inline := swInlineReason(sess, m.width-prW, topicW)
 		if inline != "" {
 			badge += " " + swDeferStyle.Render(inline)
 		}
-		line := fmt.Sprintf(" %s %s %s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
+		prCell := ""
+		if prW > 0 {
+			prCell = " " + swCell(swPRText(sess), prW-1, swPRStyle, false)
+		}
+		// The PR sits right after the name: it identifies the session as much
+		// as the name does, and there the topic column yields the room for it
+		// (rowTopicW) instead of clipLine cutting it off the right edge.
+		line := fmt.Sprintf(" %s %s %s%s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
+			prCell,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),
@@ -1495,6 +1562,9 @@ func (m swModel) View() string {
 	case m.creating:
 		status = "new session: " + m.createInput + "▌"
 		statusStyled = false // unstyled so the typed query stands out
+	case m.finding:
+		status = m.findStatus()
+		statusStyled = false
 	case m.deferring:
 		verb := "defer "
 		if m.deferEditing {
@@ -1526,9 +1596,12 @@ func (m swModel) View() string {
 	}
 	// Cosmetic footer, but clipped for the same reason as the rows above it:
 	// consistency, and a narrow pane shouldn't wrap it either.
-	footerText := "? keys · space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · R restart · ^R restart all · q quit"
+	footerText := "? keys · space conduct/standby · j/k select · enter jump · esc back · p preview · n new · d defer · D blocker · / find · R restart · ^R restart all · q quit"
 	if m.creating {
 		footerText = "enter create · esc cancel"
+	}
+	if m.finding {
+		footerText = "type a name · ↑↓ next match · enter jump · esc cancel"
 	}
 	if m.deferring {
 		footerText = "enter defer · esc cancel"
@@ -1624,7 +1697,7 @@ func (m swModel) listRows() (rows []int, want int) {
 	topicW := m.rowTopicW()
 	rows = make([]int, len(m.snap.Sessions))
 	for i, sess := range m.snap.Sessions {
-		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width, topicW) != "")
+		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width-m.rowPRW(), topicW) != "")
 		// A divider rides on the row it sits above, so it is budgeted
 		// wherever that row is: View draws it whenever that row is drawn, and
 		// an unbudgeted line here would push the bottom of the pane off.

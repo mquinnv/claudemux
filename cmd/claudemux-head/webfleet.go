@@ -135,6 +135,10 @@ type webSession struct {
 	ContextPct  *int   `json:"context_pct,omitempty"`
 	CtxColor    string `json:"context_color,omitempty"`
 	Model       string `json:"model,omitempty"`
+	// PR is the session's active pull request as "#N" and PRURL its GitHub
+	// page, both omitted when the session has linked none.
+	PR          string `json:"pr,omitempty"`
+	PRURL       string `json:"pr_url,omitempty"`
 	Topic       string `json:"topic,omitempty"`
 	Summary     string `json:"summary,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
@@ -207,6 +211,8 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 			Waiting:     isWaiting(s.State),
 			Since:       webTime(s.Since),
 			Model:       webModelName(s.Model),
+			PR:          swPRText(s),
+			PRURL:       prURL(s.PRRepo, s.PRNumber),
 			Topic:       s.Topic,
 			Summary:     s.Summary,
 			Prompt:      s.Prompt,

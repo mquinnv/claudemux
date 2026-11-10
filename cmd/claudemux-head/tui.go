@@ -177,6 +177,10 @@ type model struct {
 	publishedSummary string
 	publishedPrompt  string
 	publishedModel   string
+	// publishedPR is the last @claudemux_pr value published. It starts ""
+	// like the option itself, so a session that never links a PR publishes
+	// nothing.
+	publishedPR string
 
 	// sessionCwd is the latest cwd the *main* session recorded in its
 	// transcript (last non-sidechain entry's cwd), recomputed from the event

@@ -84,6 +84,11 @@ type swSession struct {
 	// is swArrangeFamilies' call, not the parser's.
 	Parent        string
 	ParentCreated int64
+	// PRRepo / PRNumber are the session's active pull request
+	// (@claudemux_pr), PRNumber 0 when it has linked none or the head
+	// predates the option.
+	PRRepo   string
+	PRNumber int
 	// The fields below are derived by swArrangeFamilies, never parsed.
 	// Depth is 0 for a top-level row; TreePrefix is the tree-glyph string drawn
 	// before the name ("" at depth 0, 2 cells per level); DetailPrefix is the
@@ -160,7 +165,7 @@ const (
 // built from whatever parsed keeps the lobby rendering through transient
 // oddities. Formats (tab-separated):
 //
-//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay} #{@claudemux_description} #{@claudemux_closing} #{session_created} #{@claudemux_parent} #{@claudemux_parent_created}
+//	sessOut:   #{session_name} #{@claudemux_state} #{@claudemux_state_since} #{@claudemux_context} #{@claudemux_summary} #{@claudemux_prompt} #{@claudemux_model} #{@claudemux_color} #{@claudemux_defer} #{@claudemux_defer_reason} #{@claudemux_emoji} #{@claudemux_stay} #{@claudemux_description} #{@claudemux_closing} #{session_created} #{@claudemux_parent} #{@claudemux_parent_created} #{@claudemux_pr}
 //	paneOut:   #{session_name} #{pane_id} #{pane_current_command} #{window_name}
 //	clientOut: #{client_name} #{client_session} #{client_last_session}
 func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
@@ -202,12 +207,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		// 17 fields in production: the stay mark is field 12, the project
+		// 18 fields in production: the stay mark is field 12, the project
 		// description 13, the closing mark 14, then session_created and the
-		// handoff-link pair. The 13th/14th are optional so 12- and 13-field
-		// listings (older fixtures) still parse; the family triple is
-		// all-or-nothing, so 15 and 16 fields are malformed.
-		if len(f) < 12 || len(f) > 17 || len(f) == 15 || len(f) == 16 || f[0] == "" {
+		// handoff-link pair, then the active PR. The 13th/14th are optional
+		// so 12- and 13-field listings (older fixtures) still parse; the
+		// family triple is all-or-nothing, so 15 and 16 fields are malformed;
+		// the PR is optional after it.
+		if len(f) < 12 || len(f) > 18 || len(f) == 15 || len(f) == 16 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
@@ -223,7 +229,12 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if len(f) >= 14 {
 			sess.Closing = f[13]
 		}
-		if len(f) == 17 {
+		if len(f) == 18 {
+			if repo, num, ok := parsePROption(f[17]); ok {
+				sess.PRRepo, sess.PRNumber = repo, num
+			}
+		}
+		if len(f) >= 17 {
 			if c, err := strconv.ParseInt(f[14], 10, 64); err == nil {
 				sess.Created = c
 			}

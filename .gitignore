@@ -3,6 +3,8 @@
 # a contributor adds there.
 /claudemux-head
 /claudemux
+# `go build` run inside the package directory drops its binary there.
+/cmd/claudemux-head/claudemux-head
 
 # Per-user project config. Contains op_env, an ID pointing at your secrets.
 # Gitignored so that neither this repo nor any repo using claudemux can leak it.

@@ -137,6 +137,9 @@ type Event struct {
 	// The head follows it: a pane map that still names this file would
 	// otherwise pin the head to a transcript nobody writes to again.
 	ContinuedIn string
+	// PR is the pull request a `pr-link` record names (Claude Code writes one
+	// when the session opens or links a PR); zero on every other record.
+	PR          PRLink
 	IsSidechain bool // true for subagent (Task) entries — excluded from the worktree chip
 	// IsCompactSummary marks the `user` record a compaction writes to carry
 	// its summary. Nobody typed it and nothing need answer it: an idle
@@ -165,6 +168,7 @@ type EventReader struct {
 	seedErr     error
 	firstPrompt string // genuine first user prompt of the session, captured before ring truncation
 	firstReply  string // the main chain's first assistant text after firstPrompt, captured the same way
+	pr          PRLink // the newest pr-link record seen, captured before ring truncation
 }
 
 func newEventReader(path string) *EventReader {
@@ -206,6 +210,7 @@ func (r *EventReader) SeedFromEnd(maxEvents int) {
 	// first prompt needs an oldest-first scan, which firstUserPrompt does.
 	r.firstPrompt = firstUserPrompt(events)
 	r.firstReply = firstAssistantReply(events, r.firstPrompt)
+	r.pr = lastPRLink(events, r.pr)
 	if len(events) > maxEvents {
 		events = events[len(events)-maxEvents:]
 	}
@@ -219,6 +224,14 @@ func (r *EventReader) Seeded() ([]Event, error) {
 // FirstPrompt returns the session's first user prompt, captured at seed time.
 func (r *EventReader) FirstPrompt() string {
 	return r.firstPrompt
+}
+
+// PR returns the pull request the session most recently linked, zero when it
+// has linked none. Like FirstPrompt it is taken from the full parse at seed
+// time and kept current on every Tail, so a PR opened early in a long session
+// survives the ring dropping the record that named it.
+func (r *EventReader) PR() PRLink {
+	return r.pr
 }
 
 // FirstReply returns the assistant's first text reply to FirstPrompt.
@@ -305,6 +318,7 @@ func (r *EventReader) Tail() ([]Event, error) {
 	events := parseLines(consume, false)
 	r.upgradeFirstPrompt(events)
 	r.captureFirstReply(events)
+	r.pr = lastPRLink(events, r.pr)
 	return events, nil
 }
 
@@ -356,6 +370,9 @@ func parseEvent(line string) (Event, bool) {
 		// because its shape varies per tool — see extractLaunch.
 		ToolUseResult json.RawMessage `json:"toolUseResult"`
 		ContinuedIn   string          `json:"continuedInSessionId"` // present on type=continued-in
+		PRNumber      int             `json:"prNumber"`             // present on type=pr-link
+		PRRepository  string          `json:"prRepository"`         // present on type=pr-link
+		PRURL         string          `json:"prUrl"`                // present on type=pr-link
 		Origin        struct {
 			Kind     string `json:"kind"`
 			FromMode string `json:"fromMode"`
@@ -380,6 +397,10 @@ func parseEvent(line string) (Event, bool) {
 
 	if raw.Type == "continued-in" {
 		ev.ContinuedIn = raw.ContinuedIn
+	}
+
+	if raw.Type == "pr-link" && raw.PRNumber > 0 {
+		ev.PR = PRLink{Number: raw.PRNumber, Repo: raw.PRRepository, URL: raw.PRURL}
 	}
 
 	extractLaunch(&ev, raw.ToolUseResult)
