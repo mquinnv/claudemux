@@ -178,6 +178,9 @@ var (
 	// matches the head pane's promptEmphasisStyle and the arrival banner,
 	// which has always drawn the topic bold and first.
 	swTopicStyle = lipgloss.NewStyle().Bold(true)
+	// swPRStyle tints a row's PR number in GitHub's open-PR green, so it reads
+	// as a PR reference rather than one more grey column.
+	swPRStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("71"))
 	// Mode badge and status-line tints: conduct-vs-standby must be readable at
 	// a glance from either end of the screen, not inferable from one faint
 	// word at the bottom.
@@ -497,7 +500,7 @@ func swPollCmd(selfPane, rlPath string) tea.Cmd {
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
 		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}")
+			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}	#{"+infoPROption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -1264,7 +1267,32 @@ func (m swModel) rowTopicW() int {
 			break
 		}
 	}
-	return swTopicW(m.width, reserve)
+	return swTopicW(m.width, reserve+m.rowPRW())
+}
+
+// swPRText is a row's PR cell text, "#N", or "" when the session has linked
+// no PR.
+func swPRText(sess swSession) string {
+	if sess.PRNumber <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d", sess.PRNumber)
+}
+
+// rowPRW is the PR column's width for this render, its leading space
+// included: 0 when no session in the fleet has a PR, so a fleet without PRs
+// lays out exactly as it did before the column existed. Fleet-wide for the
+// same reason as rowTopicW's badge reserve — every row must agree on it, or
+// the badges after it shear.
+func (m swModel) rowPRW() int {
+	w := 0
+	for _, sess := range m.snap.Sessions {
+		w = max(w, lipgloss.Width(swPRText(sess)))
+	}
+	if w == 0 {
+		return 0
+	}
+	return 1 + w
 }
 
 // swInlineReason is the defer blocker to draw on line 1, after the DEFER or
@@ -1337,6 +1365,7 @@ func (m swModel) View() string {
 
 	lay, start, end := m.listWindow()
 	topicW := m.rowTopicW()
+	prW := m.rowPRW()
 
 	for i := start; i < end; i++ {
 		sess := m.snap.Sessions[i]
@@ -1397,11 +1426,19 @@ func (m swModel) View() string {
 		}
 		// The blocker rides after the badge when the whole of it fits there,
 		// and moves to line 2 when it does not.
-		inline := swInlineReason(sess, m.width, topicW)
+		inline := swInlineReason(sess, m.width-prW, topicW)
 		if inline != "" {
 			badge += " " + swDeferStyle.Render(inline)
 		}
-		line := fmt.Sprintf(" %s %s %s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
+		prCell := ""
+		if prW > 0 {
+			prCell = " " + swCell(swPRText(sess), prW-1, swPRStyle, false)
+		}
+		// The PR sits right after the name: it identifies the session as much
+		// as the name does, and there the topic column yields the room for it
+		// (rowTopicW) instead of clipLine cutting it off the right edge.
+		line := fmt.Sprintf(" %s %s %s%s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
+			prCell,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
 			swCell(age, swAgeColW, swUnknownStyle, true),
@@ -1624,7 +1661,7 @@ func (m swModel) listRows() (rows []int, want int) {
 	topicW := m.rowTopicW()
 	rows = make([]int, len(m.snap.Sessions))
 	for i, sess := range m.snap.Sessions {
-		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width, topicW) != "")
+		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width-m.rowPRW(), topicW) != "")
 		// A divider rides on the row it sits above, so it is budgeted
 		// wherever that row is: View draws it whenever that row is drawn, and
 		// an unbudgeted line here would push the bottom of the pane off.

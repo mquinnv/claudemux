@@ -257,5 +257,13 @@ func (m *model) maybePublishInfo() []tea.Cmd {
 		m.publishedModel = v
 		cmds = append(cmds, publishOptionCmd(m.selfPane, infoModelOption, v))
 	}
+	var pr PRLink
+	if m.reader != nil {
+		pr = m.reader.PR()
+	}
+	if v := prOptionValue(pr); v != m.publishedPR {
+		m.publishedPR = v
+		cmds = append(cmds, publishOptionCmd(m.selfPane, infoPROption, v))
+	}
 	return cmds
 }
