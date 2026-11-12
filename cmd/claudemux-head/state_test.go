@@ -237,6 +237,39 @@ func TestClassifyClientOnlyCommandWithArgs(t *testing.T) {
 	}
 }
 
+// `/mcp` (Claude Code 2.1.296–2.1.322) is written as two user records at the
+// same instant: the command, then the harness's own reply wrapped in
+// <local-command-stdout>. The reply is the trailing event, and read as a
+// prompt it turned the session Thinking — the conductor took that as a
+// hand-back and escorted the human out of the session they were working in.
+func TestClassifyLocalCommandOutputIsIdle(t *testing.T) {
+	ts := time.Unix(1_754_700_000, 0)
+	for _, out := range []string{
+		"<local-command-stdout>Reconnected to slack-agent.</local-command-stdout>",
+		"<local-command-stdout>MCP dialog dismissed</local-command-stdout>",
+		"<local-command-stderr>Failed to reconnect to github.</local-command-stderr>",
+	} {
+		events := []Event{
+			{Type: "assistant", UserText: "all done", Timestamp: ts.Add(-time.Minute).Format(time.RFC3339)},
+			{Type: "user", UserText: "/mcp", Timestamp: ts.Format(time.RFC3339)},
+			{Type: "user", UserText: out, Timestamp: ts.Format(time.RFC3339)},
+		}
+		got := classifyState(events, 0, time.Time{}, 0, ts.Add(time.Minute))
+		if got.Kind != StateIdle {
+			t.Errorf("%q: got %v, want StateIdle", out, got.Kind)
+		}
+	}
+}
+
+// Between the two records the command alone is the trailing event, so it has
+// to count as client-only on its own too.
+func TestClassifyMcpCommandIsIdle(t *testing.T) {
+	events := []Event{{Type: "user", UserText: "/mcp"}}
+	if got := classifyState(events, 0, time.Time{}, 0, time.Now()); got.Kind != StateIdle {
+		t.Errorf("got %v, want StateIdle", got.Kind)
+	}
+}
+
 // A command that drives the model is a real prompt: classifying one Idle
 // would escort a human into a session that is working.
 func TestClassifyWorkingCommandStaysThinking(t *testing.T) {

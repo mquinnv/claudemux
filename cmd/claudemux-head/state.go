@@ -159,6 +159,8 @@ var clientOnlyCommands = map[string]bool{
 	"/cost": true, "/config": true, "/color": true, "/help": true,
 	"/doctor": true, "/release-notes": true, "/vim": true,
 	"/terminal-setup": true, "/login": true, "/exit": true,
+	"/mcp": true, "/permissions": true, "/hooks": true, "/agents": true,
+	"/plugin": true, "/memory": true, "/theme": true,
 }
 
 // clientOnlyCommand reports whether text is an invocation of one. text is
@@ -167,6 +169,9 @@ var clientOnlyCommands = map[string]bool{
 // see cleanCommandText.
 func clientOnlyCommand(text string) bool {
 	text = strings.TrimSpace(text)
+	if localCommandOutput(text) {
+		return true
+	}
 	if !strings.HasPrefix(text, "/") {
 		return false
 	}
@@ -175,6 +180,18 @@ func clientOnlyCommand(text string) bool {
 		name = text[:i]
 	}
 	return clientOnlyCommands[name]
+}
+
+// localCommandOutput reports whether text is the harness's own reply to a
+// local command. Some commands (`/mcp` in 2.1.296–2.1.322) are written as
+// two user records — the command, then its output wrapped in
+// <local-command-stdout> or <local-command-stderr> — so the reply, not the
+// command, is the trailing event. Only the harness writes those tags, and
+// only for commands it ran itself, so the reply means the same thing as a
+// listed command whether or not that command made the list.
+func localCommandOutput(text string) bool {
+	return strings.HasPrefix(text, "<local-command-stdout>") ||
+		strings.HasPrefix(text, "<local-command-stderr>")
 }
 
 // bgOverride upgrades an Idle verdict when the session has work outstanding
