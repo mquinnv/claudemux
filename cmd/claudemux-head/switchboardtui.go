@@ -167,7 +167,14 @@ var (
 	swBusyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	swUnknownStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	swSelStyle     = lipgloss.NewStyle().Reverse(true)
-	swStatusStyle  = lipgloss.NewStyle().Faint(true)
+	// swSelRowBG is the bar laid under the whole selected row, so the cursor
+	// reads across every column and not just the name. It is a background,
+	// not a reverse: the cells after the name keep their own colors (orange
+	// waiting, blue busy, the context bar's thresholds), which a reverse would
+	// turn into a patchwork of colored blocks. Adaptive because one grey cannot
+	// be a subtle-but-visible bar on both a dark and a light theme.
+	swSelRowBG    = lipgloss.AdaptiveColor{Light: "254", Dark: "237"}
+	swStatusStyle = lipgloss.NewStyle().Faint(true)
 	// The topic is the field the lobby exists to show: with a fleet of
 	// sessions all reporting "Thinking", it is the only thing on the row that
 	// says which one you want. It gets weight and nothing else — no
@@ -213,6 +220,33 @@ func swNameStyle(hex string, selected bool) lipgloss.Style {
 		return lipgloss.NewStyle()
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("#" + hex))
+}
+
+// swHighlightRow lays swSelRowBG under an already-rendered, already-clipped
+// row and pads it out to width, so the bar runs edge to edge rather than
+// stopping where the row's text does.
+//
+// The row is a patchwork of styled cells, each ending in an SGR reset that
+// would cut a background wrapped around the outside off at the first cell.
+// So the background is re-asserted after every reset inside the row; the
+// cells' own foregrounds, bold and faint survive because only the background
+// is added.
+//
+// With no color profile (a dumb terminal, tests) the style renders no escape
+// at all and the row comes back unpadded and untouched — the name's reverse
+// still marks the cursor there.
+func swHighlightRow(line string, width int) string {
+	const probe = "x"
+	open, _, ok := strings.Cut(lipgloss.NewStyle().Background(swSelRowBG).Render(probe), probe)
+	if !ok || open == "" {
+		return line
+	}
+	if pad := width - lipgloss.Width(line); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+open)
+	line = strings.ReplaceAll(line, "\x1b[m", "\x1b[m"+open)
+	return open + line + "\x1b[0m"
 }
 
 // swMarkerW is the marker cell's width: one glyph, no emoji.
@@ -1478,6 +1512,9 @@ func (m swModel) View() string {
 		if m.width > 0 {
 			line = clipLine(line, m.width)
 		}
+		if i == m.sel {
+			line = swHighlightRow(line, m.width)
+		}
 		b.WriteString(line + "\n")
 
 		// Line 2: defer blocker · summary · prompt, whichever are set;
@@ -1496,6 +1533,9 @@ func (m swModel) View() string {
 			line2 := strings.Repeat(" ", swDetailIndent) + swStatusStyle.Render(dprefix) + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
+			}
+			if i == m.sel {
+				line2 = swHighlightRow(line2, m.width)
 			}
 			b.WriteString(line2 + "\n")
 		}

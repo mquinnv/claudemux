@@ -2096,3 +2096,44 @@ func TestViewDeferReasonInlineWhenRoom(t *testing.T) {
 		t.Error("line-2 blocker is not in the defer hue")
 	}
 }
+
+// The selection bar runs the full width of the pane, under every cell, and
+// survives the resets each styled cell ends with.
+func TestSwHighlightRowSpansTheRow(t *testing.T) {
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(orig)
+
+	line := " " + swWaitStyle.Render("waiting") + " " + swUnknownStyle.Render("3m")
+	got := swHighlightRow(line, 40)
+
+	if w := lipgloss.Width(got); w != 40 {
+		t.Errorf("highlighted row is %d cells wide, want 40", w)
+	}
+	open, _, _ := strings.Cut(lipgloss.NewStyle().Background(swSelRowBG).Render("x"), "x")
+	if !strings.HasPrefix(got, open) {
+		t.Errorf("row does not open with the selection background: %q", got)
+	}
+	// Every reset inside the row is followed by the background again, so no
+	// cell after the first styled one falls back to the terminal default.
+	for _, part := range strings.Split(got, "\x1b[0m")[1:] {
+		if part != "" && !strings.HasPrefix(part, open) {
+			t.Errorf("background not re-asserted after a reset: %q", got)
+			break
+		}
+	}
+	if !strings.Contains(got, swWaitStyle.Render("waiting")[:len(swWaitStyle.Render("waiting"))-len("\x1b[0m")]) {
+		t.Errorf("cell foreground lost under the highlight: %q", got)
+	}
+}
+
+// Without a color profile there is no bar to draw; the row is left alone.
+func TestSwHighlightRowNoColorIsANoop(t *testing.T) {
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	defer lipgloss.SetColorProfile(orig)
+
+	if got := swHighlightRow(" plain row", 40); got != " plain row" {
+		t.Errorf("swHighlightRow without color = %q, want the row untouched", got)
+	}
+}
