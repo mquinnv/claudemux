@@ -27,6 +27,42 @@ func TestSwFindRank(t *testing.T) {
 	}
 }
 
+func TestSwFindPRRank(t *testing.T) {
+	for _, c := range []struct {
+		pr   int
+		q    string
+		want int
+	}{
+		{123, "123", 0},
+		{123, "#123", 0},
+		{123, "#12", 1},
+		{123, "12", 1},
+		{123, "23", -1},
+		{123, "#", 3},
+		{0, "#", -1},
+		{0, "1", -1},
+		{123, "#a", -1},
+		{123, "", -1},
+	} {
+		if got := swFindPRRank(c.pr, c.q); got != c.want {
+			t.Errorf("swFindPRRank(%d, %q) = %d, want %d", c.pr, c.q, got, c.want)
+		}
+	}
+}
+
+func TestSwFindMatchesPRNumber(t *testing.T) {
+	sess := []swSession{{Name: "remix", PRNumber: 412}, {Name: "claudemux", PRNumber: 41}, {Name: "scala3d"}}
+	if got, want := swFindMatches(sess, "#41"), []int{1, 0}; !slices.Equal(got, want) {
+		t.Errorf("matches(#41) = %v, want %v (exact PR, then PR prefix)", got, want)
+	}
+	if got, want := swFindMatches(sess, "412"), []int{0}; !slices.Equal(got, want) {
+		t.Errorf("matches(412) = %v, want %v", got, want)
+	}
+	if got, want := swFindMatches(sess, "#"), []int{0, 1}; !slices.Equal(got, want) {
+		t.Errorf("matches(#) = %v, want %v (every session with a PR)", got, want)
+	}
+}
+
 func TestSwFindMatchesBestRankFirst(t *testing.T) {
 	sess := []swSession{{Name: "claudemux"}, {Name: "ag-admin"}, {Name: "admin-tools"}, {Name: "scala3d"}}
 	got := swFindMatches(sess, "adm")

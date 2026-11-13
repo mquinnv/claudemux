@@ -408,12 +408,13 @@ Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
 jumps to a session (and pauses conducting), `d` toggles defer on the selected
 row, `D` edits that row's blocker, `p` hides or shows the preview box, `Esc`
 returns to the session you came from (tmux's per-client last session), `n`
-starts a new session, `/` finds a session by name, `q` quits.
+starts a new session, `/` finds a session by name or PR number, `q` quits.
 
 `/` opens a find prompt on the status line. As you type, the selection jumps to
 the session whose name matches best (a prefix first, then the start of a later
 word, then any substring, then the letters in order, so `rmx` finds `remix`),
-and rows that don't match dim. `↑`/`↓` (or `Tab`) step through the matches,
+or whose PR number matches (`412` or `#412` exactly, `#41` as a prefix; a bare
+`#` matches every session with a PR), and rows that don't match dim. `↑`/`↓` (or `Tab`) step through the matches,
 `Enter` jumps to the selected one, and `Esc` puts the cursor back where it was.
 The conductor holds off while the prompt is open.
 

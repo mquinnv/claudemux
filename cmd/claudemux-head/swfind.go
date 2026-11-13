@@ -48,14 +48,55 @@ func swFindRank(name, query string) int {
 	return -1
 }
 
-// swFindMatches returns the indexes of the sessions whose names match query,
+// swFindPRRank scores how well a session's PR number matches query, on the
+// same scale as swFindRank: 0 the exact number, 1 a prefix of it ("#12" finds
+// #123). A leading "#" is optional, so "123" and "#123" both work. Digits
+// only — no substring or subsequence, since "2" would then hit every PR with
+// a 2 in it. A bare "#" matches every session with a PR, at the weakest rank.
+func swFindPRRank(pr int, query string) int {
+	if pr <= 0 || query == "" {
+		return -1
+	}
+	q := strings.TrimPrefix(query, "#")
+	if q == "" {
+		if query == "#" {
+			return 3
+		}
+		return -1
+	}
+	for _, r := range q {
+		if r < '0' || r > '9' {
+			return -1
+		}
+	}
+	n := strconv.Itoa(pr)
+	switch {
+	case n == q:
+		return 0
+	case strings.HasPrefix(n, q):
+		return 1
+	}
+	return -1
+}
+
+// swFindSessionRank is a session's best rank for query, by name or PR number.
+func swFindSessionRank(s swSession, query string) int {
+	r := swFindRank(s.Name, query)
+	if p := swFindPRRank(s.PRNumber, query); p >= 0 && (r < 0 || p < r) {
+		r = p
+	}
+	return r
+}
+
+// swFindMatches returns the indexes of the sessions whose name or PR number
+// matches query,
 // best rank first and list order within a rank, so the first entry is where
 // the selection lands and the cycle keys walk the rest in a stable order.
 func swFindMatches(sessions []swSession, query string) []int {
 	type hit struct{ idx, rank int }
 	var hits []hit
 	for i, s := range sessions {
-		if r := swFindRank(s.Name, query); r >= 0 {
+		if r := swFindSessionRank(s, query); r >= 0 {
 			hits = append(hits, hit{i, r})
 		}
 	}
