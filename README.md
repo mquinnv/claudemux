@@ -50,7 +50,8 @@ shell pane is there for that), and a pane whose program *fails* is kept on scree
 error rather than vanishing.
 
 In a project with an `op_env`, the `claude` pane is held by a waiting screen while
-1Password decrypts the environment — a read takes around 25 seconds — and is then replaced
+you approve 1Password's prompt and the environment is read — about a second once
+approved, on op 2.42 or later — and is then replaced
 by `claude` itself, with the secrets in its environment. Pressing any key skips the wait
 and starts `claude` immediately, *without* those secrets.
 
@@ -127,7 +128,7 @@ scroll past at launch.
 
 The command is parsed by `sh`, not by your login shell, so write it in POSIX syntax even
 if you live in fish. And in a project with an `op_env`, it starts *after* the 1Password
-unlock rather than at launch — around 25 seconds in, alongside `claude` — so that it comes
+unlock rather than at launch — alongside `claude`, once the prompt is approved — so that it comes
 up with the secrets in its environment rather than without them.
 
 ## The switchboard

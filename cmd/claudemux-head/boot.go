@@ -19,9 +19,11 @@ import (
 // it, then becomes the program it was asked to run.
 //
 // It exists because launching claude in a project with an op_env means waiting
-// on `op environment read`, which is not a flicker: measured on op 2.38.1,
-// already authorized, three consecutive reads of a ONE-variable Environment
-// took 27.4s, 25.4s and 22.4s. bin/claudemux used to spend that time showing an
+// on 1Password: an authorization prompt, then the Environment read. That was
+// never a flicker. On op 2.38.1 the beta `op environment read` alone took
+// 22-27s; inject_op_env now uses `op run --environment`, which reads in about
+// a second, but the prompt still takes as long as the user does. bin/claudemux
+// used to spend that time showing an
 // interactive shell with an echoed notice in it — a prompt, a typed command,
 // and a second prompt underneath — which is both ugly and indistinguishable
 // from a session that failed to start.

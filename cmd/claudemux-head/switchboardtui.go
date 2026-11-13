@@ -597,7 +597,7 @@ func swLastLine(out string) string {
 func swCreateCmd(query string) tea.Cmd {
 	return func() tea.Msg {
 		// Generous timeout: the launcher shells out to tmux, git, and config
-		// lookups. Its ~25s op_env wait is backgrounded and doesn't hold the
+		// lookups. Its op_env wait (1Password prompt + read) is backgrounded and doesn't hold the
 		// -d exit up.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

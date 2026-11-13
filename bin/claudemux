@@ -556,8 +556,25 @@ op_account_for() {
 # respawned) afterwards inherit, and claude/sub-agents never call op
 # themselves. Returns 0 only when variables were injected — the caller
 # (deferred_launch) then respawns the panes whose shells predate the
-# injection. Multiline values are truncated at the first newline — keep
-# those out of Environments.
+# injection.
+#
+# The Environment is read with `op run --environment <id> -- env -0`, not
+# `op environment read`. Measured 2026-11-13 on a 72-variable Environment,
+# after the authorization prompt was approved: `op environment read` (op
+# 2.38.1-beta.01) spent another ~7.6s, nearly all of it CPU, while `op run`
+# (op 2.42.0) took ~0.9s and returned the identical names and values. Stable op
+# 2.42.0 also has no `environment read` at all. It was only ever a beta
+# subcommand. `op run --environment` works on both. NUL-separated output keeps
+# multiline values whole, where the old line-based parse cut them at the
+# first newline.
+#
+# op runs under `env -i` with only what it needs to find its config and the
+# desktop app (HOME, USER, LOGNAME, TMPDIR, PATH, XDG_CONFIG_HOME, OP_*), so
+# the child's environment is the Environment's variables plus those
+# passthroughs. A passthrough name is skipped only when op handed back the
+# value it was given; an Environment variable that overrides one (op gives
+# Environments precedence) still lands. --no-masking matters: op run
+# otherwise rewrites secret values in the child's stdout to a placeholder.
 #
 # CLAUDEMUX_OP_ENV is set to the Environment's id alongside the variables so
 # that project scripts wrapping commands in `op run --environment <id>` can
@@ -565,21 +582,41 @@ op_account_for() {
 # directly — skipping op's per-call 1Password authorization prompt — while
 # behaving exactly as before anywhere claudemux didn't inject.
 inject_op_env() {
-  local session="$1" work_dir="$2" env_id acct env_out line key
+  local session="$1" work_dir="$2" env_id acct op_bin name entry key val
   env_id="$(project_field "$work_dir" op_env)"
   [ -n "$env_id" ] || return 1
+  op_bin="$(command -v op)" || {
+    echo "claudemux: op not found; launching without secrets" >&2
+    return 1
+  }
   acct="$(op_account_for "$work_dir")"
-  local -a acct_args=()
+  local -a acct_args=() pass=()
   [ -n "$acct" ] && acct_args=(--account "$acct")
-  if ! env_out="$(op environment read "$env_id" "${acct_args[@]+"${acct_args[@]}"}")"; then
-    echo "claudemux: op environment read $env_id failed; launching without secrets" >&2
+  for name in HOME USER LOGNAME TMPDIR PATH XDG_CONFIG_HOME $(compgen -e | grep '^OP_' || true); do
+    [ -n "${!name+x}" ] && pass+=("$name=${!name}")
+  done
+  # pipefail (set at the top) makes an op failure fail the pipeline; op exits
+  # before running the child on any failure, so nothing is half-injected.
+  if ! env -i "${pass[@]+"${pass[@]}"}" "$op_bin" run --no-masking \
+    "${acct_args[@]+"${acct_args[@]}"}" --environment "$env_id" -- /usr/bin/env -0 |
+    while IFS= read -r -d '' entry; do
+      [[ "$entry" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+      key="${entry%%=*}"
+      val="${entry#*=}"
+      case "$key" in
+      # Shell bookkeeping, never an Environment's: op itself sets none of
+      # these, but a wrapper script around it would, and a session handed a
+      # stray PWD misleads everything started in it.
+      PWD | OLDPWD | SHLVL | _) continue ;;
+      HOME | USER | LOGNAME | TMPDIR | PATH | XDG_CONFIG_HOME | OP_*)
+        [ "${!key-}" = "$val" ] && continue
+        ;;
+      esac
+      tmux set-environment -t "$session:" "$key" "$val"
+    done; then
+    echo "claudemux: op run --environment $env_id failed; launching without secrets" >&2
     return 1
   fi
-  while IFS= read -r line; do
-    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-    key="${line%%=*}"
-    tmux set-environment -t "$session:" "$key" "${line#*=}"
-  done <<< "$env_out"
   tmux set-environment -t "$session:" CLAUDEMUX_OP_ENV "$env_id"
 }
 
@@ -729,24 +766,12 @@ run_shell_in_pane() {
 }
 
 # deferred_launch SESSION DIR CLAUDE_PANE SHELL_PANE CLAUDE_CMD HOLDER SHELL_CMD
-# — finish an op_env launch off the critical path. `op environment read` costs ~25s of
-# WALL TIME per call — 27.4s / 25.4s / 22.4s over three consecutive reads on op
-# 2.38.1, fully authorized, of an Environment holding a SINGLE variable. Only
-# ~38% of that is CPU (7.7s user + 5.3s sys of a 33.3s run); the rest is spent
-# waiting. No auth prompt is involved, and there is no CLI session to warm, so
-# every new session pays it again.
-#
-# It is NOT the cost of decryption, and measuring it that way is what made the
-# previous version of this comment claim "~10s of pure CPU". On the same
-# machine and account, `op item get` decrypts an ENTIRE item, secret fields
-# included, in 0.81s wall / 0.12s CPU, and `op item list` pulls every item in
-# the account in 7.0s wall / 0.25s CPU. Reading one variable out of an
-# Environment burns ~100x the CPU of decrypting a whole item. The `environment`
-# subcommand is simply pathological (reproduced on op 2.38.1-beta.01 and
-# 2.38.2-beta.01); the fix is to stop using Environments for launch-critical
-# secrets, not to shave this code path. create_session
-# backgrounds this and attaches immediately instead of leaving the user at a
-# blank terminal for half a minute.
+# — finish an op_env launch off the critical path. Reading the Environment
+# waits on the user approving 1Password's authorization prompt, which takes as
+# long as they take. Before inject_op_env switched to `op run --environment`,
+# the read itself also cost 8-27s more on the beta `op environment read`
+# subcommand. create_session backgrounds this and attaches immediately instead
+# of leaving the user at a blank terminal for however long that is.
 #
 # Once the secrets are in the session environment, the shell pane is respawned
 # so its shell inherits them — but only while it is still sitting on the
@@ -1105,10 +1130,11 @@ create_session() {
   tmux set -p -t "$claude_pane" @claudemux_claude_cmd "$claude_cmd"
 
   # With an op_env, claude's launch is handed to a background injector so the
-  # attach below happens NOW rather than after op's ~25s decryption (see
-  # deferred_launch). The pane is held by `claudemux-head boot`, a real TUI that
-  # says what is being waited on and keeps a clock running against the typical
-  # duration — a wait this long needs to show it is alive — and deferred_launch
+  # attach below happens NOW rather than after the 1Password prompt and read
+  # (see deferred_launch). The pane is held by `claudemux-head boot`, a real TUI
+  # that says what is being waited on and keeps a clock running. No --expected:
+  # the wait is now mostly the user approving the prompt, and a "typical"
+  # duration for that would be a guess. deferred_launch
   # replaces it with claude itself. The holder is handed the very same command
   # after `--`: it execs it if it is left waiting past its own timeout or the
   # user presses a key, so this pane ends up running claude however the wait
@@ -1121,7 +1147,7 @@ create_session() {
     # list at the FIRST "--" it sees, flags before, command after — so
     # everything from here on is what the holder execs, verbatim, and a flag
     # placed after this point would be read as part of that command instead.
-    holder_cmd+=" --expected 25s -- $claude_cmd"
+    holder_cmd+=" -- $claude_cmd"
     run_in_pane "$claude_pane" "$holder_cmd" "$claude_dir"
     # A configured shell command rides along instead of being started here: the
     # shell pane has to stay a bare shell until the secrets land, or
