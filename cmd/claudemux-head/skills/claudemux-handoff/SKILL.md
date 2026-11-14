@@ -39,7 +39,7 @@ A subagent inherits this session's cwd, hooks, CLAUDE.md, memory scope and workt
    ```bash
    claudemux-head defer --wait-on <tmux-name> --reason "waiting on <tmux-name>: <goal in a few words>"
    ```
-   The command marks this session as a handoff's (the lobby badges it WAIT, not DEFER) and links it to `<tmux-name>`. The reason is `waiting on <tmux-name>: <goal>`: one line, no tabs or newlines, under about 48 characters so the head's chip shows all of it. Skip this step when the user gave this session other work to continue. If the user deferred this session themselves, the command leaves that mark alone and prints `skipped: this session is deferred by the user`; that is fine, carry on.
+   The command marks this session as a handoff's (the lobby badges it WAIT, not DEFER) and links it to `<tmux-name>`. The reason is `waiting on <tmux-name>: <goal>`: one line, no tabs or newlines, under about 48 characters so the head's chip shows all of it. Skip this step when the user gave this session other work to continue. If the user deferred this session themselves, the command leaves that mark alone and prints `skipped: this session is deferred by the user`; that is fine, carry on. If the command fails (for example outside tmux), carry on too: the defer is optional, and do not set the tmux options by hand.
 
 ## The brief (the peer's entire knowledge)
 
