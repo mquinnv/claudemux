@@ -257,7 +257,12 @@ func relinkArgs(restored []lostSession, created map[string]int64) [][]string {
 // recorded blocker was also restored and is live in created. After a reboot
 // every blocker is momentarily absent, so a link to a session that was not
 // restored is dropped (the defer stays plain, as restore already set it)
-// rather than left to be read as "every blocker closed".
+// rather than left to be read as "every blocker closed". The seen flag is
+// never restored, for the same reason: a blocker the reboot interrupted may
+// come back at an idle prompt, so it must be seen working again before it
+// can read as finished. The relink is best-effort like relinkArgs; if it
+// fails the defer stays a plain one, and the head's next record write drops
+// the persisted link.
 func deferRelinkArgs(restored []lostSession, created map[string]int64) [][]string {
 	names := make(map[string]bool, len(restored))
 	for _, l := range restored {
@@ -273,13 +278,9 @@ func deferRelinkArgs(restored []lostSession, created map[string]int64) [][]strin
 		if !ok {
 			continue
 		}
-		args := []string{
+		out = append(out, []string{
 			"set-option", "-t", child + ":", deferOnOption, on, ";",
-			"set-option", "-t", child + ":", deferOnCreatedOption, strconv.FormatInt(c, 10)}
-		if l.Rec.DeferOnSeen {
-			args = append(args, ";", "set-option", "-t", child+":", deferOnSeenOption, "1")
-		}
-		out = append(out, args)
+			"set-option", "-t", child + ":", deferOnCreatedOption, strconv.FormatInt(c, 10)})
 	}
 	return out
 }

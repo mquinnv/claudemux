@@ -9,38 +9,43 @@ import (
 )
 
 // TestSessionRecordCarriesDeferLink: the link options die with tmux too, so
-// the record keeps the blocker's name and the seen flag for restore.
+// the record keeps the blocker's name for restore. Not the seen flag: after a
+// reboot the blocker must be seen working again (deferRelinkArgs).
 func TestSessionRecordCarriesDeferLink(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	m := model{sessionID: "abc", workDir: "/p/x", deferMark: deferMark{
 		Raw: "1", Reason: "phenix-2", Link: deferLink{On: "phenix-2", Created: "1762999000"}, Seen: true}}
 	r := m.sessionRecordFor(now)
-	if r.DeferOn != "phenix-2" || !r.DeferOnSeen {
-		t.Errorf("linked record = %q %v, want phenix-2 true", r.DeferOn, r.DeferOnSeen)
+	if r.DeferOn != "phenix-2" {
+		t.Errorf("linked record = %q, want phenix-2", r.DeferOn)
 	}
 	b, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(string(b), "defer_on_seen") {
+		t.Errorf("record json carries the seen flag: %s", b)
+	}
 	var back sessionRecord
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)
 	}
-	if back.DeferOn != "phenix-2" || !back.DeferOnSeen {
-		t.Errorf("round trip = %q %v, want phenix-2 true", back.DeferOn, back.DeferOnSeen)
+	if back.DeferOn != "phenix-2" {
+		t.Errorf("round trip = %q, want phenix-2", back.DeferOn)
 	}
 	m.deferMark = deferMark{Raw: "1", Reason: "Jean"}
 	r = m.sessionRecordFor(now)
-	if r.DeferOn != "" || r.DeferOnSeen {
-		t.Errorf("unlinked record = %q %v, want empty false", r.DeferOn, r.DeferOnSeen)
+	if r.DeferOn != "" {
+		t.Errorf("unlinked record = %q, want empty", r.DeferOn)
 	}
 	if b, _ := json.Marshal(r); strings.Contains(string(b), "defer_on") {
 		t.Errorf("unlinked record json has link fields: %s", b)
 	}
 }
 
-// TestRecordDueOnLinkChange: linking, or the blocker being seen, writes the
-// record at once even when mark and reason are unchanged.
+// TestRecordDueOnLinkChange: linking writes the record at once even when mark
+// and reason are unchanged. The blocker being seen does not: the record no
+// longer carries that flag.
 func TestRecordDueOnLinkChange(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	m := model{selfPane: "%1", sessionID: "abc", lastRecordAt: now,
@@ -56,8 +61,8 @@ func TestRecordDueOnLinkChange(t *testing.T) {
 	}
 	m.lastRecordDefer = m.recordDeferKey()
 	m.deferMark.Seen = true
-	if !m.recordDue(now.Add(time.Second)) {
-		t.Fatal("not due after blocker seen")
+	if m.recordDue(now.Add(time.Second)) {
+		t.Fatal("due after blocker seen; the record does not carry the seen flag")
 	}
 }
 
