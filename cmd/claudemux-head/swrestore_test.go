@@ -257,6 +257,51 @@ func TestRelinkArgs(t *testing.T) {
 	}
 }
 
+func deferredRec(name, on string, seen, deferred bool) lostSession {
+	l := lostRec(name, "x-"+name, "/p", "", 1, false)
+	l.Rec.Deferred, l.Rec.DeferOn, l.Rec.DeferOnSeen = deferred, on, seen
+	return l
+}
+
+func TestDeferRelinkArgs(t *testing.T) {
+	restored := []lostSession{deferredRec("phenix-1", "phenix-2", false, true),
+		deferredRec("beejax", "phenix-2", true, true), lostRec("phenix-2", "2", "/p", "", 1, false)}
+	created := map[string]int64{"phenix-1": 400, "beejax": 401, "phenix-2": 1763000500}
+	got := deferRelinkArgs(restored, created)
+	want := [][]string{
+		{"set-option", "-t", "phenix-1:", deferOnOption, "phenix-2", ";",
+			"set-option", "-t", "phenix-1:", deferOnCreatedOption, "1763000500"},
+		{"set-option", "-t", "beejax:", deferOnOption, "phenix-2", ";",
+			"set-option", "-t", "beejax:", deferOnCreatedOption, "1763000500", ";",
+			"set-option", "-t", "beejax:", deferOnSeenOption, "1"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("deferRelinkArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if strings.Join(got[i], " ") != strings.Join(want[i], " ") {
+			t.Errorf("argv %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// A blocker that was not restored is gone after a reboot, not closed: the
+// defer stays plain rather than pointing at a missing session.
+func TestDeferRelinkArgsBlockerNotRestored(t *testing.T) {
+	restored := []lostSession{deferredRec("phenix-1", "phenix-2", true, true)}
+	if got := deferRelinkArgs(restored, map[string]int64{"phenix-1": 400, "phenix-2": 500}); len(got) != 0 {
+		t.Errorf("deferRelinkArgs = %v, want none", got)
+	}
+}
+
+func TestDeferRelinkArgsNotDeferred(t *testing.T) {
+	restored := []lostSession{deferredRec("phenix-1", "phenix-2", true, false),
+		lostRec("phenix-2", "2", "/p", "", 1, false)}
+	if got := deferRelinkArgs(restored, map[string]int64{"phenix-2": 500}); len(got) != 0 {
+		t.Errorf("deferRelinkArgs = %v, want none", got)
+	}
+}
+
 func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
 	m := newSwModel("%0")
 	a := lostRec("a", "1", "/p", "", 1, false)

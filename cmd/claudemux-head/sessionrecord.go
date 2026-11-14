@@ -44,6 +44,11 @@ type sessionRecord struct {
 	Deferred    bool   `json:"deferred,omitempty"`
 	DeferWait   bool   `json:"defer_wait,omitempty"`
 	DeferReason string `json:"defer_reason,omitempty"`
+	// DeferOn and DeferOnSeen carry the defer's link to its blocking session.
+	// Only the name: creation times do not survive a reboot, so restore takes
+	// the relaunched blocker's new one (deferRelinkArgs).
+	DeferOn     string `json:"defer_on,omitempty"`
+	DeferOnSeen bool   `json:"defer_on_seen,omitempty"`
 	// Parent is the launching session's name (@claudemux_parent). Another
 	// tmux session option, so another thing a reboot erases; restore relinks
 	// it once the whole batch is back (swRelinkCmd).

@@ -253,6 +253,37 @@ func relinkArgs(restored []lostSession, created map[string]int64) [][]string {
 	return out
 }
 
+// deferRelinkArgs builds one tmux argv per restored deferred child whose
+// recorded blocker was also restored and is live in created. After a reboot
+// every blocker is momentarily absent, so a link to a session that was not
+// restored is dropped (the defer stays plain, as restore already set it)
+// rather than left to be read as "every blocker closed".
+func deferRelinkArgs(restored []lostSession, created map[string]int64) [][]string {
+	names := make(map[string]bool, len(restored))
+	for _, l := range restored {
+		names[l.Rec.SessionName] = true
+	}
+	var out [][]string
+	for _, l := range restored {
+		child, on := l.Rec.SessionName, l.Rec.DeferOn
+		if !l.Rec.Deferred || on == "" || !names[on] {
+			continue
+		}
+		c, ok := created[on]
+		if !ok {
+			continue
+		}
+		args := []string{
+			"set-option", "-t", child + ":", deferOnOption, on, ";",
+			"set-option", "-t", child + ":", deferOnCreatedOption, strconv.FormatInt(c, 10)}
+		if l.Rec.DeferOnSeen {
+			args = append(args, ";", "set-option", "-t", child+":", deferOnSeenOption, "1")
+		}
+		out = append(out, args)
+	}
+	return out
+}
+
 // swRelinkCmd re-stamps handoff parent links on the relaunched sessions.
 // Best-effort: a failure leaves a child unlinked (it shows as a root), which
 // is not worth failing the restore over.
@@ -276,6 +307,9 @@ func swRelinkCmd(restored []lostSession) tea.Cmd {
 			}
 		}
 		for _, args := range relinkArgs(restored, created) {
+			_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		}
+		for _, args := range deferRelinkArgs(restored, created) {
 			_ = exec.CommandContext(ctx, "tmux", args...).Run()
 		}
 		return nil

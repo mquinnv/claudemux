@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,7 +44,8 @@ func (m model) recordDeferKey() string {
 	if !isDeferValue(m.deferMark.Raw) {
 		return ""
 	}
-	return m.deferMark.Raw + "\t" + sanitizeDeferReason(m.deferMark.Reason)
+	return m.deferMark.Raw + "\t" + sanitizeDeferReason(m.deferMark.Reason) +
+		"\t" + m.deferMark.Link.On + "\t" + strconv.FormatBool(m.deferMark.Seen)
 }
 
 // sessionRecordFor builds the record from what the head knows. The session
@@ -65,6 +67,10 @@ func (m model) sessionRecordFor(now time.Time) sessionRecord {
 		r.Deferred = true
 		r.DeferWait = m.deferMark.Raw == deferWaitValue
 		r.DeferReason = sanitizeDeferReason(m.deferMark.Reason)
+		if m.deferMark.Link.set() {
+			r.DeferOn = m.deferMark.Link.On
+			r.DeferOnSeen = m.deferMark.Seen
+		}
 	}
 	return r
 }

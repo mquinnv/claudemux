@@ -1,10 +1,65 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestSessionRecordCarriesDeferLink: the link options die with tmux too, so
+// the record keeps the blocker's name and the seen flag for restore.
+func TestSessionRecordCarriesDeferLink(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := model{sessionID: "abc", workDir: "/p/x", deferMark: deferMark{
+		Raw: "1", Reason: "phenix-2", Link: deferLink{On: "phenix-2", Created: "1762999000"}, Seen: true}}
+	r := m.sessionRecordFor(now)
+	if r.DeferOn != "phenix-2" || !r.DeferOnSeen {
+		t.Errorf("linked record = %q %v, want phenix-2 true", r.DeferOn, r.DeferOnSeen)
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back sessionRecord
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.DeferOn != "phenix-2" || !back.DeferOnSeen {
+		t.Errorf("round trip = %q %v, want phenix-2 true", back.DeferOn, back.DeferOnSeen)
+	}
+	m.deferMark = deferMark{Raw: "1", Reason: "Jean"}
+	r = m.sessionRecordFor(now)
+	if r.DeferOn != "" || r.DeferOnSeen {
+		t.Errorf("unlinked record = %q %v, want empty false", r.DeferOn, r.DeferOnSeen)
+	}
+	if b, _ := json.Marshal(r); strings.Contains(string(b), "defer_on") {
+		t.Errorf("unlinked record json has link fields: %s", b)
+	}
+}
+
+// TestRecordDueOnLinkChange: linking, or the blocker being seen, writes the
+// record at once even when mark and reason are unchanged.
+func TestRecordDueOnLinkChange(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := model{selfPane: "%1", sessionID: "abc", lastRecordAt: now,
+		deferMark: deferMark{Raw: "1", Reason: "CI"}}
+	m.lastRecordState = statePublishValue(m.state)
+	m.lastRecordDefer = m.recordDeferKey()
+	if m.recordDue(now.Add(time.Second)) {
+		t.Fatal("due with nothing changed")
+	}
+	m.deferMark.Link = deferLink{On: "phenix-2", Created: "1762999000"}
+	if !m.recordDue(now.Add(time.Second)) {
+		t.Fatal("not due after link set")
+	}
+	m.lastRecordDefer = m.recordDeferKey()
+	m.deferMark.Seen = true
+	if !m.recordDue(now.Add(time.Second)) {
+		t.Fatal("not due after blocker seen")
+	}
+}
 
 func TestRecordDue(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
