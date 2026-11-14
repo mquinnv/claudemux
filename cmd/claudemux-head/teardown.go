@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -91,32 +90,35 @@ const (
 	repoUnknown repoPlacement = iota
 	// repoOwned: the directory is in a repository; owner is its main checkout.
 	repoOwned
-	// repoNone: the directory exists and git says it is in no repository.
+	// repoNone: the directory exists and git's discovery found no repository
+	// above it (gitNoRepoMessage, and only that).
 	repoNone
-	// repoGone: the directory no longer exists.
+	// repoGone: the directory does not exist.
 	repoGone
 )
 
-// repoOwnerCache memoizes dir → main checkout for directories git placed. Which
-// repository a directory belongs to is fixed for the life of the directory, so
-// entries never expire. Only positive answers are kept: "unknown" must be asked
-// again, and a missing or repo-less directory is cheap to re-ask and could
-// become a repo.
-var repoOwnerCache sync.Map // string -> string
+// gitNoRepoMessage is what git prints when discovery walked up from a
+// directory and found no repository. It is matched whole. Git's other "not a
+// git repository" failures mean something else — a linked worktree whose
+// pointer dangles ("not a git repository: <path>"), discovery cut short at a
+// filesystem boundary ("... up to mount point"), a bad inherited GIT_DIR — and
+// in each of those the directory may well hold a checkout with work in it.
+const gitNoRepoMessage = "not a git repository (or any of the parent directories)"
 
 // repoOwnerOf reports the main checkout of the repository containing dir, and
 // how sure that answer is. It is mainCheckoutFor for a caller that must not
-// mistake "git failed" for "not a repository".
+// mistake "git failed" for "not a repository": anything short of one absolute
+// path, or of git's own discovery failure, is repoUnknown. That includes a git
+// too old for --path-format, which echoes the option back and exits 0.
 //
-// It runs on the Update loop, when a teardown is armed, so it carries the same
-// deadline as every other subprocess here and answers from repoOwnerCache when
-// it can.
+// It runs on the Update loop, once per armed teardown, so it carries the same
+// deadline as every other subprocess here. It is deliberately not cached: the
+// key would be a path, and a path can be removed and recreated under another
+// repository — a stale answer here moves the gate onto the wrong checkout,
+// which costs more than one bounded fork per arm.
 func repoOwnerOf(dir string) (owner string, placement repoPlacement) {
 	if dir == "" {
 		return "", repoUnknown
-	}
-	if v, ok := repoOwnerCache.Load(dir); ok {
-		return v.(string), repoOwned
 	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return "", repoGone
@@ -129,17 +131,16 @@ func repoOwnerOf(dir string) (owner string, placement repoPlacement) {
 	out, err := cmd.Output()
 	if err != nil {
 		var exit *exec.ExitError
-		if errors.As(err, &exit) && bytes.Contains(exit.Stderr, []byte("not a git repository")) {
+		if errors.As(err, &exit) && bytes.Contains(exit.Stderr, []byte(gitNoRepoMessage)) {
 			return "", repoNone
 		}
 		return "", repoUnknown
 	}
-	owner = mainCheckoutFromCommonDir(string(out))
-	if owner == "" {
+	common := strings.TrimSpace(string(out))
+	if strings.ContainsAny(common, "\r\n") || !filepath.IsAbs(common) {
 		return "", repoUnknown
 	}
-	repoOwnerCache.Store(dir, owner)
-	return owner, repoOwned
+	return filepath.Dir(common), repoOwned
 }
 
 // worktreeIsGone reports whether the session's worktree has been torn down.
@@ -344,8 +345,13 @@ func teardownCommandSegment(s string) string {
 	return s
 }
 
-// teardownCommandTyped reports whether prompt is the user invoking command by
-// hand — the signal that a wrap-up is under way that the head did not start.
+// teardownCommandTyped reports whether prompt reads as an invocation of
+// command — the signal that a wrap-up is under way that the head did not start.
+//
+// It judges the text alone and cannot tell who sent it: a peer session's
+// message that opens with the command's name ("/done completed for PR #126")
+// matches too. Model code must go through model.typedTeardownCommand, which
+// also rules those out (AG-1482).
 //
 // Both sides are reduced to their last segment (see teardownCommandSegment),
 // so `/done`, `/ameriglide-core:done` and `/anyplugin:done` all match a
@@ -355,7 +361,8 @@ func teardownCommandSegment(s string) string {
 //
 // Only the prompt's first whitespace-delimited token is considered, because a
 // slash command may carry arguments and `/done --force` is still the wrap-up.
-// Both sides must begin with "/" so that ordinary prose can never match: a
+// Both sides must begin with "/" so that prose not opening with a slash can
+// never match: a
 // sentence mentioning a path like `scripts/done` reduces to the same segment,
 // but it is not a command and must not arm a kill-session.
 func teardownCommandTyped(prompt, command string) bool {
@@ -396,8 +403,8 @@ func teardownCommandTyped(prompt, command string) bool {
 // "unpushed", ...) — empty for a worktree block, whose reason is always the
 // same fixed sentence below. When set it is appended in parens so the chip
 // says what's actually holding the gate shut, not just that it is shut. The
-// caller (model.teardownChipText) has already suffixed it with the directory
-// the reading came from: "dirty tree in remix".
+// caller (model.teardownChipText) suffixes it with the name of the directory
+// the reading came from, when one is known: "dirty tree in remix".
 //
 // Every phase esc can still cancel says so (teardownEscHint): an auto-armed
 // watch in particular appears without the user pressing anything, and one
@@ -608,8 +615,8 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 //
 // workDir is the gate target captured when the teardown was armed
 // (model.teardownWorkDir). That is normally the SESSION's working directory
-// rather than the head process's own cwd — the head is launched in the main
-// checkout even for sessions that work in a worktree — and the launch
+// rather than the head process's own cwd — the head is normally launched in
+// the main checkout even for sessions that work in a worktree — and the launch
 // directory when the session's cwd is unknown or has left the launch repo (see
 // captureTeardownTarget).
 // checkClean selects the auto/non-worktree evidence (git cleanliness) instead

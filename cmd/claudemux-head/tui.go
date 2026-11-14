@@ -465,10 +465,12 @@ type model struct {
 	//
 	// mainCheckout is captured at startup for the same reason — there is no
 	// valid cwd left to run git from. It needs no session-cwd equivalent:
-	// captureTeardownTarget only keeps a session cwd that belongs to this
-	// same repo, so this is still the right place to run `git worktree list`.
-	// It is also what identifies the launch repo for that check
-	// (cwdLeftLaunchRepo).
+	// captureTeardownTarget drops a session cwd that git places in another
+	// repository or in none, so this is normally still the right place to run
+	// `git worktree list`. That is not a guarantee: a cwd git could not place
+	// at arm time, or a worktree that had already vanished, is kept without
+	// being confirmed as this repo's (see cwdLeftLaunchRepo, which also uses
+	// this field to identify the launch repo).
 	//
 	// inWorktree describes workDir, and is likewise only the gate's fallback.
 	workDir      string
@@ -2267,7 +2269,9 @@ func truncateRunes(s string, max int) string {
 // teardownChipText renders this model's teardown chip, or "" when there is
 // nothing to show.
 //
-// A cleanliness block names the checkout it was read from: the gate may be
+// A cleanliness block names the directory it was read from — the basename of
+// the gate target, which is a subdirectory's own name when the session sits
+// below its checkout's root, and nothing when no target is known: the gate may be
 // judging a directory other than the one the user is looking at, and "dirty
 // tree" alone sends them to check the wrong one.
 func (m model) teardownChipText(now time.Time) string {
@@ -3204,20 +3208,27 @@ func (m *model) captureTeardownTarget() {
 // evidence opens a gate on a kill-session:
 //
 //   - Git places the cwd in another repository: left.
-//   - Git says the cwd is in no repository: left. There is no tree to judge.
-//   - The cwd is gone. A worktree the wrap-up already removed is exactly the
-//     target the worktree gate needs, so it stays (it is taken to be this
-//     session's own: a vanished worktree cannot be attributed to a repo). A
-//     vanished plain directory has no tree to judge: left.
-//   - Git could not answer (missing, timed out): NOT left. A `git worktree add`
-//     sibling has no marker in its path, so the same outage also makes it look
-//     like a plain directory; falling back then would let a clean main
-//     checkout open the gate while the session's real worktree stands dirty.
-//     Keeping the cwd is the old behaviour, which blocks.
+//   - Git's discovery finds no repository above the cwd: left. There is no
+//     tree to judge.
+//   - The cwd is gone. If it is recognizably a worktree — by its
+//     `.claude/worktrees/` path, or a name cached while it was alive — it is
+//     exactly the target the worktree gate needs, so it stays (it is taken to
+//     be this session's own: a vanished worktree cannot be attributed to a
+//     repo). A vanished directory not known to be a worktree, which includes
+//     a `git worktree add` sibling this head never saw alive, has no tree to
+//     judge: left.
+//   - Git could not answer (missing, timed out, any other failure): NOT left.
+//     A `git worktree add` sibling has no marker in its path, so the same
+//     outage also makes it look like a plain directory; falling back then
+//     would let a clean main checkout open the gate while the session's real
+//     worktree stands dirty. Keeping the cwd is the old behaviour: the probes
+//     block for as long as git cannot answer, and judge the session's cwd as
+//     before once it can.
 //
-// The cost of falling back is stated plainly: a session that did real work in
-// another repository is judged on the launch repo alone. The gate vouches for
-// the session's own checkout, not for everything its shell visited.
+// The cost of falling back is stated plainly: work the session did somewhere
+// its cwd no longer points — another repository, or a linked worktree of this
+// one that it has since `cd`'d out of the repo from — is not judged. The gate
+// vouches for the launch checkout, not for everything the shell visited.
 func cwdLeftLaunchRepo(cwd string, inWorktree bool, workDir, mainCheckout string) bool {
 	if workDir == "" || mainCheckout == "" || cwd == workDir {
 		return false
