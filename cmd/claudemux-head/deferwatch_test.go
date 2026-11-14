@@ -104,13 +104,78 @@ func TestDeferWatchNotIdleNoNudge(t *testing.T) {
 	}
 }
 
+// A waiter that was idle when the grace started and then starts a turn has
+// moved on: the mark clears at once, without a nudge.
 func TestDeferWatchOwnTurnClearsEarly(t *testing.T) {
 	var w deferWatch
-	w.step(stoppedIn(t0))
+	if act, _ := w.step(stoppedIn(t0)); act != watchNone {
+		t.Fatalf("at t0 got %v want none", act)
+	}
 	in := stoppedIn(t0.Add(5 * time.Second))
 	in.OwnWorking = true
 	if act, _ := w.step(in); act != watchClear {
 		t.Fatalf("got %v want watchClear", act)
+	}
+}
+
+// A waiter that is mid-turn when the blocker first reads stopped (a handoff
+// still writing its summary, a chain's middle session just released) gets no
+// early clear: the blocker may only be between turns. It waits the grace out
+// and then clears without a nudge, even if it is idle by then, since it may
+// have just handled the reply itself.
+func TestDeferWatchMidTurnWaiterWaitsOutGrace(t *testing.T) {
+	var w deferWatch
+	in := stoppedIn(t0)
+	in.OwnWorking = true
+	if act, _ := w.step(in); act != watchNone {
+		t.Fatalf("at t0 got %v want none", act)
+	}
+	in = stoppedIn(t0.Add(19 * time.Second))
+	in.OwnWorking = true
+	if act, _ := w.step(in); act != watchNone {
+		t.Fatalf("at +19s got %v want none", act)
+	}
+	in = stoppedIn(t0.Add(20 * time.Second))
+	in.OwnIdle = true
+	if act, _ := w.step(in); act != watchClear {
+		t.Fatalf("at +20s got %v want watchClear (no nudge)", act)
+	}
+}
+
+// A mid-turn waiter whose blocker resumes during the grace abandons it, and a
+// later stopped verdict starts a fresh one.
+func TestDeferWatchMidTurnWaiterBlockerResumes(t *testing.T) {
+	var w deferWatch
+	in := stoppedIn(t0)
+	in.OwnWorking = true
+	if act, _ := w.step(in); act != watchNone {
+		t.Fatalf("at t0 got %v want none", act)
+	}
+	in = stoppedIn(t0.Add(5 * time.Second))
+	in.OwnWorking, in.Verdict = true, blockerWorking
+	if act, _ := w.step(in); act != watchNone {
+		t.Fatalf("blocker working: got %v want none", act)
+	}
+	w.step(stoppedIn(t0.Add(10 * time.Second)))
+	if act, _ := w.step(stoppedIn(t0.Add(25 * time.Second))); act != watchNone {
+		t.Fatalf("at +25s got %v want none (fresh grace from +10s)", act)
+	}
+	in = stoppedIn(t0.Add(30 * time.Second))
+	in.OwnIdle = true
+	if act, _ := w.step(in); act != watchClearNudge {
+		t.Fatalf("at +30s got %v want watchClearNudge (fresh grace, idle at start)", act)
+	}
+}
+
+func TestDeferWatchGoneWithNudge(t *testing.T) {
+	var w deferWatch
+	in := stoppedIn(t0)
+	in.Verdict, in.OwnIdle = blockerGone, true
+	w.step(in)
+	in.Now = t0.Add(20 * time.Second)
+	act, gone := w.step(in)
+	if act != watchClearNudge || !gone {
+		t.Fatalf("got %v gone=%v want watchClearNudge gone=true", act, gone)
 	}
 }
 

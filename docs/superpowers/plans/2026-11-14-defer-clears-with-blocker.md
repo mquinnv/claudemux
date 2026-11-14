@@ -146,7 +146,8 @@
 3. Link differs from `graceLink` while a grace period runs → reset state, then continue.
 4. Verdict `blockerWorking` → reset grace; `watchMarkSeen` if `!Mark.Seen`, else `watchNone`.
 5. Verdict `blockerHold` → reset grace, `watchNone`.
-6. Verdict `blockerStopped`/`blockerGone`: if `OwnWorking` → reset, `watchClear`. Else if no grace running → start it (`graceSince = Now`), `watchNone`. Else if `Now - graceSince < deferGrace` → `watchNone`. Else reset and return `watchClearNudge` when `NudgeEnabled && OwnIdle`, otherwise `watchClear`. `gone` reports `blockerGone`.
+6. Verdict `blockerStopped`/`blockerGone`: if no grace running → start it (`graceSince = Now`) and record whether `OwnWorking` was true at that moment, `watchNone`. Else if `Now - graceSince < deferGrace` → `watchClear` (reset) only if own was NOT working at grace start and `OwnWorking` is true now; otherwise `watchNone`. Else (grace expired) reset and return `watchClearNudge` when `NudgeEnabled && OwnIdle` and own was not working at grace start, otherwise `watchClear` (a waiter that was mid-turn at grace start is never nudged, even if idle by now). A blocker that resumes (working or hold verdict) abandons the grace (rules 4 and 5); a link change drops it (rule 3); a failed mark read leaves it untouched (rule 1). `gone` reports `blockerGone`.
+   Amended after the whole-branch review: the original rule cleared at once whenever the waiter was mid-turn, which dropped the mark while a handoff's peer was between turns.
 
 `judgeBlocker`: "working" is a non-empty state that is neither `isWaiting` nor `isBooting`. A blocker that is waiting and deferred is `blockerHold`. A blocker in `Starting` is `blockerHold`.
 

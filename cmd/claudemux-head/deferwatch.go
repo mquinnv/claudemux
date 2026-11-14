@@ -102,12 +102,16 @@ const (
 )
 
 type deferWatchInput struct {
-	Now          time.Time
-	Mark         deferMark
-	MarkOK       bool // the mark read succeeded
-	Verdict      blockerVerdict
-	OwnIdle      bool // this session is idle at its prompt (StateIdle)
-	OwnWorking   bool // this session is mid-turn
+	Now     time.Time
+	Mark    deferMark
+	MarkOK  bool // the mark read succeeded
+	Verdict blockerVerdict
+	OwnIdle bool // this session is idle at its prompt (StateIdle)
+	// OwnWorking is this session mid-turn. It ends a grace period early only
+	// when the session was not working as the grace started and is now: a
+	// session already mid-turn then (a handoff still writing its summary) has
+	// not moved on, it just has not stopped yet.
+	OwnWorking   bool
 	NudgeEnabled bool
 }
 
@@ -115,11 +119,22 @@ type deferWatchInput struct {
 type deferWatch struct {
 	graceSince time.Time
 	graceLink  deferLink
-	graceGone  bool
+	// graceOwnWorking is whether this session was mid-turn when the grace
+	// started. Such a session waits the grace out and is never nudged.
+	graceOwnWorking bool
 }
 
 // step folds one poll into the grace-period machine. It lives apart from the
 // tmux plumbing so the timing rules can be tested with a fake clock.
+//
+// A stopped or gone blocker always starts a grace period first. During it the
+// mark clears early, without a nudge, only if this session was idle when the
+// grace started and has since started a turn: the user moved on. A session
+// that was already mid-turn at grace start waits the grace out and then
+// clears without a nudge, since it may have just handled the reply itself;
+// clearing it at once would drop the mark while a handoff's peer is merely
+// between turns. A blocker that resumes, or a link change, abandons the
+// grace; a failed mark read leaves it as it is.
 func (w *deferWatch) step(in deferWatchInput) (act deferWatchAction, gone bool) {
 	if !in.MarkOK {
 		return watchNone, false
@@ -140,22 +155,22 @@ func (w *deferWatch) step(in deferWatchInput) (act deferWatchAction, gone bool) 
 		return watchNone, false
 	case blockerStopped, blockerGone:
 		gone = in.Verdict == blockerGone
-		if in.OwnWorking {
-			// The user already moved on; waiting out the grace would only
-			// leave a stale chip on a session that is busy.
-			*w = deferWatch{}
-			return watchClear, gone
-		}
 		if w.graceSince.IsZero() {
-			*w = deferWatch{graceSince: in.Now, graceLink: in.Mark.Link, graceGone: gone}
+			*w = deferWatch{graceSince: in.Now, graceLink: in.Mark.Link, graceOwnWorking: in.OwnWorking}
 			return watchNone, gone
 		}
-		w.graceGone = gone
 		if in.Now.Sub(w.graceSince) < deferGrace {
+			if !w.graceOwnWorking && in.OwnWorking {
+				// The user already moved on; waiting out the grace would
+				// only leave a stale chip on a session that is busy.
+				*w = deferWatch{}
+				return watchClear, gone
+			}
 			return watchNone, gone
 		}
+		ownWasWorking := w.graceOwnWorking
 		*w = deferWatch{}
-		if in.NudgeEnabled && in.OwnIdle {
+		if in.NudgeEnabled && in.OwnIdle && !ownWasWorking {
 			return watchClearNudge, gone
 		}
 		return watchClear, gone
