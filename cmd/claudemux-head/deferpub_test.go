@@ -10,10 +10,115 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// unsetLinkTail is the three-link-option unset chain every clear and every
+// link-less set appends, so a stale link can never outlive its defer.
+func unsetLinkTail(target string) []string {
+	return []string{
+		";", "set-option", "-t", target, "-u", deferOnOption,
+		";", "set-option", "-t", target, "-u", deferOnCreatedOption,
+		";", "set-option", "-t", target, "-u", deferOnSeenOption,
+	}
+}
+
+// argvSets reports the value tmux would be given for option in argv, and
+// whether the option is unset (-u) instead.
+func argvSets(argv []string, option string) (val string, set, unset bool) {
+	for i, a := range argv {
+		if a != option {
+			continue
+		}
+		if i > 0 && argv[i-1] == "-u" {
+			return "", false, true
+		}
+		if i+1 < len(argv) {
+			return argv[i+1], true, false
+		}
+	}
+	return "", false, false
+}
+
+func TestDeferArgsClearUnsetsLink(t *testing.T) {
+	argv := deferArgs("%1", false, "")
+	for _, o := range []string{deferOption, deferReasonOption, deferOnOption, deferOnCreatedOption, deferOnSeenOption} {
+		if _, _, unset := argvSets(argv, o); !unset {
+			t.Errorf("clear argv does not unset %s: %v", o, argv)
+		}
+	}
+	if n := strings.Count(strings.Join(argv, " "), " ; "); n != 4 {
+		t.Errorf("clear argv has %d separators, want 4 (one chained invocation): %v", n, argv)
+	}
+}
+
+func TestDeferArgsPlainSetUnsetsLink(t *testing.T) {
+	argv := deferArgs("%1", true, "CI")
+	if v, set, _ := argvSets(argv, deferOption); !set || v != "1" {
+		t.Errorf("mark = %q set=%v, want 1", v, set)
+	}
+	if v, set, _ := argvSets(argv, deferReasonOption); !set || v != "CI" {
+		t.Errorf("reason = %q set=%v, want CI", v, set)
+	}
+	for _, o := range []string{deferOnOption, deferOnCreatedOption, deferOnSeenOption} {
+		if _, _, unset := argvSets(argv, o); !unset {
+			t.Errorf("plain set does not unset %s: %v", o, argv)
+		}
+	}
+}
+
+func TestDeferLinkedArgs(t *testing.T) {
+	argv := deferLinkedArgs("%1", deferWaitValue, "waiting on phenix-2: fix", deferLink{"phenix-2", "1763000000"})
+	checks := map[string]string{
+		deferOption:          deferWaitValue,
+		deferReasonOption:    "waiting on phenix-2: fix",
+		deferOnOption:        "phenix-2",
+		deferOnCreatedOption: "1763000000",
+	}
+	for o, want := range checks {
+		if v, set, _ := argvSets(argv, o); !set || v != want {
+			t.Errorf("%s = %q set=%v, want %q", o, v, set, want)
+		}
+	}
+	if _, _, unset := argvSets(argv, deferOnSeenOption); !unset {
+		t.Errorf("a new link must start unseen; %s not unset: %v", deferOnSeenOption, argv)
+	}
+}
+
+func TestDeferLinkedArgsEmptyLinkIsPlain(t *testing.T) {
+	got := deferLinkedArgs("%1", deferWaitValue, "why", deferLink{})
+	want := deferValueArgs("%1", true, deferWaitValue, "why")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("zero link = %v, want %v", got, want)
+	}
+}
+
+func TestDeferLinkedArgsReasonSemicolon(t *testing.T) {
+	argv := deferLinkedArgs("%1", deferWaitValue, "waiting;", deferLink{"x", "5"})
+	if v, _, _ := argvSets(argv, deferReasonOption); v != `waiting\;` {
+		t.Errorf("reason = %q, want escaped semicolon", v)
+	}
+}
+
+func TestParseDeferMark(t *testing.T) {
+	m := parseDeferMark("wait\twaiting on x\tphenix-2\t1763000000\t1\n")
+	want := deferMark{Raw: "wait", Reason: "waiting on x", Link: deferLink{"phenix-2", "1763000000"}, Seen: true}
+	if m != want {
+		t.Errorf("parse = %+v, want %+v", m, want)
+	}
+	if !m.Link.set() {
+		t.Error("link should be set")
+	}
+	if z := parseDeferMark("\t\t\t\t\n"); z != (deferMark{}) {
+		t.Errorf("empty line = %+v, want zero mark", z)
+	}
+	if parseDeferMark("1\tr\tx\t0\t\n").Link.set() {
+		t.Error("created 0 must not count as a set link")
+	}
+}
+
 func TestDeferArgs(t *testing.T) {
 	got := deferArgs("api", true, "PR review")
 	want := []string{"set-option", "-t", "api", deferOption, "1",
 		";", "set-option", "-t", "api", deferReasonOption, "PR review"}
+	want = append(want, unsetLinkTail("api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deferArgs(on, reason) = %v, want %v", got, want)
 	}
@@ -22,16 +127,18 @@ func TestDeferArgs(t *testing.T) {
 	got = deferArgs("api", true, "  ")
 	want = []string{"set-option", "-t", "api", deferOption, "1",
 		";", "set-option", "-t", "api", "-u", deferReasonOption}
+	want = append(want, unsetLinkTail("api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deferArgs(on, blank) = %v, want %v", got, want)
 	}
 	// A trailing ";" is escaped, or tmux would swallow it as a separator.
-	if got := deferArgs("api", true, "CI;"); got[len(got)-1] != `CI\;` {
-		t.Errorf("deferArgs(on, trailing ;) reason arg = %q, want %q", got[len(got)-1], `CI\;`)
+	if got := deferArgs("api", true, "CI;"); got[10] != `CI\;` {
+		t.Errorf("deferArgs(on, trailing ;) reason arg = %q, want %q", got[10], `CI\;`)
 	}
 	got = deferArgs("api", false, "ignored")
 	want = []string{"set-option", "-t", "api", "-u", deferOption,
 		";", "set-option", "-t", "api", "-u", deferReasonOption}
+	want = append(want, unsetLinkTail("api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deferArgs(off) = %v, want %v", got, want)
 	}
@@ -76,6 +183,7 @@ func TestDeferWaitValue(t *testing.T) {
 	got := deferValueArgs("api", true, deferWaitValue, "")
 	want := []string{"set-option", "-t", "api", deferOption, "wait",
 		";", "set-option", "-t", "api", "-u", deferReasonOption}
+	want = append(want, unsetLinkTail("api")...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("deferValueArgs(wait) = %v, want %v", got, want)
 	}

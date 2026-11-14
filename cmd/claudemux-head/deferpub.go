@@ -48,24 +48,71 @@ const deferReasonOption = "@claudemux_defer_reason"
 // an essay-length blocker would otherwise push everything after it off-screen.
 const deferReasonMaxCells = 48
 
+// The link options say which session a defer waits on, so the head can clear
+// the defer when that session goes away. They live beside deferOption on the
+// same tmux session for the same reason it does: they must survive head and
+// lobby restarts. deferOnOption is the blocker's session name,
+// deferOnCreatedOption its tmux session_created stamp (so a reused name is not
+// mistaken for the original), and deferOnSeenOption "1" once the blocker has
+// been observed alive (so a blocker that never started is not "gone").
+const (
+	deferOnOption        = "@claudemux_defer_on"
+	deferOnCreatedOption = "@claudemux_defer_on_created"
+	deferOnSeenOption    = "@claudemux_defer_on_seen"
+)
+
+// deferLink names the session a defer waits on. The zero value is "no link".
+type deferLink struct{ On, Created string }
+
+// set reports whether the link names a blocker precisely enough to track: a
+// name alone, or a zero stamp, cannot tell the blocker from a later session
+// that reuses its name.
+func (l deferLink) set() bool { return l.On != "" && l.Created != "" && l.Created != "0" }
+
+// deferMark is everything published about one session's defer, read in one
+// tmux call so a poll never pairs one defer's link with another's mark.
+type deferMark struct {
+	Raw, Reason string
+	Link        deferLink
+	Seen        bool
+}
+
+// unsetLinkArgs is the ";"-chained unset of all three link options. Every
+// clear and every link-less set appends it, so a stale link can never outlive
+// the defer it belonged to.
+func unsetLinkArgs(target string) []string {
+	return []string{
+		";", "set-option", "-t", target, "-u", deferOnOption,
+		";", "set-option", "-t", target, "-u", deferOnCreatedOption,
+		";", "set-option", "-t", target, "-u", deferOnSeenOption,
+	}
+}
+
 // deferArgs builds the tmux argv toggling target's mark: set to "1" (plus the
-// blocker, when one was given) when on, both unset (-u) when off. target is a
-// pane id (as statepub uses) or a session name (as the lobby's row toggle
-// uses) — tmux resolves either the same way -t always does. Both options go
-// in one ";"-chained tmux invocation, so a poll never sees the mark from one
-// defer paired with the reason from another.
+// blocker, when one was given) when on, everything unset (-u) when off. target
+// is a pane id (as statepub uses) or a session name (as the lobby's row toggle
+// uses) — tmux resolves either the same way -t always does. All options go in
+// one ";"-chained tmux invocation, so a poll never sees the mark from one
+// defer paired with the reason or link from another.
 func deferArgs(target string, on bool, reason string) []string {
 	return deferValueArgs(target, on, deferOnValue, reason)
 }
 
 // deferValueArgs is deferArgs with the set value given, so restore can put a
 // handoff's deferWaitValue back as it was instead of turning it into the
-// user's own defer.
+// user's own defer. It never carries a link, so it unsets any old one.
 func deferValueArgs(target string, on bool, value, reason string) []string {
 	if !on {
-		return []string{"set-option", "-t", target, "-u", deferOption,
+		args := []string{"set-option", "-t", target, "-u", deferOption,
 			";", "set-option", "-t", target, "-u", deferReasonOption}
+		return append(args, unsetLinkArgs(target)...)
 	}
+	return append(deferMarkArgs(target, value, reason), unsetLinkArgs(target)...)
+}
+
+// deferMarkArgs sets the mark and the reason (or unsets a stale reason),
+// without touching the link options.
+func deferMarkArgs(target, value, reason string) []string {
 	args := []string{"set-option", "-t", target, deferOption, value, ";"}
 	if reason = sanitizeDeferReason(reason); reason != "" {
 		// tmux reads any argument ending in ";" as a command separator, even
@@ -76,6 +123,26 @@ func deferValueArgs(target string, on bool, value, reason string) []string {
 		return append(args, "set-option", "-t", target, deferReasonOption, reason)
 	}
 	return append(args, "set-option", "-t", target, "-u", deferReasonOption)
+}
+
+// deferLinkedArgs sets a defer that waits on link's session. A new link starts
+// unseen, so the seen flag is unset in the same invocation. An empty link is a
+// plain defer, which keeps callers from needing two code paths.
+func deferLinkedArgs(target, value, reason string, link deferLink) []string {
+	if !link.set() {
+		return deferValueArgs(target, true, value, reason)
+	}
+	return append(deferMarkArgs(target, value, reason), ";",
+		"set-option", "-t", target, deferOnOption, link.On, ";",
+		"set-option", "-t", target, deferOnCreatedOption, link.Created, ";",
+		"set-option", "-t", target, "-u", deferOnSeenOption)
+}
+
+// deferSeenArgs records that the blocker has been seen alive. It is its own
+// invocation: the mark and link are already published and must not be
+// rewritten by a poll.
+func deferSeenArgs(target string) []string {
+	return []string{"set-option", "-t", target, deferOnSeenOption, "1"}
 }
 
 // sanitizeDeferReason flattens typed text to one trimmed line with no control
@@ -102,17 +169,50 @@ func setDeferCmd(target string, on bool, reason string) tea.Cmd {
 	}
 }
 
-// readDeferOption fetches the raw mark and its blocker for the head's poll in
-// one tmux call. An unset option expands to an empty string, and a failed
-// read is "" for both, same as readConductOption.
-func readDeferOption(ctx context.Context, target string) (raw, reason string) {
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target,
-		"#{"+deferOption+"}\t#{"+deferReasonOption+"}").Output()
-	if err != nil {
-		return "", ""
+// setDeferLinkedCmd is setDeferCmd for a defer that waits on a session, with
+// the same hard deadline so a wedged tmux can never block an Update loop.
+func setDeferLinkedCmd(target, value, reason string, link deferLink) tea.Cmd {
+	args := deferLinkedArgs(target, value, reason, link)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		return nil
 	}
-	raw, reason, _ = strings.Cut(strings.TrimRight(string(out), "\n"), "\t")
-	return strings.TrimSpace(raw), strings.TrimSpace(reason)
+}
+
+// readDeferMark fetches the whole mark for the head's poll in one tmux call.
+// ok is false when the read failed: a failed read must stay distinguishable
+// from an unset mark, because the link logic may never treat it as evidence.
+func readDeferMark(ctx context.Context, target string) (deferMark, bool) {
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target,
+		"#{"+deferOption+"}\t#{"+deferReasonOption+"}\t#{"+deferOnOption+"}\t#{"+
+			deferOnCreatedOption+"}\t#{"+deferOnSeenOption+"}").Output()
+	if err != nil {
+		return deferMark{}, false
+	}
+	return parseDeferMark(string(out)), true
+}
+
+// parseDeferMark splits readDeferMark's tab-separated line. An unset option
+// expands to an empty field, so missing trailing fields are the zero value.
+func parseDeferMark(out string) deferMark {
+	f := strings.Split(strings.TrimRight(out, "\n"), "\t")
+	for len(f) < 5 {
+		f = append(f, "")
+	}
+	for i := range f {
+		f[i] = strings.TrimSpace(f[i])
+	}
+	return deferMark{Raw: f[0], Reason: f[1], Link: deferLink{On: f[2], Created: f[3]}, Seen: f[4] == "1"}
+}
+
+// readDeferOption is the mark-and-reason view of readDeferMark, kept until the
+// head's poll moves to the full mark. A failed read is "" for both, same as
+// readConductOption.
+func readDeferOption(ctx context.Context, target string) (raw, reason string) {
+	m, _ := readDeferMark(ctx, target)
+	return m.Raw, m.Reason
 }
 
 // swDeferStyle and swBadgeDeferStyle share one color across both surfaces —
