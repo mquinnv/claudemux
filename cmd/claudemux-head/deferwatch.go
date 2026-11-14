@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -38,6 +40,17 @@ func parseFleet(listing string) []fleetRow {
 		})
 	}
 	return rows
+}
+
+// readFleet lists every session for the head's poll, on the poll's own
+// deadline. ok is false when the listing failed, which judgeBlocker treats as
+// no evidence at all rather than as an empty fleet.
+func readFleet(ctx context.Context) ([]fleetRow, bool) {
+	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", fleetFormat).Output()
+	if err != nil {
+		return nil, false
+	}
+	return parseFleet(string(out)), true
 }
 
 // blockerVerdict is where a defer's blocker stands relative to the defer.

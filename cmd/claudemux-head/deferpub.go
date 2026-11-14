@@ -145,6 +145,19 @@ func deferSeenArgs(target string) []string {
 	return []string{"set-option", "-t", target, deferOnSeenOption, "1"}
 }
 
+// deferSeenCmd fires deferSeenArgs with the usual hard deadline. Nothing
+// waits on it: if it fails, the next poll still reads the blocker unseen and
+// asks again.
+func deferSeenCmd(target string) tea.Cmd {
+	args := deferSeenArgs(target)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		return nil
+	}
+}
+
 // sanitizeDeferReason flattens typed text to one trimmed line with no control
 // characters. Tabs and newlines matter beyond looks: the lobby reads the
 // reason back as a field of a tab-separated list-sessions line.
@@ -205,14 +218,6 @@ func parseDeferMark(out string) deferMark {
 		f[i] = strings.TrimSpace(f[i])
 	}
 	return deferMark{Raw: f[0], Reason: f[1], Link: deferLink{On: f[2], Created: f[3]}, Seen: f[4] == "1"}
-}
-
-// readDeferOption is the mark-and-reason view of readDeferMark, kept until the
-// head's poll moves to the full mark. A failed read is "" for both, same as
-// readConductOption.
-func readDeferOption(ctx context.Context, target string) (raw, reason string) {
-	m, _ := readDeferMark(ctx, target)
-	return m.Raw, m.Reason
 }
 
 // swDeferStyle and swBadgeDeferStyle share one color across both surfaces —

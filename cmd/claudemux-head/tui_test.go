@@ -5377,14 +5377,14 @@ func TestDataMsgSamplesExactPercent(t *testing.T) {
 	}
 }
 
-// dataMsg.deferRaw must land on model.deferRaw, alongside conductRaw, so the
+// dataMsg.deferMark must land on model.deferMark, alongside conductRaw, so the
 // chip has something to render off the very next poll.
-func TestDataMsgCopiesDeferRaw(t *testing.T) {
+func TestDataMsgCopiesDeferMark(t *testing.T) {
 	m := model{}
-	next, _ := m.Update(dataMsg{time: time.Now(), conductRaw: "standby", deferRaw: "1"})
-	got := next.(model)
-	if got.deferRaw != "1" {
-		t.Errorf("deferRaw = %q, want %q", got.deferRaw, "1")
+	mark := deferMark{Raw: "1", Reason: "CI"}
+	next, _ := m.Update(dataMsg{time: time.Now(), conductRaw: "standby", deferMark: mark, deferMarkOK: true})
+	if got := next.(model).deferMark; got != mark {
+		t.Errorf("deferMark = %+v, want %+v", got, mark)
 	}
 }
 
@@ -5392,7 +5392,7 @@ func TestDataMsgCopiesDeferRaw(t *testing.T) {
 // than setting the mark straight away; typed keys (q included) land in the
 // prompt, and enter issues the set.
 func TestKeyDPromptsForBlockerThenDefers(t *testing.T) {
-	var m tea.Model = model{ready: true, width: 500, height: 4, selfPane: "%1", deferRaw: ""}
+	var m tea.Model = model{ready: true, width: 500, height: 4, selfPane: "%1", deferMark: deferMark{Raw: ""}}
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	if cmd != nil {
 		t.Fatal("d must open the prompt, not issue a cmd yet")
@@ -5432,7 +5432,7 @@ func TestKeyDPromptEscCancels(t *testing.T) {
 // recorded reason, leaving the mark set: the point is to correct the blocker,
 // not to clear the defer. Enter writes the edited text back.
 func TestKeyShiftDEditsBlocker(t *testing.T) {
-	var m tea.Model = model{ready: true, width: 500, height: 4, selfPane: "%1", deferRaw: "1", deferReason: "Ana's review"}
+	var m tea.Model = model{ready: true, width: 500, height: 4, selfPane: "%1", deferMark: deferMark{Raw: "1", Reason: "Ana's review"}}
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
 	if cmd != nil {
 		t.Fatal("D must open the prompt, not issue a cmd yet")
@@ -5455,7 +5455,7 @@ func TestKeyShiftDEditsBlocker(t *testing.T) {
 // esc out of a D edit changes nothing: the session stays deferred with the
 // blocker it had, since the prompt never issued a write.
 func TestKeyShiftDEscKeepsBlocker(t *testing.T) {
-	m := model{ready: true, selfPane: "%1", deferRaw: "1", deferReason: "CI"}
+	m := model{ready: true, selfPane: "%1", deferMark: deferMark{Raw: "1", Reason: "CI"}}
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
 	next, cmd := next.(model).Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd != nil {
@@ -5465,15 +5465,15 @@ func TestKeyShiftDEscKeepsBlocker(t *testing.T) {
 	if got.deferPrompting {
 		t.Error("esc must close the prompt")
 	}
-	if got.deferRaw != "1" || got.deferReason != "CI" {
-		t.Errorf("esc changed the mark: deferRaw = %q reason = %q", got.deferRaw, got.deferReason)
+	if got.deferMark.Raw != "1" || got.deferMark.Reason != "CI" {
+		t.Errorf("esc changed the mark: raw = %q reason = %q", got.deferMark.Raw, got.deferMark.Reason)
 	}
 }
 
 // On a session that isn't deferred there is no blocker to edit, so D is d's
 // prompt with an empty line — enter defers.
 func TestKeyShiftDOnUndeferredIsAnEmptyPrompt(t *testing.T) {
-	var m tea.Model = model{ready: true, selfPane: "%1", deferRaw: "", deferReason: "stale"}
+	var m tea.Model = model{ready: true, selfPane: "%1", deferMark: deferMark{Raw: "", Reason: "stale"}}
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
 	if !m.(model).deferPrompting {
 		t.Fatal("D must enter the blocker prompt")
@@ -5497,7 +5497,7 @@ func TestKeyShiftDNoopOutsideTmux(t *testing.T) {
 
 // On a deferred session d clears the mark immediately — no prompt.
 func TestKeyDClearsDeferImmediately(t *testing.T) {
-	m := model{ready: true, selfPane: "%1", deferRaw: "1", deferReason: "CI"}
+	m := model{ready: true, selfPane: "%1", deferMark: deferMark{Raw: "1", Reason: "CI"}}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	if cmd == nil {
 		t.Fatal("d on a deferred session must issue the clear cmd")
@@ -5521,7 +5521,7 @@ func TestKeyDNoopOutsideTmux(t *testing.T) {
 // once the mark is set.
 func TestRenderStatusbarShowsDeferChip(t *testing.T) {
 	now := time.Now()
-	m := model{ready: true, width: 500, height: 4, deferRaw: "1"}
+	m := model{ready: true, width: 500, height: 4, deferMark: deferMark{Raw: "1"}}
 	line := renderStatusbar(m, now, "")
 	if !strings.Contains(line, "defer") {
 		t.Errorf("renderStatusbar = %q, want it to contain the defer chip", line)
@@ -5530,7 +5530,7 @@ func TestRenderStatusbarShowsDeferChip(t *testing.T) {
 
 func TestRenderStateLineShowsDeferChip(t *testing.T) {
 	now := time.Now()
-	m := model{ready: true, width: 500, height: 4, deferRaw: "1"}
+	m := model{ready: true, width: 500, height: 4, deferMark: deferMark{Raw: "1"}}
 	line := renderStateLine(m, now)
 	if !strings.Contains(line, "defer") {
 		t.Errorf("renderStateLine = %q, want it to contain the defer chip", line)
@@ -5540,21 +5540,12 @@ func TestRenderStateLineShowsDeferChip(t *testing.T) {
 // The recorded blocker shows with the defer chip in both layouts.
 func TestRenderLinesShowDeferReason(t *testing.T) {
 	now := time.Now()
-	m := model{ready: true, width: 500, height: 4, deferRaw: "1", deferReason: "waiting on Ana's review"}
+	m := model{ready: true, width: 500, height: 4, deferMark: deferMark{Raw: "1", Reason: "waiting on Ana's review"}}
 	if line := renderStatusbar(m, now, ""); !strings.Contains(line, "defer: waiting on Ana's review") {
 		t.Errorf("renderStatusbar = %q, want the blocker", line)
 	}
 	if line := renderStateLine(m, now); !strings.Contains(line, "defer: waiting on Ana's review") {
 		t.Errorf("renderStateLine = %q, want the blocker", line)
-	}
-}
-
-// dataMsg.deferReason must land on the model like deferRaw does.
-func TestDataMsgCopiesDeferReason(t *testing.T) {
-	m := model{}
-	next, _ := m.Update(dataMsg{time: time.Now(), deferRaw: "1", deferReason: "CI"})
-	if got := next.(model).deferReason; got != "CI" {
-		t.Errorf("deferReason = %q, want %q", got, "CI")
 	}
 }
 

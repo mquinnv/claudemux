@@ -176,7 +176,7 @@ func TestParseSessionNamePath(t *testing.T) {
 // session, so the record must carry it for restore to put it back.
 func TestSessionRecordCarriesDefer(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	m := model{sessionID: "abc", workDir: "/p/x", deferRaw: "1", deferReason: " waiting on\tJean "}
+	m := model{sessionID: "abc", workDir: "/p/x", deferMark: deferMark{Raw: "1", Reason: " waiting on\tJean "}}
 	r := m.sessionRecordFor(now)
 	if !r.Deferred || r.DeferReason != "waiting on Jean" {
 		t.Errorf("deferred record = %v %q, want true %q", r.Deferred, r.DeferReason, "waiting on Jean")
@@ -184,11 +184,11 @@ func TestSessionRecordCarriesDefer(t *testing.T) {
 	if r.DeferWait {
 		t.Error("a user defer recorded as a handoff wait")
 	}
-	m.deferRaw = deferWaitValue
+	m.deferMark.Raw = deferWaitValue
 	if r := m.sessionRecordFor(now); !r.Deferred || !r.DeferWait {
 		t.Errorf("handoff wait record = %v %v, want deferred and wait", r.Deferred, r.DeferWait)
 	}
-	m.deferRaw = ""
+	m.deferMark.Raw = ""
 	if r := m.sessionRecordFor(now); r.Deferred || r.DeferReason != "" {
 		t.Errorf("undeferred record = %v %q, want false \"\"", r.Deferred, r.DeferReason)
 	}
@@ -203,12 +203,12 @@ func TestRecordDueOnDeferChange(t *testing.T) {
 	if m.recordDue(now.Add(time.Second)) {
 		t.Fatal("due with nothing changed")
 	}
-	m.deferRaw, m.deferReason = "1", "CI"
+	m.deferMark.Raw, m.deferMark.Reason = "1", "CI"
 	if !m.recordDue(now.Add(time.Second)) {
 		t.Fatal("not due after defer set")
 	}
 	m.lastRecordDefer = m.recordDeferKey()
-	m.deferReason = "review"
+	m.deferMark.Reason = "review"
 	if !m.recordDue(now.Add(time.Second)) {
 		t.Fatal("not due after blocker changed")
 	}
