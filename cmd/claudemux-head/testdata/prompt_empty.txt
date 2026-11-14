@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Haiku 5.5 · Claude
+ ▝▝   ▝▝   ~/project · /rc
+
+  ⎿  SessionStart:startup says: ○○○ Semgrep Guardian : this session is protected, files are scanned as they
+     are written
+  ⎿  SessionStart:startup says: team-core: team - 14 prohibitions loaded
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "fix typecheck errors"
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)
