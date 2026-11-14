@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // promptTailLines bounds how much may follow the input box's bottom rule: the
@@ -15,23 +16,30 @@ import (
 const promptTailLines = 3
 
 // promptPlaceholder is how claude's empty input box starts its hint text
-// (`Try "fix typecheck errors"`); the hint is on screen only while the box is
-// empty, so it counts as empty, not as a draft.
+// (`Try "fix typecheck errors"`). Claude draws it dim (SGR 2); typed text is
+// plain, so only the dim rendering counts as the hint.
 const promptPlaceholder = `Try "`
 
-// promptEmpty reports whether a capture-pane of the claude pane shows its
-// input line empty. Anything it cannot recognise is false.
+// sgrDim is the escape claude emits immediately before the placeholder.
+const sgrDim = "\x1b[2m"
+
+// promptEmpty reports whether a capture-pane -e (escapes kept) of the claude
+// pane shows its input line empty. Anything it cannot recognise is false.
 //
 // A wrong "true" types into someone's half-written message, so this keys on the
 // whole shape of the idle input box and nothing looser: the last two
 // horizontal rules of the capture must enclose exactly ONE line, that line
-// must be the "❯" prompt carrying either nothing or the placeholder hint, and
-// at most promptTailLines lines may follow the bottom rule. A draft puts text
-// after the "❯"; a multi-line draft or a dialog (permission, AskUserQuestion)
-// puts several lines between the rules; a "❯" in a dialog's option list is not
-// bounded by two rules around a single line.
+// must be the "❯" prompt carrying either nothing or the dim placeholder hint
+// (a typed `Try "` is plain text and is a draft), and at most promptTailLines
+// lines may follow the bottom rule. A multi-line draft or a dialog
+// (permission, AskUserQuestion) puts several lines between the rules. A footer
+// naming a vim mode other than INSERT is false too; see vimNotInsert.
 func promptEmpty(capture string) bool {
-	lines := strings.Split(strings.TrimRight(capture, "\n \t"), "\n")
+	rawLines := strings.Split(strings.TrimRight(capture, "\n \t"), "\n")
+	lines := make([]string, len(rawLines))
+	for i, l := range rawLines {
+		lines[i] = ansi.Strip(l)
+	}
 	bottom, top := -1, -1
 	for i := len(lines) - 1; i >= 0; i-- {
 		if !isRuleLine(lines[i]) {
@@ -47,13 +55,38 @@ func promptEmpty(capture string) bool {
 	if top < 0 || bottom-top != 2 || len(lines)-1-bottom > promptTailLines {
 		return false
 	}
-	line := strings.TrimSpace(lines[top+1])
-	rest, ok := strings.CutPrefix(line, "❯")
+	if vimNotInsert(lines[bottom+1:]) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(strings.TrimSpace(lines[top+1]), "❯")
 	if !ok {
 		return false
 	}
 	rest = strings.TrimSpace(rest)
-	return rest == "" || strings.HasPrefix(rest, promptPlaceholder)
+	if rest == "" {
+		return true
+	}
+	if !strings.HasPrefix(rest, promptPlaceholder) {
+		return false
+	}
+	raw := rawLines[top+1]
+	i := strings.Index(raw, promptPlaceholder)
+	return i >= 0 && strings.HasSuffix(raw[:i], sgrDim)
+}
+
+// vimNotInsert reports whether the footer names a vim mode that is not INSERT.
+// With vim mode on, claude's footer reads "-- INSERT --" while typing; real
+// captures of NORMAL mode show NO indicator at all, so this can only catch
+// builds that print one (NORMAL, VISUAL). It is a partial guard, not proof.
+func vimNotInsert(tail []string) bool {
+	for _, l := range tail {
+		for _, m := range []string{"-- NORMAL --", "-- VISUAL --", "-- VISUAL LINE --"} {
+			if strings.Contains(l, m) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isRuleLine reports whether line is a horizontal rule: only "─" cells, and
@@ -90,8 +123,9 @@ func deferDoneChip(blocker string, gone bool) string {
 }
 
 // deferReleasedMsg reports that a defer was cleared; nudged is true only when
-// the text was both typed and submitted.
-type deferReleasedMsg struct{ nudged bool }
+// the text was both typed and submitted, cleared only when the tmux call that
+// unsets the mark succeeded.
+type deferReleasedMsg struct{ nudged, cleared bool }
 
 // deferReleaseCmd clears selfPane's defer and, when nudge is true and the
 // prompt is empty, types text into the claude pane and submits it.
@@ -109,8 +143,8 @@ func deferReleaseCmd(selfPane, paneDir, text string, nudge bool) tea.Cmd {
 		// One chained invocation, for the same reason as every other clear.
 		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "tmux", deferArgs(selfPane, false, "")...).Run()
-		return deferReleasedMsg{nudged: nudged}
+		err := exec.CommandContext(ctx, "tmux", deferArgs(selfPane, false, "")...).Run()
+		return deferReleasedMsg{nudged: nudged, cleared: err == nil}
 	}
 }
 
@@ -124,8 +158,11 @@ func nudgePane(selfPane, paneDir, text string) bool {
 	}
 	// Each tmux call gets its own deadline; see teardownSendCmd.
 	capCtx, cancelCap := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-	out, err := exec.CommandContext(capCtx, "tmux", "capture-pane", "-p", "-t", pane).Output()
+	out, err := exec.CommandContext(capCtx, "tmux", "capture-pane", "-e", "-p", "-t", pane).Output()
 	cancelCap()
+	// The capture and the keystrokes cannot be atomic: a user typing in the
+	// gap can still be typed over. The window is milliseconds and tmux has no
+	// way to close it.
 	if err != nil || !promptEmpty(string(out)) {
 		return false
 	}

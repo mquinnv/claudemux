@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
@@ -16,16 +17,37 @@ func readFixture(t *testing.T, name string) string {
 	return string(b)
 }
 
+// box builds a synthetic capture of the input box around prompt line(s).
+func box(prompt, footer string) string {
+	rule := strings.Repeat("─", 100)
+	return "some output\n" + rule + "\n" + prompt + "\n" + rule + "\n\n" + footer + "\n"
+}
+
 func TestPromptEmpty(t *testing.T) {
+	const ins = "  -- INSERT -- ⏵⏵ auto mode on"
+	rule := strings.Repeat("─", 100)
 	cases := []struct {
 		name, capture string
 		want          bool
 	}{
-		{"empty prompt", readFixture(t, "prompt_empty.txt"), true},
-		{"half-typed draft", readFixture(t, "prompt_draft.txt"), false},
-		{"question dialog", readFixture(t, "prompt_asking.txt"), false},
+		{"real: placeholder", readFixture(t, "prompt_empty.txt"), true},
+		{"real: bare prompt mid-session", readFixture(t, "prompt_bare.txt"), true},
+		{"real: vim normal, no indicator", readFixture(t, "prompt_normal.txt"), true},
+		{"real: Try draft, plain", readFixture(t, "prompt_trydraft.txt"), false},
+		{"real: half-typed draft", readFixture(t, "prompt_draft.txt"), false},
+		{"real: question dialog", readFixture(t, "prompt_asking.txt"), false},
 		{"blank capture", "", false},
 		{"no input box", "just some output\nmore output\n", false},
+		{"bare prompt, vim off", box("❯ ", "  ⏵⏵ auto mode on"), true},
+		{"dim placeholder", box("❯ \x1b[2mTry \"x\"\x1b[0m", ins), true},
+		{"plain Try draft", box("❯ Try \"x", ins), false},
+		{"multi-line draft", "x\n" + rule + "\n❯ first\n  second\n" + rule + "\n\n" + ins + "\n", false},
+		{"pasted text placeholder", box("❯ [Pasted text #1 +12 lines]", ins), false},
+		{"draft that is only a glyph", box("❯ x", ins), false},
+		{"vim NORMAL footer", box("❯ ", "  -- NORMAL -- ⏵⏵ auto mode on"), false},
+		{"vim VISUAL footer", box("❯ ", "  -- VISUAL -- ⏵⏵ auto mode on"), false},
+		{"tail longer than 3 lines", box("❯ ", ins) + "a\nb\nc\n", false},
+		{"prompt without glyph", box("hello", ins), false},
 	}
 	for _, c := range cases {
 		if got := promptEmpty(c.capture); got != c.want {
