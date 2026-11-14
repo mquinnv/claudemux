@@ -156,6 +156,28 @@ func TestHeadDoneNoteClearsOnNextTurn(t *testing.T) {
 	}
 }
 
+// An old "finished" note must not come back after a later manual defer is set
+// and cleared while the session stays idle: a good read of a set mark, with
+// no release in flight, forgets it.
+func TestHeadDoneNoteClearsOnNewDefer(t *testing.T) {
+	m := releasedModel(t)
+	next, _ := m.Update(deferPoll(t0.Add(25*time.Second), deferMark{}, blockerFleet("Idle"), true))
+	m = next.(model)
+	if m.deferDoneNote == "" {
+		t.Fatal("precondition: the done note should survive an idle poll with the mark unset")
+	}
+	manual := deferMark{Raw: deferOnValue, Reason: "Jean"}
+	next, _ = m.Update(deferPoll(t0.Add(30*time.Second), manual, blockerFleet("Idle"), true))
+	m = next.(model)
+	if m.deferDoneNote != "" {
+		t.Errorf("deferDoneNote = %q with a new defer set, want it emptied", m.deferDoneNote)
+	}
+	next, _ = m.Update(deferPoll(t0.Add(35*time.Second), deferMark{}, blockerFleet("Idle"), true))
+	if got := next.(model).deferChipText(); got != "" {
+		t.Errorf("deferChipText() = %q after the manual defer was cleared, want nothing", got)
+	}
+}
+
 func TestHeadMarksSeen(t *testing.T) {
 	mark := linkedMark(false)
 	m := watchedModel(mark)

@@ -3048,6 +3048,11 @@ func (m *model) watchDefer(now time.Time, markOK bool) tea.Cmd {
 		// and the next defer gets its own nudge.
 		m.deferRelease, m.deferNudgeSpent = watchNone, false
 	}
+	if markOK && isDeferValue(m.deferMark.Raw) && m.deferRelease == watchNone {
+		// A defer is set that is not ours to release yet: whatever finished
+		// before it is old news, and must not resurface once it clears.
+		m.deferDoneNote = ""
+	}
 	var cmd tea.Cmd
 	act, gone := watchNone, false
 	if m.deferRelease == watchNone {
