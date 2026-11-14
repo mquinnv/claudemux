@@ -50,7 +50,7 @@ type Config struct {
 	Launch      LaunchConfig      `yaml:"launch"`
 	Teardown    TeardownConfig    `yaml:"teardown"`
 	Defer       DeferConfig       `yaml:"defer"`
-	Web        WebConfig         `yaml:"web"`
+	Web         WebConfig         `yaml:"web"`
 }
 
 // HeadConfig picks which context rows the status pane draws under its state and
@@ -264,7 +264,7 @@ func defaultConfig() Config {
 		Defer: DeferConfig{
 			AutoNudge: true,
 		},
-		Web:WebConfig{
+		Web: WebConfig{
 			HeadlineInterval: Duration{2 * time.Minute},
 		},
 	}

@@ -105,9 +105,6 @@ func TestRunConfigSet(t *testing.T) {
 	}
 }
 
-// An invalid launch.layout parses fine as YAML but fails Config.validate(),
-// same as loadConfig would reject it — config set must not brick the next
-// launch by writing it anyway.
 func TestConfigSetDeferAutoNudge(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
@@ -126,6 +123,55 @@ func TestConfigSetDeferAutoNudge(t *testing.T) {
 	}
 }
 
+// A string key given the literal true must stay a string: setScalar's bool
+// handling is only safe if string fields still decode it.
+func TestConfigSetStringKeyAcceptsBoolLiteral(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := runConfigSet([]string{"teardown.command", "true"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config set exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Teardown.Command != "true" {
+		t.Errorf("teardown.command = %q, want %q", cfg.Teardown.Command, "true")
+	}
+}
+
+// Overwriting an existing bool must not drop the comment riding on its line.
+func TestConfigSetBoolKeepsTrailingComment(t *testing.T) {
+	writeConfig(t, "defer:\n  auto_nudge: true # keep me\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := runConfigSet([]string{"defer.auto_nudge", "false"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config set exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	dir, err := configDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "config.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "# keep me") {
+		t.Errorf("config.yml lost the trailing comment:\n%s", raw)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Defer.AutoNudge {
+		t.Error("defer.auto_nudge = true, want false")
+	}
+}
+
+// An invalid launch.layout parses fine as YAML but fails Config.validate(),
+// same as loadConfig would reject it — config set must not brick the next
+// launch by writing it anyway.
 func TestRunConfigSetInvalidLayoutLeavesFileUntouched(t *testing.T) {
 	writeConfig(t, "launch:\n  auto_worktree: true\n")
 	dir, err := configDir()

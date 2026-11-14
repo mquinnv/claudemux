@@ -122,10 +122,10 @@ func emptyConfigNode() *yaml.Node {
 }
 
 // setDottedPath walks mapNode by parts, creating intermediate mappings that
-// don't exist yet, and sets the final part as a string scalar. Only string
-// scalar leaves are supported — every value config set can target
-// (launch.layout today) is a string, and the picker TUI has no use for
-// anything richer.
+// don't exist yet, and sets the final part with setScalar: a string scalar,
+// except that the literals true and false become YAML booleans so bool keys
+// (defer.auto_nudge) can be set. Numbers, lists and maps are not supported —
+// the picker TUI has no use for anything richer.
 func setDottedPath(mapNode *yaml.Node, parts []string, value string) error {
 	for _, key := range parts[:len(parts)-1] {
 		child := findMapValue(mapNode, key)
