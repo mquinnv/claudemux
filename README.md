@@ -766,6 +766,9 @@ launch:
 teardown:
   command: /done
 
+defer:
+  auto_nudge: true
+
 web:
   listen: ""
   headline_interval: 2m
@@ -900,6 +903,9 @@ web:
   pane when you press `x`, and the one it watches for when you type it there yourself
   (see **Tearing down a session** below). Default `/done`. Set it to `""` to skip that
   step, making `x` a gated exit-and-kill — with nothing left to watch for either.
+- `defer.auto_nudge` — when a deferred session's blocking session goes away, the head
+  clears the defer and, if this is on (the default), also types a prompt into the
+  session's `claude` pane; set it to `false` to clear the defer without typing anything.
 - `web.listen` — where the switchboard serves its web status page (see **Sharing
   the fleet on the tailnet** above). `""` (the default) serves nothing.
   `tailscale:7474` binds this node's Tailscale IPv4 on port 7474; any other

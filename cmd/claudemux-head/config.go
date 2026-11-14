@@ -49,7 +49,8 @@ type Config struct {
 	OnePassword OnePasswordConfig `yaml:"onepassword"`
 	Launch      LaunchConfig      `yaml:"launch"`
 	Teardown    TeardownConfig    `yaml:"teardown"`
-	Web         WebConfig         `yaml:"web"`
+	Defer       DeferConfig       `yaml:"defer"`
+	Web        WebConfig         `yaml:"web"`
 }
 
 // HeadConfig picks which context rows the status pane draws under its state and
@@ -217,6 +218,16 @@ type TeardownConfig struct {
 	Command string `yaml:"command"`
 }
 
+// DeferConfig configures sessions deferred behind a blocking session.
+//
+// AutoNudge gates only the typed prompt the head sends when the blocker goes
+// away; the defer itself is always cleared automatically. It is on by default
+// and a real bool, not "unset": loadConfig decodes into defaults, so an
+// explicit `auto_nudge: false` overrides the default.
+type DeferConfig struct {
+	AutoNudge bool `yaml:"auto_nudge"`
+}
+
 // WebConfig is the switchboard's web status page (webserver.go). Listen is
 // the address the lobby binds: "" (the default) serves nothing; "host:port"
 // is passed to net.Listen; the keyword host "tailscale" is replaced by this
@@ -250,7 +261,10 @@ func defaultConfig() Config {
 		Teardown: TeardownConfig{
 			Command: "/done",
 		},
-		Web: WebConfig{
+		Defer: DeferConfig{
+			AutoNudge: true,
+		},
+		Web:WebConfig{
 			HeadlineInterval: Duration{2 * time.Minute},
 		},
 	}

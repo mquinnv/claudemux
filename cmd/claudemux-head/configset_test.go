@@ -108,6 +108,24 @@ func TestRunConfigSet(t *testing.T) {
 // An invalid launch.layout parses fine as YAML but fails Config.validate(),
 // same as loadConfig would reject it — config set must not brick the next
 // launch by writing it anyway.
+func TestConfigSetDeferAutoNudge(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := runConfigSet([]string{"defer.auto_nudge", "false"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config set exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runConfigGet([]string{"defer.auto_nudge"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("config get exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "false" {
+		t.Errorf("config get defer.auto_nudge = %q, want %q", got, "false")
+	}
+}
+
 func TestRunConfigSetInvalidLayoutLeavesFileUntouched(t *testing.T) {
 	writeConfig(t, "launch:\n  auto_worktree: true\n")
 	dir, err := configDir()
