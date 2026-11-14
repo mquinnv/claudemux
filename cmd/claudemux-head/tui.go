@@ -3000,12 +3000,21 @@ func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 // deferScope is this head's own session and the sessions its blocker can
 // name. Both are empty until a poll has read the session name and a good
 // listing: without its own name the head would offer itself, and a failed
-// listing would link against sessions that may be gone.
+// listing would link against sessions that may be gone. Only rows that publish
+// a claudemux state are in scope, matching the lobby's list: the lobby's own
+// session and plain tmux sessions are not blockers anyone hands work to. The
+// filter lives here, not in parseFleet, because the watcher needs every row to
+// tell a gone blocker from a present one.
 func (m model) deferScope() (self string, rows []fleetRow) {
 	if m.sessionName == "" || !m.fleetOK {
 		return "", nil
 	}
-	return m.sessionName, m.fleet
+	for _, r := range m.fleet {
+		if r.State != "" {
+			rows = append(rows, r)
+		}
+	}
+	return m.sessionName, rows
 }
 
 // deferChipText is the defer chip slot for both statusbar layouts: the

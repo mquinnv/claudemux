@@ -196,10 +196,58 @@ func runDeferCmd(t *testing.T, writes *[][]string, cmd tea.Cmd) []string {
 	return (*writes)[0]
 }
 
+// headCompleteModel is a head whose fleet is completeRows, each publishing a
+// claudemux state as a real session's head does, plus its own session.
 func headCompleteModel(mark deferMark) model {
+	var fleet []fleetRow
+	for _, r := range append(completeRows(), fleetRow{Name: "beejax", Created: "50"}) {
+		r.State = "Idle"
+		fleet = append(fleet, r)
+	}
 	return model{ready: true, width: 500, height: 4, selfPane: "%1", deferMark: mark,
-		sessionName: "beejax", fleetOK: true,
-		fleet: append(completeRows(), fleetRow{Name: "beejax", Created: "50"})}
+		sessionName: "beejax", fleetOK: true, fleet: fleet}
+}
+
+// The head offers and links only what the lobby lists: sessions that publish
+// a claudemux state. The lobby's own session and plain tmux sessions publish
+// none.
+func TestHeadDeferPromptClaudemuxSessionsOnly(t *testing.T) {
+	writes := captureDeferWrites(t)
+	hm := headCompleteModel(deferMark{})
+	hm.fleet = append(hm.fleet,
+		fleetRow{Name: "claudemux", Created: "10"},
+		fleetRow{Name: "phlog", Created: "20"})
+	var m tea.Model = hm
+	for _, k := range []tea.KeyMsg{keyRunes("d"), keyRunes("phl"), keyTab} {
+		m, _ = m.Update(k)
+	}
+	if got := m.(model).deferInput; got != "phl" {
+		t.Fatalf("tab on a plain tmux session's prefix = %q, want phl untouched", got)
+	}
+	var seen []string
+	m, _ = m.Update(keyBack)
+	m, _ = m.Update(keyBack)
+	m, _ = m.Update(keyBack)
+	for range 5 {
+		m, _ = m.Update(keyTab)
+		seen = append(seen, m.(model).deferInput)
+	}
+	for _, s := range seen {
+		if s == "claudemux" || s == "phlog" {
+			t.Errorf("tab on an empty line offered %q; cycle = %v", s, seen)
+		}
+	}
+	m = hm
+	for _, k := range []tea.KeyMsg{keyRunes("d"), keyRunes("phlog")} {
+		m, _ = m.Update(k)
+	}
+	if line := ansi.Strip(m.(model).deferChipText()); strings.Contains(line, "↳ links") {
+		t.Errorf("prompt = %q, want no link marker for a non-claudemux session", line)
+	}
+	_, cmd := m.Update(keyEnter)
+	if got, want := runDeferCmd(t, writes, cmd), deferLinkedArgs("%1", deferOnValue, "phlog", deferLink{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("enter wrote %v, want the plain defer %v", got, want)
+	}
 }
 
 var (
