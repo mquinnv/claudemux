@@ -84,10 +84,23 @@ in the same tmux invocation, on every path that clears a defer today.
   hand-compose three tmux options and a creation time. The skill's existing
   rules stay: skip it when the user's own mark (`1`) is set, never clear a
   defer this session did not set.
-- **The user's `d` prompt** (head and lobby). My call: when the typed blocker
-  is exactly the name of another live session, the defer is linked to it. The
-  mark stays `1` and the badge stays `DEFER`. Any other text is a free-text
-  defer with no link, as now.
+- **The user's `d` prompt** (head and lobby, and `D`'s edit of an existing
+  blocker). `Tab` completes the names of the other live sessions (Michael
+  asked for this). My calls on how:
+  - `Tab` completes what is typed so far, matched as a case-insensitive prefix
+    of a session name. The session being deferred is never offered.
+  - With several matches, repeated `Tab` cycles through them in the lobby's
+    row order; `Shift+Tab` cycles back. Typing anything else ends the cycle
+    and keeps what is shown.
+  - `Tab` on an empty line cycles through every other session, starting with
+    this session's handoff children, since those are the likeliest blockers.
+  - No match: `Tab` does nothing.
+  - On enter, a blocker that is exactly the name of another live session,
+    whether completed or typed out, links the defer to it. The mark stays `1`
+    and the badge stays `DEFER`. Any other text is a free-text defer with no
+    link, as now.
+  - The prompt shows that a link will be made (for example a marker after the
+    name) so a linked defer and a free-text one are told apart before enter.
 
 ### When the blocker is out of the way
 
