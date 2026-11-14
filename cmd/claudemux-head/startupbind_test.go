@@ -184,7 +184,7 @@ func TestBindCandidatesWaitsOnMappedSessionWithoutTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := map[string]string{"%7": "/Users/x/proj"}
-	transcript, cwd, pane := bindCandidates([]string{"%7"}, paths, dir, t.TempDir())
+	transcript, cwd, pane := bindCandidates([]string{"%7"}, paths, dir, t.TempDir(), time.Time{})
 	if want := waitingTranscript(projectDir); transcript != want {
 		t.Errorf("transcript = %q, want placeholder %q", transcript, want)
 	}
@@ -210,7 +210,7 @@ func TestBindCandidatesFollowsMappedTranscript(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "7.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	transcript, _, pane := bindCandidates([]string{"%7"}, map[string]string{"%7": "/w"}, dir, projectsDir)
+	transcript, _, pane := bindCandidates([]string{"%7"}, map[string]string{"%7": "/w"}, dir, projectsDir, time.Time{})
 	if transcript != live || pane != "%7" {
 		t.Errorf("transcript/pane = %q/%q, want %q/%%7", transcript, pane, live)
 	}
@@ -219,7 +219,7 @@ func TestBindCandidatesFollowsMappedTranscript(t *testing.T) {
 // No candidate has a map yet: the preferred pane's cwd and id are still
 // reported, with no transcript to follow.
 func TestBindCandidatesNoMapReportsPreferredPane(t *testing.T) {
-	transcript, cwd, pane := bindCandidates([]string{"%3", "%4"}, map[string]string{"%3": "/a", "%4": "/b"}, t.TempDir(), t.TempDir())
+	transcript, cwd, pane := bindCandidates([]string{"%3", "%4"}, map[string]string{"%3": "/a", "%4": "/b"}, t.TempDir(), t.TempDir(), time.Time{})
 	if transcript != "" || cwd != "/a" || pane != "%3" {
 		t.Errorf("= (%q, %q, %q), want (\"\", /a, %%3)", transcript, cwd, pane)
 	}

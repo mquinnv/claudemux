@@ -144,6 +144,12 @@ type model struct {
 	// permit tracks whether the claude pane has confirmed the permission
 	// dialog the hook's marker (same dir) announced — see permit.go.
 	permit permitWatch
+	// trust tracks whether the claude pane is showing the folder trust
+	// dialog, which blocks a session before any hook or transcript exists —
+	// see trust.go. claudeUnmapped is the poll's half of its gate: a claude
+	// pane was seen and the hook has written no map for it.
+	trust          trustWatch
+	claudeUnmapped bool
 
 	// publishedState is the last @claudemux_state value pushed to tmux, so the
 	// poll loop republishes only on change — one subprocess per transition,
@@ -634,6 +640,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 		// newModel's explicit waiting entry and cleared by switchSession, so a
 		// model built some other way without an ID doesn't read as waiting.
 		m.state = State{Kind: StateWaiting, Since: m.waitingSince, Anchored: true}
+		m.state = trustOverride(m.state, m.trust)
 	}
 	for i := len(m.allEvents) - 1; i >= 0; i-- {
 		// Skip placeholder models like "<synthetic>" (error/bookkeeping
@@ -1130,9 +1137,11 @@ func (m model) pollData() tea.Cmd {
 		// following or nothing newer exists.
 		activeJSONL := ""
 		claudePane := ""
+		claudeUnmapped := false
 		if follow {
 			mapped, cwd, pane, ok := mappedTranscript(selfPane, paneDir)
 			claudePane = pane
+			claudeUnmapped = ok && mapped == ""
 			if next, via := followTarget(mapped, ok, jsonlPath, waitingSince, superseded, projectsDir); next != "" {
 				teardownLogf("rotate via=%s pane=%s cwd=%s from=%s to=%s", via, pane, cwd, jsonlPath, next)
 				activeJSONL = next
@@ -1163,6 +1172,7 @@ func (m model) pollData() tea.Cmd {
 			deferRaw:     deferRaw,
 			deferReason:  deferReason,
 			claudePane:   claudePane,
+			unmapped:     claudeUnmapped,
 			sessionName:  sessionName,
 			lineage:      lineage,
 			lineageOK:    lineageOK,
@@ -1180,6 +1190,7 @@ type dataMsg struct {
 	deferRaw     string  // raw @claudemux_defer value, "" when unset/unreadable
 	deferReason  string  // raw @claudemux_defer_reason value, "" when unset/unreadable
 	claudePane   string  // the claude pane this poll bound to, "" when none was seen
+	unmapped     bool    // a claude pane was seen, and the hook has written no map for it
 	sessionName  string  // this head's tmux session, valid when lineageOK
 	lineage      []crumb // handoff ancestors, root first, valid when lineageOK
 	lineageOK    bool    // the lineage read succeeded; false keeps the last chain
@@ -1610,6 +1621,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.permit.probing = true
 			cmds = append(cmds, permitProbeCmd(m.claudePane, permit.At))
 		}
+		if m.trust.probeDue(!m.waitingSince.IsZero(), m.claudeUnmapped, m.claudePane, now) {
+			m.trust.started(now)
+			cmds = append(cmds, trustProbeCmd(m.claudePane))
+		}
 		if c := m.maybePublishClosing(); c != nil {
 			cmds = append(cmds, c)
 		}
@@ -1673,6 +1688,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.claudePane != "" {
 			m.claudePane = msg.claudePane
 		}
+		m.claudeUnmapped = msg.unmapped
 		if msg.lineageOK {
 			m.sessionName, m.lineage = msg.sessionName, msg.lineage
 		}
@@ -1778,6 +1794,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case permitProbeMsg:
 		m.permit.observe(msg.at, msg.up, msg.ok)
+		return m, nil
+
+	case trustProbeMsg:
+		m.trust.observe(msg.up, msg.ok, time.Now())
 		return m, nil
 
 	case summarizerMsg:

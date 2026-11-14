@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -251,8 +253,52 @@ func mappedTranscript(selfPane, dir string) (string, string, string, bool) {
 	if len(candidates) == 0 {
 		return "", "", "", false
 	}
-	transcript, cwd, pane := bindCandidates(candidates, panePaths(listing), dir, claudeProjectsPath())
+	transcript, cwd, pane := bindCandidates(candidates, panePaths(listing), dir, claudeProjectsPath(), tmuxServerStart())
 	return transcript, cwd, pane, true
+}
+
+var (
+	serverStartMu sync.Mutex
+	serverStart   time.Time
+)
+
+// tmuxServerStart is when the tmux server this head runs under started, zero
+// when it can't be read. A head never outlives its server, so the first good
+// answer is kept; a failed read is retried on the next call.
+func tmuxServerStart() time.Time {
+	serverStartMu.Lock()
+	defer serverStartMu.Unlock()
+	if !serverStart.IsZero() {
+		return serverStart
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{start_time}").Output()
+	if err != nil {
+		return time.Time{}
+	}
+	secs, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}
+	}
+	serverStart = time.Unix(secs, 0)
+	return serverStart
+}
+
+// paneRecordSince is readPaneRecord for the live server only: a map file last
+// written before serverStart is not this pane's. Pane ids count up from zero
+// in every tmux server, so after a restart a new pane inherits the map file
+// of whatever session held its id before — and nothing overwrites it until
+// the new claude's SessionStart, which never comes while the folder trust
+// dialog is up (see trust.go). Zero serverStart accepts everything.
+func paneRecordSince(dir, paneID string, serverStart time.Time) (paneMap, bool) {
+	if !serverStart.IsZero() && dir != "" && paneID != "" {
+		name := strings.TrimPrefix(paneID, "%") + ".json"
+		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.ModTime().Before(serverStart) {
+			return paneMap{}, false
+		}
+	}
+	return readPaneRecord(dir, paneID)
 }
 
 // bindCandidates walks candidate panes in preference order and binds to the
@@ -267,9 +313,12 @@ func mappedTranscript(selfPane, dir string) (string, string, string, bool) {
 // the current binding" — left the head describing whatever it followed
 // before, which after `c`/`n`, or a recycled pane id at launch, is the
 // previous session.
-func bindCandidates(candidates []string, paths map[string]string, dir, projectsDir string) (string, string, string) {
+//
+// serverStart is when the tmux server started: maps older than it are another
+// server's and are skipped — see paneRecordSince.
+func bindCandidates(candidates []string, paths map[string]string, dir, projectsDir string, serverStart time.Time) (string, string, string) {
 	for _, pane := range candidates {
-		rec, ok := readPaneRecord(dir, pane)
+		rec, ok := paneRecordSince(dir, pane, serverStart)
 		if !ok {
 			continue
 		}
