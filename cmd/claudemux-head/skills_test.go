@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,6 +23,18 @@ func shippedSkill(t *testing.T) []byte {
 		t.Fatalf("skill not embedded: %v", err)
 	}
 	return b
+}
+
+func TestHandoffSkillUsesDeferCommand(t *testing.T) {
+	s := string(shippedSkill(t))
+	for _, want := range []string{"claudemux-head defer --wait-on", "claudemux-head defer --clear"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("skill lacks %q", want)
+		}
+	}
+	if strings.Contains(s, "@claudemux_defer wait") {
+		t.Error("skill still sets the mark by hand")
+	}
 }
 
 func TestHookEnsureInstallsSkill(t *testing.T) {

@@ -1306,7 +1306,7 @@ case "${1:-}" in
     fi
     exec claudemux-head "$@"
     ;;
-  boot | statusline | switchboard | onboard | banner)
+  boot | statusline | switchboard | onboard | banner | defer)
     echo "claudemux: '$1' is an internal claudemux-head subcommand, not a launcher command (the lobby is \`claudemux switch\`, the layout picker \`claudemux setup\`)" >&2
     exit 2
     ;;

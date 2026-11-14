@@ -37,9 +37,9 @@ A subagent inherits this session's cwd, hooks, CLAUDE.md, memory scope and workt
 3. **Brief:** `SendMessage` with `to:` the bare agent name (add its ` [ref]` only if the listing shows duplicate names), `notify_when_idle: true`, and the brief below.
 4. **Defer:** once the brief is sent, if this session has nothing to do until the peer reports, mark it deferred so the conductor skips it while it waits:
    ```bash
-   tmux set-option -t "$TMUX_PANE" @claudemux_defer wait \; set-option -t "$TMUX_PANE" @claudemux_defer_reason "waiting on <tmux-name>: <goal in a few words>"
+   claudemux-head defer --wait-on <tmux-name> --reason "waiting on <tmux-name>: <goal in a few words>"
    ```
-   The value `wait` (not `1`) marks the defer as a handoff's, so the lobby badges this session WAIT instead of DEFER. The blocker is `waiting on <tmux-name>: <goal>`: one line, no tabs or newlines, under about 48 characters so the head's chip shows all of it. Skip this step when the user gave this session other work to continue, when `$TMUX_PANE` is empty (not under tmux), or when `tmux display-message -p -t "$TMUX_PANE" '#{@claudemux_defer}'` prints `1`: that mark is the user's, and you must neither overwrite it nor clear it later.
+   The command marks this session as a handoff's (the lobby badges it WAIT, not DEFER) and links it to `<tmux-name>`. The reason is `waiting on <tmux-name>: <goal>`: one line, no tabs or newlines, under about 48 characters so the head's chip shows all of it. Skip this step when the user gave this session other work to continue. If the user deferred this session themselves, the command leaves that mark alone and prints `skipped: this session is deferred by the user`; that is fine, carry on.
 
 ## The brief (the peer's entire knowledge)
 
@@ -67,8 +67,8 @@ Write it with these parts, in order. The first line is a one-sentence summary, b
 - Any approval the peer is waiting on
 - That this session is deferred: a conducting lobby carries them out of it to the next waiting session (that is the point), and its row stays one `Enter` away in the lobby
 
-When the peer replies or goes idle, clear the defer first, then relay what it reported, or the question it stopped on:
+claudemux clears the mark and prompts this session by itself if the peer stops or closes and no reply arrives. When the reply arrives first, clear the defer first, then relay what the peer reported, or the question it stopped on:
 ```bash
-tmux set-option -t "$TMUX_PANE" -u @claudemux_defer \; set-option -t "$TMUX_PANE" -u @claudemux_defer_reason
+claudemux-head defer --clear
 ```
 Clear it the same way if the user comes back with other work while you wait. Only ever clear a defer this session set.

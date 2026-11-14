@@ -198,13 +198,19 @@ func setDeferLinkedCmd(target, value, reason string, link deferLink) tea.Cmd {
 // ok is false when the read failed: a failed read must stay distinguishable
 // from an unset mark, because the link logic may never treat it as evidence.
 func readDeferMark(ctx context.Context, target string) (deferMark, bool) {
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target,
-		"#{"+deferOption+"}\t#{"+deferReasonOption+"}\t#{"+deferOnOption+"}\t#{"+
-			deferOnCreatedOption+"}\t#{"+deferOnSeenOption+"}").Output()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target, deferMarkFormat()).Output()
 	if err != nil {
 		return deferMark{}, false
 	}
 	return parseDeferMark(string(out)), true
+}
+
+// deferMarkFormat is the display-message format parseDeferMark reads. One
+// definition, so the head's poll and `claudemux-head defer` can never disagree
+// on the field order.
+func deferMarkFormat() string {
+	return "#{" + deferOption + "}\t#{" + deferReasonOption + "}\t#{" + deferOnOption + "}\t#{" +
+		deferOnCreatedOption + "}\t#{" + deferOnSeenOption + "}"
 }
 
 // parseDeferMark splits readDeferMark's tab-separated line. An unset option
