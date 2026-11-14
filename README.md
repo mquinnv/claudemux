@@ -211,11 +211,16 @@ snoozed, all snoozes are released and the conductor carries you back through
 the skipped sessions, oldest first. To stay out of a session, defer it.
 
 **Deferring a session** is different from a snooze: it says this session is waiting on
-something outside claudemux — a review, a build, another person — and the conductor
+something — a review, a build, another person, or another session — and the conductor
 should never carry you into it. Press `d` on the selected row in the
 lobby, or `d` from inside the session's own status pane, to toggle it. Deferring
 first asks what the session is blocked on: type the blocker and press `Enter` (an
-empty one still defers), or `Esc` to back out without deferring. Pressing `d` on a
+empty one still defers), or `Esc` to back out without deferring. `Tab` in that prompt
+completes the name of another session (repeated `Tab` cycles the matches, `Shift+Tab`
+goes back; on an empty line it starts with this session's handoff children). A blocker
+that is exactly another session's name *links* the defer to that session, and the
+prompt shows `↳ links` before you press `Enter` so you can tell; anything else is a
+free-text blocker, as before. Pressing `d` on a
 deferred session clears it, blocker and all, with no prompt. To change the blocker
 without clearing the defer, press `D` instead — the same prompt, pre-filled with
 what's recorded now, on the selected row or on your own session; `Enter` saves the
@@ -237,14 +242,34 @@ A deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the
 leading the row's second line; deferred rows sort to the bottom of the fleet list under
 a `─ deferred ─` rule, so the sessions you can still be carried into stay together at
 the top. The session's own status pane shows a
-`◆ defer: <blocker>` chip on its top line. Unlike a snooze, defer never clears itself — the
+`◆ defer: <blocker>` chip on its top line. A free-text defer never clears itself — the
 blocker is yours to resolve, not claudemux's to guess at — so it stays set until you
 press `d` again.
 
+A **linked** defer clears itself once its blocker is out of the way: the blocking session
+has closed, or it has been seen working since you linked it and now sits waiting on a
+human without being deferred itself. (A blocker that is still deferred keeps the mark, so a
+chain of handoffs unwinds from the far end.) The status pane then waits 20 seconds,
+because the peer's own reply usually arrives first; if the blocker goes back to work in
+that time, nothing happens, and if this session starts a turn of its own, the mark just
+clears. (A session that was already mid-turn when the blocker stopped waits the full 20
+seconds and is never prompted — it may well be handling the reply.) Otherwise the mark
+clears at the end of the grace period and the status pane types a short prompt into the
+`claude` pane, naming the blocker and the reason you recorded and telling the agent to
+check for its report and continue. It only types when the session is idle at
+an empty prompt (with Claude Code's vim mode on, only in insert mode) and
+`defer.auto_nudge` is on; with a draft in the input, an open question, or the nudge turned
+off, the mark clears and nothing is typed, so the session reads as waiting and the
+conductor brings you to it. Either way the status pane shows `◆ <name> finished` or
+`◆ <name> closed` until the session's next turn, so an idle session that left defer on its
+own explains why.
+
 When the claudemux-handoff skill hands work to another session and has nothing to do until
-it reports, it defers its own session the same way, but marks it `wait`: the row's badge
-reads ` WAIT ` and the chip `◆ wait: <blocker>`. It behaves exactly like a defer, and the
-agent clears it itself when the peer replies.
+it reports, it defers its own session the same way, but marks it `wait` and links it to the
+peer (`claudemux-head defer --wait-on <session> --reason <text>`; `--clear` takes it off
+again): the row's badge reads ` WAIT ` and the chip `◆ wait: <blocker>`. The agent clears
+the mark itself when the peer replies, and if that reply never arrives the link releases
+it as above.
 
 **Closing sessions** get a list of their own too. A session whose teardown is in flight
 — you typed `/done` in it, pressed `x` or `X` in its status pane, or it is sitting at
@@ -903,7 +928,7 @@ web:
   pane when you press `x`, and the one it watches for when you type it there yourself
   (see **Tearing down a session** below). Default `/done`. Set it to `""` to skip that
   step, making `x` a gated exit-and-kill — with nothing left to watch for either.
-- `defer.auto_nudge` — when a deferred session's blocking session goes away, the head
+- `defer.auto_nudge` — when a linked defer's blocking session stops or closes, the head
   clears the defer and, if this is on (the default), also types a prompt into the
   session's `claude` pane; set it to `false` to clear the defer without typing anything.
 - `web.listen` — where the switchboard serves its web status page (see **Sharing

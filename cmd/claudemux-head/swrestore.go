@@ -285,9 +285,10 @@ func deferRelinkArgs(restored []lostSession, created map[string]int64) [][]strin
 	return out
 }
 
-// swRelinkCmd re-stamps handoff parent links on the relaunched sessions.
-// Best-effort: a failure leaves a child unlinked (it shows as a root), which
-// is not worth failing the restore over.
+// swRelinkCmd re-stamps handoff parent links and defer links on the
+// relaunched sessions, from one listing of their new creation times.
+// Best-effort: a failure leaves a child unlinked (it shows as a root, or its
+// defer stays a plain one), which is not worth failing the restore over.
 func swRelinkCmd(restored []lostSession) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

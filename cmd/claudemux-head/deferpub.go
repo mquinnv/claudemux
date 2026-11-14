@@ -49,12 +49,13 @@ const deferReasonOption = "@claudemux_defer_reason"
 const deferReasonMaxCells = 48
 
 // The link options say which session a defer waits on, so the head can clear
-// the defer when that session goes away. They live beside deferOption on the
-// same tmux session for the same reason it does: they must survive head and
-// lobby restarts. deferOnOption is the blocker's session name,
+// the defer when that session stops or closes. They live beside deferOption on
+// the same tmux session for the same reason it does: they must survive head
+// and lobby restarts. deferOnOption is the blocker's session name,
 // deferOnCreatedOption its tmux session_created stamp (so a reused name is not
 // mistaken for the original), and deferOnSeenOption "1" once the blocker has
-// been observed alive (so a blocker that never started is not "gone").
+// been seen working since the link was made (so a blocker that has not
+// started yet does not read as "stopped"; "gone" does not need it).
 const (
 	deferOnOption        = "@claudemux_defer_on"
 	deferOnCreatedOption = "@claudemux_defer_on_created"
@@ -147,9 +148,10 @@ func deferLinkedArgs(target, value, reason string, link deferLink) []string {
 		"set-option", "-t", target, "-u", deferOnSeenOption)
 }
 
-// deferSeenArgs records that the blocker has been seen alive. It is its own
-// invocation: the mark and link are already published and must not be
-// rewritten by a poll.
+// deferSeenArgs records that the blocker has been seen working, which is what
+// lets a later idle blocker read as "stopped" rather than not yet started
+// (judgeBlocker; a gone blocker ignores it). It is its own invocation: the
+// mark and link are already published and must not be rewritten by a poll.
 func deferSeenArgs(target string) []string {
 	return []string{"set-option", "-t", target, deferOnSeenOption, "1"}
 }

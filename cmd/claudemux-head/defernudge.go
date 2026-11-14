@@ -154,7 +154,7 @@ func deferNudgeText(blocker string, gone bool, reason string) string {
 		". Check for its report, then pick up where you left off."
 }
 
-// deferDoneChip is the lobby's note that a blocker finished, shown in place of
+// deferDoneChip is the head's note that a blocker finished, shown in place of
 // the defer chip so the user sees why the session left the deferred group.
 func deferDoneChip(blocker string, gone bool) string {
 	if gone {
