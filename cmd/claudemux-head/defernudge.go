@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,8 +36,11 @@ const sgrDim = "\x1b[2m"
 // (a typed `Try "` is plain text and is a draft), and at most promptTailLines
 // lines may follow the bottom rule. A multi-line draft or a dialog
 // (permission, AskUserQuestion) puts several lines between the rules. A footer
-// naming a vim mode other than INSERT is false too; see vimNotInsert.
-func promptEmpty(capture string) bool {
+// naming a vim mode other than INSERT is false too; see vimNotInsert. With
+// vimMode on (claudeVimMode), the footer must show "-- INSERT --": claude
+// prints no indicator at all in NORMAL mode, so its absence is the only sign
+// the box would run typed text as vim commands.
+func promptEmpty(capture string, vimMode bool) bool {
 	rawLines := strings.Split(strings.TrimRight(capture, "\n \t"), "\n")
 	lines := make([]string, len(rawLines))
 	for i, l := range rawLines {
@@ -55,7 +61,11 @@ func promptEmpty(capture string) bool {
 	if top < 0 || bottom-top != 2 || len(lines)-1-bottom > promptTailLines {
 		return false
 	}
-	if vimNotInsert(lines[bottom+1:]) {
+	tail := lines[bottom+1:]
+	if vimNotInsert(tail) {
+		return false
+	}
+	if vimMode && !strings.Contains(strings.Join(tail, "\n"), "-- INSERT --") {
 		return false
 	}
 	rest, ok := strings.CutPrefix(strings.TrimSpace(lines[top+1]), "❯")
@@ -72,6 +82,37 @@ func promptEmpty(capture string) bool {
 	raw := rawLines[top+1]
 	i := strings.Index(raw, promptPlaceholder)
 	return i >= 0 && strings.HasSuffix(raw[:i], sgrDim)
+}
+
+// claudeVimMode reports whether claude's editor is in vim mode, read from the
+// top-level "editorMode" of .claude.json and settings.json (under
+// CLAUDE_CONFIG_DIR when set, else the home directory). True if either file
+// says "vim"; false if at least one was read and none says vim; true when
+// neither could be read, because a wrong "false" types into a prompt that may
+// be in NORMAL mode. Only that one field is decoded.
+func claudeVimMode(getenv func(string) string, home string) bool {
+	paths := []string{filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")}
+	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		paths = []string{filepath.Join(dir, ".claude.json"), filepath.Join(dir, "settings.json")}
+	}
+	parsed := false
+	for _, p := range paths {
+		blob, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var body struct {
+			EditorMode string `json:"editorMode"`
+		}
+		if json.Unmarshal(blob, &body) != nil {
+			continue
+		}
+		parsed = true
+		if body.EditorMode == "vim" {
+			return true
+		}
+	}
+	return !parsed
 }
 
 // vimNotInsert reports whether the footer names a vim mode that is not INSERT.
@@ -156,6 +197,8 @@ func nudgePane(selfPane, paneDir, text string) bool {
 	if !ok || pane == "" {
 		return false
 	}
+	home, _ := os.UserHomeDir()
+	vimOn := claudeVimMode(os.Getenv, home)
 	// Each tmux call gets its own deadline; see teardownSendCmd.
 	capCtx, cancelCap := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	out, err := exec.CommandContext(capCtx, "tmux", "capture-pane", "-e", "-p", "-t", pane).Output()
@@ -163,7 +206,7 @@ func nudgePane(selfPane, paneDir, text string) bool {
 	// The capture and the keystrokes cannot be atomic: a user typing in the
 	// gap can still be typed over. The window is milliseconds and tmux has no
 	// way to close it.
-	if err != nil || !promptEmpty(string(out)) {
+	if err != nil || !promptEmpty(string(out), vimOn) {
 		return false
 	}
 	literal, ok := sendLiteralArgs(pane, text)

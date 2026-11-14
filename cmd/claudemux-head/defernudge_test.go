@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,7 +33,6 @@ func TestPromptEmpty(t *testing.T) {
 	}{
 		{"real: placeholder", readFixture(t, "prompt_empty.txt"), true},
 		{"real: bare prompt mid-session", readFixture(t, "prompt_bare.txt"), true},
-		{"real: vim normal, no indicator", readFixture(t, "prompt_normal.txt"), true},
 		{"real: Try draft, plain", readFixture(t, "prompt_trydraft.txt"), false},
 		{"real: half-typed draft", readFixture(t, "prompt_draft.txt"), false},
 		{"real: question dialog", readFixture(t, "prompt_asking.txt"), false},
@@ -50,10 +50,98 @@ func TestPromptEmpty(t *testing.T) {
 		{"prompt without glyph", box("hello", ins), false},
 	}
 	for _, c := range cases {
-		if got := promptEmpty(c.capture); got != c.want {
-			t.Errorf("%s: promptEmpty = %v, want %v", c.name, got, c.want)
+		// Every case carries "-- INSERT --" or is a negative, so the answer
+		// is the same with vim mode on or off, except the one with no footer
+		// indicator, which vim mode rejects.
+		for _, vim := range []bool{false, true} {
+			want := c.want
+			if c.name == "bare prompt, vim off" && vim {
+				want = false
+			}
+			if got := promptEmpty(c.capture, vim); got != want {
+				t.Errorf("%s (vim=%v): promptEmpty = %v, want %v", c.name, vim, got, want)
+			}
 		}
 	}
+	// The real vim-NORMAL capture has no footer indicator, so with vim mode
+	// off it is indistinguishable from an empty box (true is correct); with
+	// vim mode on, the missing "-- INSERT --" is what marks it unsafe.
+	normal := readFixture(t, "prompt_normal.txt")
+	if promptEmpty(normal, true) {
+		t.Error("vim NORMAL capture read as empty under vim mode")
+	}
+	if !promptEmpty(normal, false) {
+		t.Error("indicator-less empty box should be empty without vim mode")
+	}
+}
+
+func TestClaudeVimMode(t *testing.T) {
+	write := func(t *testing.T, path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	none := func(string) string { return "" }
+	t.Run("vim in .claude.json only", func(t *testing.T) {
+		h := t.TempDir()
+		write(t, filepath.Join(h, ".claude.json"), `{"editorMode":"vim"}`)
+		if !claudeVimMode(none, h) {
+			t.Error("want true")
+		}
+	})
+	t.Run("vim in settings.json only", func(t *testing.T) {
+		h := t.TempDir()
+		write(t, filepath.Join(h, ".claude", "settings.json"), `{"editorMode":"vim"}`)
+		if !claudeVimMode(none, h) {
+			t.Error("want true")
+		}
+	})
+	t.Run("both present, normal and absent", func(t *testing.T) {
+		h := t.TempDir()
+		write(t, filepath.Join(h, ".claude.json"), `{"editorMode":"normal"}`)
+		write(t, filepath.Join(h, ".claude", "settings.json"), `{"other":1}`)
+		if claudeVimMode(none, h) {
+			t.Error("want false")
+		}
+	})
+	t.Run("neither file", func(t *testing.T) {
+		if !claudeVimMode(none, t.TempDir()) {
+			t.Error("want true (conservative)")
+		}
+	})
+	t.Run("one malformed, other not vim", func(t *testing.T) {
+		h := t.TempDir()
+		write(t, filepath.Join(h, ".claude.json"), `{not json`)
+		write(t, filepath.Join(h, ".claude", "settings.json"), `{"editorMode":"normal"}`)
+		if claudeVimMode(none, h) {
+			t.Error("want false")
+		}
+	})
+	t.Run("only malformed", func(t *testing.T) {
+		h := t.TempDir()
+		write(t, filepath.Join(h, ".claude.json"), `{not json`)
+		if !claudeVimMode(none, h) {
+			t.Error("want true (nothing parsed)")
+		}
+	})
+	t.Run("CLAUDE_CONFIG_DIR wins over home", func(t *testing.T) {
+		h, d := t.TempDir(), t.TempDir()
+		write(t, filepath.Join(h, ".claude.json"), `{"editorMode":"vim"}`)
+		write(t, filepath.Join(d, "settings.json"), `{"editorMode":"normal"}`)
+		env := func(k string) string {
+			if k == "CLAUDE_CONFIG_DIR" {
+				return d
+			}
+			return ""
+		}
+		if claudeVimMode(env, h) {
+			t.Error("read home instead of CLAUDE_CONFIG_DIR")
+		}
+	})
 }
 
 func TestDeferNudgeText(t *testing.T) {
