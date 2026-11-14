@@ -361,7 +361,7 @@ func TestCompactSummaryIsNotAPrompt(t *testing.T) {
 		{Type: "user", UserText: "merge it"},
 		{Type: "user", IsCompactSummary: true, UserText: "This session is being continued…"},
 	}
-	if got := lastTypedPrompt(events); got != "merge it" {
+	if got, _ := lastTypedPrompt(events); got != "merge it" {
 		t.Errorf("lastTypedPrompt = %q, want %q", got, "merge it")
 	}
 	if got := lastUserPrompt(events); got != "merge it" {

@@ -262,6 +262,9 @@ type model struct {
 	// lastTypedPrompt. Only the teardown watch reads it; everything
 	// user-facing uses lastPrompt.
 	lastTyped string
+	// lastTypedPeer marks lastTyped as a peer session's message rather than
+	// something typed into this pane.
+	lastTypedPeer bool
 	// turnStays is whether the current turn asked the conductor to leave
 	// the human here (a #stay prompt or a "Chat about this" answer) — see
 	// turnStays in staymark.go. Published with the state.
@@ -423,6 +426,8 @@ type model struct {
 	// reason). Captured at ARM time rather than per probe because by the time
 	// the gate is being evaluated the wrap-up may already have deleted the
 	// directory — and once claude exits, sessionCwd stops being refreshed.
+	// The one case where workDir wins over a known sessionCwd is a cwd that
+	// has left the launch repo altogether — see captureTeardownTarget.
 	teardownWorkDir    string
 	teardownInWorktree bool
 	// teardownNote is the reason the last teardown aborted, shown for
@@ -654,7 +659,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 		m.contextPct = contextPercent(m.modelName, *last)
 	}
 	m.lastPrompt = lastUserPrompt(m.allEvents)
-	m.lastTyped = lastTypedPrompt(m.allEvents)
+	m.lastTyped, m.lastTypedPeer = lastTypedPrompt(m.allEvents)
 	m.turnStays = turnStays(m.allEvents)
 	if m.reader != nil {
 		m.firstPrompt = m.reader.FirstPrompt()
@@ -913,13 +918,18 @@ func lastUserPrompt(events []Event) string {
 // autoArmTeardown dead code. Restricting the scan to `user` turns makes the
 // command visible; the display path keeps the broader scan, which is right for
 // it (a bare command says nothing about what the session is doing).
-func lastTypedPrompt(events []Event) string {
+//
+// fromPeer reports that the prompt is another session's message (see
+// Event.PeerBrief) rather than something typed into this pane. Such a message
+// is a prompt for every display purpose, but it is never a slash command being
+// run: see autoArmTeardown.
+func lastTypedPrompt(events []Event) (text string, fromPeer bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		if e := events[i]; e.Type == "user" && genuinePrompt(e) {
-			return e.UserText
+			return e.UserText, e.PeerBrief
 		}
 	}
-	return ""
+	return "", false
 }
 
 // firstUserPrompt returns the oldest thing the human sent — the session's
@@ -2252,8 +2262,16 @@ func truncateRunes(s string, max int) string {
 
 // teardownChipText renders this model's teardown chip, or "" when there is
 // nothing to show.
+//
+// A cleanliness block names the checkout it was read from: the gate may be
+// judging a directory other than the one the user is looking at, and "dirty
+// tree" alone sends them to check the wrong one.
 func (m model) teardownChipText(now time.Time) string {
-	return teardownChip(m.teardown, m.teardownBlocked, m.teardownAuto, m.teardownBlockReason, m.teardownNote, m.teardownNoteAt, now)
+	reason := m.teardownBlockReason
+	if reason != "" && m.teardownWorkDir != "" {
+		reason += " in " + filepath.Base(m.teardownWorkDir)
+	}
+	return teardownChip(m.teardown, m.teardownBlocked, m.teardownAuto, reason, m.teardownNote, m.teardownNoteAt, now)
 }
 
 const (
@@ -3098,6 +3116,13 @@ func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 	if !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
 		return
 	}
+	if m.lastTypedPeer {
+		// A peer session's message that opens with the command's name — a
+		// delegate reporting "/done completed for PR #126: ..." — is prose
+		// about a wrap-up somewhere else, not the user running one here
+		// (AG-1482: it armed the watch on a session mid-work).
+		return
+	}
 	m.captureTeardownTarget()
 	teardownLogf("auto-arm prompt=%q worktree=%v cwd=%s",
 		m.lastTyped, m.teardownInWorktree, m.teardownWorkDir)
@@ -3132,6 +3157,13 @@ func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 // paths: git prints resolved paths, and on macOS a transcript cwd under
 // /var/... is really /private/var/..., which would otherwise never match and
 // would leave the gate permanently shut.
+//
+// The session's cwd is only authoritative while it is still in the repo the
+// session was launched in. The transcript cwd follows every shell `cd`, so a
+// session that wandered into an unrelated repo would otherwise have its
+// wrap-up judged on that repo — a clean, pushed session held at "blocked
+// (dirty tree)" by a directory it had merely visited (AG-1482). A cwd that has
+// left the launch repo falls back to the launch directory, same as no cwd.
 func (m *model) captureTeardownTarget() {
 	wd := m.sessionCwd
 	if wd == "" {
@@ -3140,8 +3172,50 @@ func (m *model) captureTeardownTarget() {
 	if resolved, err := filepath.EvalSymlinks(wd); err == nil {
 		wd = resolved
 	}
+	inWorktree := worktreeNameForCwd(wd) != ""
+	if cwdLeftLaunchRepo(wd, inWorktree, m.workDir, m.mainCheckout) {
+		wd = m.workDir
+		inWorktree = m.inWorktree
+	}
 	m.teardownWorkDir = wd
-	m.teardownInWorktree = worktreeNameForCwd(wd) != ""
+	m.teardownInWorktree = inWorktree
+}
+
+// cwdLeftLaunchRepo reports whether cwd, the session's resolved working
+// directory, is outside the repository the head was launched in (workDir,
+// whose main checkout is mainCheckout).
+//
+// A head launched outside any repo has no checkout of its own to prefer, so
+// nothing counts as having left it. Otherwise the two repos are compared by
+// main checkout, which a checkout shares with its subdirectories and with
+// every one of its linked worktrees.
+//
+// "Can't tell" is read differently for the two kinds of cwd. A worktree the
+// wrap-up already removed can no longer be asked which repo it belongs to, and
+// it is exactly the target the worktree gate needs, so an unanswerable
+// worktree cwd stays. A plain directory that git cannot place is either
+// outside every repo or gone; neither has a tree to judge.
+func cwdLeftLaunchRepo(cwd string, inWorktree bool, workDir, mainCheckout string) bool {
+	if workDir == "" || mainCheckout == "" || cwd == workDir {
+		return false
+	}
+	owner := mainCheckoutFor(cwd)
+	if owner == "" {
+		return !inWorktree
+	}
+	return !samePath(owner, mainCheckout)
+}
+
+// samePath compares two directories with symlinks resolved, so a path git
+// printed and one read from elsewhere agree (/var vs /private/var on macOS).
+func samePath(a, b string) bool {
+	if r, err := filepath.EvalSymlinks(a); err == nil {
+		a = r
+	}
+	if r, err := filepath.EvalSymlinks(b); err == nil {
+		b = r
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // teardownProbeDue reports whether the ready gate should be sampled on this
