@@ -336,6 +336,12 @@ type model struct {
 	// seeds deferInput with the recorded blocker; `d` always starts empty.
 	deferPrompting bool
 	deferInput     string
+	// deferComplete is the prompt's Tab cycle (defercomplete.go).
+	// deferEditValue is the mark `D` found when it opened on a deferred
+	// session, "" for a new defer: enter keeps that value, and the link
+	// unless the text names a new one.
+	deferComplete  deferCompleter
+	deferEditValue string
 	// conductPendingMode holds the mode this head's space key just asked the
 	// lobby for, shown in place of conductRaw until a poll confirms it or
 	// conductPendingUntil passes. Without it the chip would answer a keypress
@@ -1574,6 +1580,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.deferPrompting = true
 			m.deferInput = ""
+			m.deferComplete.reset()
+			m.deferEditValue = ""
 			return m, nil
 		case "D":
 			// Edit the blocker without clearing the defer: the same prompt
@@ -1587,8 +1595,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.deferPrompting = true
 			m.deferInput = ""
+			m.deferComplete.reset()
+			m.deferEditValue = ""
 			if isDeferValue(m.deferMark.Raw) {
 				m.deferInput = sanitizeDeferReason(m.deferMark.Reason)
+				m.deferEditValue = m.deferMark.Raw
 			}
 			return m, nil
 		case "t":
@@ -2963,21 +2974,38 @@ func formatDuration(d time.Duration) string {
 // enter defers with whatever was typed (an empty blocker still defers — the
 // reason is a note, not a gate); esc and ctrl+c back out without changing
 // anything, which for a `D` edit leaves the recorded blocker as it was. Every
-// other key edits the text, so q or esc can't quit the pane mid-sentence.
+// other key edits the text, so q or esc can't quit the pane mid-sentence;
+// Tab and Shift+Tab complete other sessions' names (deferPromptEdit).
 func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.deferPrompting = false
 		m.deferInput = ""
+		m.deferComplete.reset()
 		return m, nil
 	case "enter":
-		reason := m.deferInput
+		input, editValue := m.deferInput, m.deferEditValue
 		m.deferPrompting = false
 		m.deferInput = ""
-		return m, setDeferCmd(m.selfPane, true, reason)
+		m.deferComplete.reset()
+		m.deferEditValue = ""
+		self, rows := m.deferScope()
+		return m, deferSubmitCmd(m.selfPane, editValue, input, self, rows)
 	}
-	m.deferInput = deferInputKey(m.deferInput, msg)
+	self, rows := m.deferScope()
+	m.deferInput = deferPromptEdit(m.deferInput, &m.deferComplete, msg, deferCandidates(self, rows))
 	return m, nil
+}
+
+// deferScope is this head's own session and the sessions its blocker can
+// name. Both are empty until a poll has read the session name and a good
+// listing: without its own name the head would offer itself, and a failed
+// listing would link against sessions that may be gone.
+func (m model) deferScope() (self string, rows []fleetRow) {
+	if m.sessionName == "" || !m.fleetOK {
+		return "", nil
+	}
+	return m.sessionName, m.fleet
 }
 
 // deferChipText is the defer chip slot for both statusbar layouts: the
@@ -2986,7 +3014,9 @@ func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 // idle session left defer on its own.
 func (m model) deferChipText() string {
 	if m.deferPrompting {
-		return swDeferStyle.Render(deferPromptText(m.deferInput))
+		self, rows := m.deferScope()
+		_, link := deferSubmit(m.deferInput, self, rows)
+		return swDeferStyle.Render(deferPromptText(m.deferInput, link.set()))
 	}
 	if c := deferChip(m.deferMark.Raw, m.deferMark.Reason); c != "" {
 		return c

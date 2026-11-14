@@ -114,15 +114,24 @@ func deferValueArgs(target string, on bool, value, reason string) []string {
 // without touching the link options.
 func deferMarkArgs(target, value, reason string) []string {
 	args := []string{"set-option", "-t", target, deferOption, value, ";"}
+	return append(args, deferReasonArgs(target, reason)...)
+}
+
+// deferReasonArgs sets the reason alone, or unsets it when nothing is left
+// after sanitizing. Editing a deferred session's blocker to free text uses it
+// directly: rewriting the mark there would turn a handoff's "wait" into "1",
+// and a link-less set would unlink a defer whose blocker merely mentions its
+// session ("waiting on phenix-2: <goal>").
+func deferReasonArgs(target, reason string) []string {
 	if reason = sanitizeDeferReason(reason); reason != "" {
 		// tmux reads any argument ending in ";" as a command separator, even
 		// from argv, and would drop it; "\;" is its escape for a literal one.
 		if strings.HasSuffix(reason, ";") {
 			reason = strings.TrimSuffix(reason, ";") + `\;`
 		}
-		return append(args, "set-option", "-t", target, deferReasonOption, reason)
+		return []string{"set-option", "-t", target, deferReasonOption, reason}
 	}
-	return append(args, "set-option", "-t", target, "-u", deferReasonOption)
+	return []string{"set-option", "-t", target, "-u", deferReasonOption}
 }
 
 // deferLinkedArgs sets a defer that waits on link's session. A new link starts
@@ -149,11 +158,23 @@ func deferSeenArgs(target string) []string {
 // waits on it: if it fails, the next poll still reads the blocker unseen and
 // asks again.
 func deferSeenCmd(target string) tea.Cmd {
-	args := deferSeenArgs(target)
+	return deferWriteCmd(deferSeenArgs(target))
+}
+
+// deferTmuxRun runs one defer write with the usual hard deadline, so a wedged
+// tmux can never block either surface's Update loop. A variable so tests can
+// see the argv a prompt's cmd writes without a tmux server.
+var deferTmuxRun = func(args []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "tmux", args...).Run()
+}
+
+// deferWriteCmd fires one defer write, fire-and-forget: nothing reads its
+// result, because the next poll reads back whatever landed.
+func deferWriteCmd(args []string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		deferTmuxRun(args)
 		return nil
 	}
 }
@@ -173,25 +194,19 @@ func sanitizeDeferReason(reason string) string {
 // setDeferCmd fires the toggle, fire-and-forget with the usual hard deadline
 // so a wedged tmux can never block either surface's Update loop.
 func setDeferCmd(target string, on bool, reason string) tea.Cmd {
-	args := deferArgs(target, on, reason)
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = exec.CommandContext(ctx, "tmux", args...).Run()
-		return nil
-	}
+	return deferWriteCmd(deferArgs(target, on, reason))
 }
 
 // setDeferLinkedCmd is setDeferCmd for a defer that waits on a session, with
 // the same hard deadline so a wedged tmux can never block an Update loop.
 func setDeferLinkedCmd(target, value, reason string, link deferLink) tea.Cmd {
-	args := deferLinkedArgs(target, value, reason, link)
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = exec.CommandContext(ctx, "tmux", args...).Run()
-		return nil
-	}
+	return deferWriteCmd(deferLinkedArgs(target, value, reason, link))
+}
+
+// setDeferReasonCmd rewrites only a deferred session's blocker text, leaving
+// its mark, link and seen flag as they are (see deferReasonArgs).
+func setDeferReasonCmd(target, reason string) tea.Cmd {
+	return deferWriteCmd(deferReasonArgs(target, reason))
 }
 
 // readDeferMark fetches the whole mark for the head's poll in one tmux call.
@@ -271,9 +286,16 @@ func deferChip(raw, reason string) string {
 }
 
 // deferPromptText is the text of the blocker prompt both surfaces show while
-// `d` is collecting one: the typed input with a cursor after it.
-func deferPromptText(input string) string {
-	return "◆ blocker: " + input + "▌"
+// `d` is collecting one: the typed input with a cursor after it. linked says
+// enter would link the defer to the session the input names, which is worth
+// showing because only an exact name links and the difference is otherwise
+// invisible until the blocker goes away and nothing happens.
+func deferPromptText(input string, linked bool) string {
+	text := "◆ blocker: " + input + "▌"
+	if linked {
+		text += " ↳ links"
+	}
+	return text
 }
 
 // deferInputKey applies one keypress to a blocker being typed, the same

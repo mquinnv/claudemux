@@ -1372,7 +1372,7 @@ func TestSwModelShiftDEditsBlocker(t *testing.T) {
 	if !strings.Contains(view, "blocker web ◆ blocker: Ana's review") {
 		t.Errorf("status line missing the edit prompt:\n%s", view)
 	}
-	if !strings.Contains(view, "enter save · esc cancel") {
+	if !strings.Contains(view, "enter save · tab session · esc cancel") {
 		t.Errorf("footer missing the edit wording:\n%s", view)
 	}
 	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1395,7 +1395,7 @@ func TestSwModelShiftDOnUndeferredIsAnEmptyPrompt(t *testing.T) {
 	if !m.deferring || m.deferEditing || m.deferInput != "" {
 		t.Fatalf("deferring = %v editing = %v input = %q, want an empty defer prompt", m.deferring, m.deferEditing, m.deferInput)
 	}
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "enter defer · esc cancel") {
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "enter defer · tab session · esc cancel") {
 		t.Errorf("footer must keep the defer wording:\n%s", view)
 	}
 }

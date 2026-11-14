@@ -384,12 +384,17 @@ type swModel struct {
 	// selection on enter — a poll can reorder the list while the user types.
 	// deferEditing marks the `D`-on-a-deferred-row case, where the prompt
 	// starts pre-filled and is wording-wise an edit rather than a new defer;
-	// the tmux write is identical either way.
-	deferring    bool
-	deferInput   string
-	deferTarget  string
-	deferName    string
-	deferEditing bool
+	// deferEditValue is that row's mark value ("1" or "wait"), "" for a new
+	// defer: enter keeps it, and rewrites only the reason unless the text
+	// names a session to relink to. deferComplete is the prompt's Tab cycle
+	// (defercomplete.go).
+	deferring      bool
+	deferInput     string
+	deferTarget    string
+	deferName      string
+	deferEditing   bool
+	deferEditValue string
+	deferComplete  deferCompleter
 	// restart records that the user (R) or the binary watcher asked for a
 	// re-exec rather than a quit; runSwitchboard checks it after Run
 	// returns, mirroring the session head's flow in main().
@@ -1006,17 +1011,21 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deferring = false
 				m.deferInput = ""
 				m.deferEditing = false
+				m.deferComplete.reset()
 			case "enter":
 				// An empty blocker still defers: the reason is a note, not a
 				// gate. Clearing an edited blocker back to empty is therefore
 				// a real outcome, not a cancel — esc is the way to keep it.
-				target, reason := m.deferTarget, m.deferInput
+				target, input, editValue := m.deferTarget, m.deferInput, m.deferEditValue
 				m.deferring = false
 				m.deferInput = ""
 				m.deferEditing = false
-				return m, setDeferCmd(target, true, reason)
+				m.deferEditValue = ""
+				m.deferComplete.reset()
+				return m, deferSubmitCmd(target, editValue, input, m.deferName, fleetFromSnapshot(m.snap.Sessions))
 			default:
-				m.deferInput = deferInputKey(m.deferInput, msg)
+				m.deferInput = deferPromptEdit(m.deferInput, &m.deferComplete, msg,
+					deferCandidates(m.deferName, fleetFromSnapshot(m.snap.Sessions)))
 			}
 			return m, nil
 		}
@@ -1108,6 +1117,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deferring = true
 				m.deferInput = ""
 				m.deferEditing = false
+				m.deferEditValue = ""
+				m.deferComplete.reset()
 				m.deferTarget = swDeferTarget(sess)
 				m.deferName = sess.Name
 			}
@@ -1123,8 +1134,14 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deferring = true
 				m.deferInput = ""
 				m.deferEditing = sess.Deferred
+				m.deferEditValue = ""
+				m.deferComplete.reset()
 				if sess.Deferred {
 					m.deferInput = sanitizeDeferReason(sess.DeferReason)
+					m.deferEditValue = deferOnValue
+					if sess.DeferWait {
+						m.deferEditValue = deferWaitValue
+					}
 				}
 				m.deferTarget = swDeferTarget(sess)
 				m.deferName = sess.Name
@@ -1610,7 +1627,8 @@ func (m swModel) View() string {
 		if m.deferEditing {
 			verb = "blocker "
 		}
-		status = swDeferStyle.Render(verb+m.deferName+" ") + deferPromptText(m.deferInput)
+		_, link := deferSubmit(m.deferInput, m.deferName, fleetFromSnapshot(m.snap.Sessions))
+		status = swDeferStyle.Render(verb+m.deferName+" ") + deferPromptText(m.deferInput, link.set())
 		statusStyled = false
 	case m.createBusy:
 		status = "creating session…"
@@ -1644,9 +1662,9 @@ func (m swModel) View() string {
 		footerText = "type a name · ↑↓ next match · enter jump · esc cancel"
 	}
 	if m.deferring {
-		footerText = "enter defer · esc cancel"
+		footerText = "enter defer · tab session · esc cancel"
 		if m.deferEditing {
-			footerText = "enter save · esc cancel"
+			footerText = "enter save · tab session · esc cancel"
 		}
 	}
 	footer := swStatusStyle.Render(footerText)

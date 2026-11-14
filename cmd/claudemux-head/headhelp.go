@@ -9,7 +9,7 @@ import (
 
 var headShortcuts = []string{
 	"R Reload head", "? Help", "s Refresh summary", "r Pin/unpin tab",
-	"Space Conduct/standby", "d Defer", "D Edit blocker", "t Open shell", "p Parent session",
+	"Space Conduct/standby", "d Defer (Tab: session)", "D Edit blocker", "t Open shell", "p Parent session",
 	"c Restart Claude: c resume / n fresh / Esc cancel",
 	"x Wrap up; x again when ready closes session", "X Direct close (press twice)",
 	"Esc Cancel armed close / quit head", "q/Ctrl+C Quit head (closes pane)",
@@ -17,7 +17,7 @@ var headShortcuts = []string{
 
 var switchboardShortcuts = []string{
 	"j/k/↑↓ Select", "Enter Jump to session", "/ Find session by name or PR #", "Esc Back to last session", "Space Conduct/standby",
-	"p Toggle preview", "n New session", "d Defer", "D Edit blocker",
+	"p Toggle preview", "n New session", "d Defer (Tab: session)", "D Edit blocker",
 	"R Reload switchboard", "Ctrl+R Reload all heads", "? Help", "q/Ctrl+C Quit switchboard",
 	"Restore offer: r restore all / s select / x dismiss",
 	"Restore picker: Space toggle / Enter restore / Esc back",

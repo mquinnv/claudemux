@@ -97,6 +97,19 @@ func TestDeferLinkedArgsReasonSemicolon(t *testing.T) {
 	}
 }
 
+// deferReasonArgs rewrites the reason alone: no mark, no link option, so an
+// edited blocker keeps a defer's value, link and seen flag as they were.
+func TestDeferReasonArgs(t *testing.T) {
+	want := []string{"set-option", "-t", "%1", deferReasonOption, `waiting\;`}
+	if got := deferReasonArgs("%1", " waiting; "); !reflect.DeepEqual(got, want) {
+		t.Errorf("set = %v, want %v", got, want)
+	}
+	want = []string{"set-option", "-t", "%1", "-u", deferReasonOption}
+	if got := deferReasonArgs("%1", "  "); !reflect.DeepEqual(got, want) {
+		t.Errorf("empty = %v, want %v", got, want)
+	}
+}
+
 func TestParseDeferMark(t *testing.T) {
 	m := parseDeferMark("wait\twaiting on x\tphenix-2\t1763000000\t1\n")
 	want := deferMark{Raw: "wait", Reason: "waiting on x", Link: deferLink{"phenix-2", "1763000000"}, Seen: true}

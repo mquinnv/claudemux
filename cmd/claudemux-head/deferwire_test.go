@@ -180,7 +180,7 @@ func TestDeferChipTextShowsDoneNote(t *testing.T) {
 		t.Errorf("deferChipText() = %q, want the defer chip while a mark is set", got)
 	}
 	m.deferMark, m.deferPrompting = deferMark{}, true
-	if got := m.deferChipText(); got != swDeferStyle.Render(deferPromptText("")) {
+	if got := m.deferChipText(); got != swDeferStyle.Render(deferPromptText("", false)) {
 		t.Errorf("deferChipText() = %q, want the blocker prompt while it is open", got)
 	}
 }
