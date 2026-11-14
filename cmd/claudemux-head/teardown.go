@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -54,9 +56,12 @@ func mainCheckoutFromCommonDir(out string) string {
 // --path-format (added in 2.31; without it the output could be relative and
 // unusable once dir is deleted).
 //
-// Called once at startup, while dir still exists: by the time a teardown needs
-// it, the wrap-up command may have deleted the working directory out from under
-// the process, leaving nowhere to run git from. That startup call is also why
+// Called once at startup, on the head's launch directory, while it still
+// exists: by the time a teardown needs it, the wrap-up command may have deleted
+// the working directory out from under the process, leaving nowhere to run git
+// from. (Arm time asks the same question of the session's cwd through
+// repoOwnerOf, which needs to know WHY there was no answer.) That startup call
+// is also why
 // this needs a deadline like every other subprocess in this feature, not
 // fewer: a hung git here (a network filesystem, a stalled credential helper)
 // would block newModel and the head would never render at all. "" is already
@@ -73,6 +78,68 @@ func mainCheckoutFor(dir string) string {
 		return ""
 	}
 	return mainCheckoutFromCommonDir(string(out))
+}
+
+// repoPlacement is what could be learned about which repository a directory
+// belongs to. The three ways of having no owner are kept apart because the
+// teardown target treats them differently — see cwdLeftLaunchRepo.
+type repoPlacement int
+
+const (
+	// repoUnknown: git could not answer (missing, timed out, any other
+	// failure). Nothing may be concluded from it.
+	repoUnknown repoPlacement = iota
+	// repoOwned: the directory is in a repository; owner is its main checkout.
+	repoOwned
+	// repoNone: the directory exists and git says it is in no repository.
+	repoNone
+	// repoGone: the directory no longer exists.
+	repoGone
+)
+
+// repoOwnerCache memoizes dir → main checkout for directories git placed. Which
+// repository a directory belongs to is fixed for the life of the directory, so
+// entries never expire. Only positive answers are kept: "unknown" must be asked
+// again, and a missing or repo-less directory is cheap to re-ask and could
+// become a repo.
+var repoOwnerCache sync.Map // string -> string
+
+// repoOwnerOf reports the main checkout of the repository containing dir, and
+// how sure that answer is. It is mainCheckoutFor for a caller that must not
+// mistake "git failed" for "not a repository".
+//
+// It runs on the Update loop, when a teardown is armed, so it carries the same
+// deadline as every other subprocess here and answers from repoOwnerCache when
+// it can.
+func repoOwnerOf(dir string) (owner string, placement repoPlacement) {
+	if dir == "" {
+		return "", repoUnknown
+	}
+	if v, ok := repoOwnerCache.Load(dir); ok {
+		return v.(string), repoOwned
+	}
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return "", repoGone
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+	defer cancel()
+	cmd := gitCmd(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	// The "not a repository" verdict is read off stderr, so pin the language.
+	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && bytes.Contains(exit.Stderr, []byte("not a git repository")) {
+			return "", repoNone
+		}
+		return "", repoUnknown
+	}
+	owner = mainCheckoutFromCommonDir(string(out))
+	if owner == "" {
+		return "", repoUnknown
+	}
+	repoOwnerCache.Store(dir, owner)
+	return owner, repoOwned
 }
 
 // worktreeIsGone reports whether the session's worktree has been torn down.
@@ -328,7 +395,9 @@ func teardownCommandTyped(prompt, command string) bool {
 // reason is the auto/non-worktree block's cleanliness gripe ("dirty tree",
 // "unpushed", ...) — empty for a worktree block, whose reason is always the
 // same fixed sentence below. When set it is appended in parens so the chip
-// says what's actually holding the gate shut, not just that it is shut.
+// says what's actually holding the gate shut, not just that it is shut. The
+// caller (model.teardownChipText) has already suffixed it with the directory
+// the reading came from: "dirty tree in remix".
 //
 // Every phase esc can still cancel says so (teardownEscHint): an auto-armed
 // watch in particular appears without the user pressing anything, and one
@@ -537,9 +606,12 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 
 // teardownProbeCmd takes one ready-gate reading.
 //
-// workDir is the SESSION's working directory as captured when the teardown was
-// armed (model.teardownWorkDir), not the head process's own cwd — the head is
-// launched in the main checkout even for sessions that work in a worktree.
+// workDir is the gate target captured when the teardown was armed
+// (model.teardownWorkDir). That is normally the SESSION's working directory
+// rather than the head process's own cwd — the head is launched in the main
+// checkout even for sessions that work in a worktree — and the launch
+// directory when the session's cwd is unknown or has left the launch repo (see
+// captureTeardownTarget).
 // checkClean selects the auto/non-worktree evidence (git cleanliness) instead
 // of worktree-goneness; both run under the same deadline.
 func teardownProbeCmd(workDir, mainCheckout string, checkClean bool) tea.Cmd {

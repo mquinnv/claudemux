@@ -222,3 +222,111 @@ func TestTeardownBlockedChipNamesTheDirectory(t *testing.T) {
 		t.Errorf("chip = %q, want it to name it-admin-docs", chip)
 	}
 }
+
+// Not being able to ask git is not an answer. A `git worktree add` sibling
+// carries no marker in its path, so with git unavailable at arm time it reads
+// as a plain directory that git cannot place — and falling back to the launch
+// checkout then would let a clean main checkout open the gate while the
+// session's real worktree is dirty and still standing. Uncertainty keeps the
+// session cwd, which holds the gate shut.
+func TestTeardownTargetKeepsSessionCwdWhenGitCannotAnswer(t *testing.T) {
+	launch, worktree := initRepoWithWorktree(t, "webapp-feature")
+	m := launchedIn(launch)
+	m.sessionCwd = worktree
+	t.Setenv("PATH", t.TempDir()) // no git from here on
+
+	got, _ := pollPrompt(m, "/done", time.Now())
+
+	if got.teardown != teardownSent {
+		t.Fatalf("phase = %v, want teardownSent", got.teardown)
+	}
+	if got.teardownWorkDir != worktree {
+		t.Errorf("gate target = %q, want the session cwd %q while git cannot answer", got.teardownWorkDir, worktree)
+	}
+}
+
+// The fallback describes the launch directory in full: a head launched in a
+// linked worktree falls back to that worktree AND to the worktree-gone gate,
+// not to a cleanliness check of it.
+func TestTeardownTargetFallsBackToLaunchWorktree(t *testing.T) {
+	_, launchWorktree := initRepoWithWorktree(t, "webapp-feature")
+	other := initPlainRepo(t, "elsewhere")
+	m := launchedIn(launchWorktree)
+	m.sessionCwd = other
+
+	got, _ := m.teardownKey()
+
+	if got.teardownWorkDir != launchWorktree {
+		t.Errorf("gate target = %q, want the launch worktree %q", got.teardownWorkDir, launchWorktree)
+	}
+	if !got.teardownInWorktree {
+		t.Error("inWorktree = false after falling back to a launch directory that is a linked worktree")
+	}
+}
+
+// The peer flag describes the newest prompt only. Every handed-off session
+// starts with a peer brief, and a wrap-up typed after it must still arm.
+func TestTeardownAutoArmsFromTypedCommandAfterPeerBrief(t *testing.T) {
+	m := teardownTestModel()
+	now := time.Now()
+	brief := dataMsg{time: now, rateLimitErr: errors.New("no rate limits in this test")}
+	brief.newEvents = []Event{{
+		Type:      "user",
+		IsMeta:    true,
+		PeerBrief: true,
+		UserText:  "AG-1482: fix the wrap-up gate",
+		Timestamp: now.Format(time.RFC3339),
+	}}
+	next, _ := m.Update(brief)
+	m = next.(model)
+	if m.teardown != teardownIdle {
+		t.Fatalf("phase after the brief = %v, want teardownIdle", m.teardown)
+	}
+
+	got, _ := pollPrompt(m, "/done", now.Add(time.Minute))
+
+	if got.teardown != teardownSent || !got.teardownAuto {
+		t.Errorf("phase = %v auto = %v, want an auto-armed teardownSent", got.teardown, got.teardownAuto)
+	}
+}
+
+// An open gate closes when the session resumes, except for the wrap-up
+// command itself. A peer's message that merely opens with the command's name
+// is the session resuming: it starts a turn, and the evidence the gate opened
+// on predates whatever that turn does.
+func TestTeardownReadyGateReopensOnPeerMessage(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownReady
+	m.teardownSubmitted = true
+	now := time.Now()
+	msg := dataMsg{time: now, rateLimitErr: errors.New("no rate limits in this test")}
+	msg.newEvents = []Event{{
+		Type:      "user",
+		IsMeta:    true,
+		PeerBrief: true,
+		UserText:  "/done completed for PR #126: worktree and branch removed",
+		Timestamp: now.Format(time.RFC3339),
+	}}
+
+	next, _ := m.Update(msg)
+	got := next.(model)
+
+	if got.teardown != teardownSent {
+		t.Errorf("phase = %v, want teardownSent: the gate must be re-earned after a peer message", got.teardown)
+	}
+}
+
+// A worktree block has no cleanliness reason, and must keep its own sentence
+// rather than grow a directory suffix.
+func TestTeardownWorktreeBlockChipHasNoDirectorySuffix(t *testing.T) {
+	m := teardownTestModel()
+	m.teardown = teardownSent
+	m.teardownBlocked = true
+	m.teardownBlockReason = ""
+
+	chip := m.teardownChipText(time.Now())
+
+	if !strings.Contains(chip, "worktree still present") || strings.Contains(chip, " in ") {
+		t.Errorf("chip = %q, want the plain worktree-block sentence", chip)
+	}
+}

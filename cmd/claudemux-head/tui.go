@@ -259,8 +259,8 @@ type model struct {
 	firstPrompt string
 	lastPrompt  string
 	// lastTyped is the newest prompt from a real `user` turn — see
-	// lastTypedPrompt. Only the teardown watch reads it; everything
-	// user-facing uses lastPrompt.
+	// lastTypedPrompt. The teardown watch reads it and statepub.go publishes
+	// it as the pane's prompt option; the head's own display uses lastPrompt.
 	lastTyped string
 	// lastTypedPeer marks lastTyped as a peer session's message rather than
 	// something typed into this pane.
@@ -395,8 +395,9 @@ type model struct {
 	// simply stays shut.
 	teardownBlocked bool
 	// teardownBlockReason is why an auto-armed non-worktree gate is shut
-	// ("dirty tree", "unpushed", ...). Rendered beside the blocked chip;
-	// empty for worktree blocks, whose reason is always the same (the
+	// ("dirty tree", "unpushed", ...). Rendered beside the blocked chip with
+	// the target directory's name appended (teardownChipText); empty for
+	// worktree blocks, whose reason is always the same (the
 	// worktree still exists).
 	teardownBlockReason string
 	teardownProbing     bool
@@ -459,12 +460,15 @@ type model struct {
 	// command may delete it out from under this process: once it is gone
 	// os.Getwd() fails, so it cannot be re-derived at the moment it is needed.
 	// It serves as the fallback gate target when no sessionCwd has been
-	// observed yet, and as the directory `r` resets the tab from.
+	// observed yet or the session's cwd has left the launch repo (see
+	// captureTeardownTarget), and as the directory `r` resets the tab from.
 	//
 	// mainCheckout is captured at startup for the same reason — there is no
-	// valid cwd left to run git from. It needs no session-cwd equivalent: a
-	// linked worktree belongs to the same repo as the checkout the head was
-	// launched in, so this is still the right place to run `git worktree list`.
+	// valid cwd left to run git from. It needs no session-cwd equivalent:
+	// captureTeardownTarget only keeps a session cwd that belongs to this
+	// same repo, so this is still the right place to run `git worktree list`.
+	// It is also what identifies the launch repo for that check
+	// (cwdLeftLaunchRepo).
 	//
 	// inWorktree describes workDir, and is likewise only the gate's fallback.
 	workDir      string
@@ -905,8 +909,8 @@ func lastUserPrompt(events []Event) string {
 	return ""
 }
 
-// lastTypedPrompt returns the text of the most recent thing the user actually
-// typed, considering only real `user` turns.
+// lastTypedPrompt returns the text of the most recent prompt delivered as a
+// real `user` turn: typed into the pane, or sent by a peer session (fromPeer).
 //
 // This is deliberately narrower than lastUserPrompt, which also accepts Claude
 // Code's `last-prompt` bookkeeping events. Those are written for the status
@@ -922,7 +926,7 @@ func lastUserPrompt(events []Event) string {
 // fromPeer reports that the prompt is another session's message (see
 // Event.PeerBrief) rather than something typed into this pane. Such a message
 // is a prompt for every display purpose, but it is never a slash command being
-// run: see autoArmTeardown.
+// run: see typedTeardownCommand, which every wrap-up check goes through.
 func lastTypedPrompt(events []Event) (text string, fromPeer bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		if e := events[i]; e.Type == "user" && genuinePrompt(e) {
@@ -1726,7 +1730,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSession(msg.activeJSONL, msg.time)
 				m.autoArmTeardown(prevTyped, msg.time)
 				if m.teardown == teardownReady && m.lastTyped != prevTyped &&
-					!teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
+					!m.typedTeardownCommand() {
 					m = m.reopenTeardownGate(msg.time)
 				}
 				if m.teardown == teardownDirect && m.lastTyped != prevTyped {
@@ -1776,7 +1780,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// reopenTeardownGate for why that is back to watching, not idle.
 		switch m.teardown {
 		case teardownReady:
-			if m.lastTyped != prevTyped && !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
+			if m.lastTyped != prevTyped && !m.typedTeardownCommand() {
 				return m.reopenTeardownGate(msg.time), allPub
 			}
 		case teardownDirect:
@@ -3113,14 +3117,7 @@ func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 	if m.lastTyped == prevTyped {
 		return
 	}
-	if !teardownCommandTyped(m.lastTyped, m.teardownCmdText) {
-		return
-	}
-	if m.lastTypedPeer {
-		// A peer session's message that opens with the command's name — a
-		// delegate reporting "/done completed for PR #126: ..." — is prose
-		// about a wrap-up somewhere else, not the user running one here
-		// (AG-1482: it armed the watch on a session mid-work).
+	if !m.typedTeardownCommand() {
 		return
 	}
 	m.captureTeardownTarget()
@@ -3142,6 +3139,18 @@ func (m *model) autoArmTeardown(prevTyped string, now time.Time) {
 	m.teardownProbeAt = time.Time{}
 	m.teardownNote = ""
 	m.teardownAuto = true
+}
+
+// typedTeardownCommand reports whether the newest prompt is the user running
+// the wrap-up command in this pane.
+//
+// A peer session's message that merely opens with the command's name — a
+// delegate reporting "/done completed for PR #126: ..." — is prose about a
+// wrap-up somewhere else. It must neither arm the watch (AG-1482: it did, on a
+// session mid-work) nor pass as "the wrap-up itself" and keep an open gate
+// open: for this session it is new work arriving.
+func (m model) typedTeardownCommand() bool {
+	return !m.lastTypedPeer && teardownCommandTyped(m.lastTyped, m.teardownCmdText)
 }
 
 // captureTeardownTarget records the directory the ready gate will watch, and
@@ -3185,25 +3194,44 @@ func (m *model) captureTeardownTarget() {
 // directory, is outside the repository the head was launched in (workDir,
 // whose main checkout is mainCheckout).
 //
-// A head launched outside any repo has no checkout of its own to prefer, so
-// nothing counts as having left it. Otherwise the two repos are compared by
-// main checkout, which a checkout shares with its subdirectories and with
-// every one of its linked worktrees.
+// A head with no known launch checkout — launched outside any repo, or whose
+// startup git call failed — has nothing to prefer, so nothing counts as having
+// left it. Otherwise the two repos are compared by main checkout, which a
+// checkout shares with its subdirectories and with every one of its linked
+// worktrees.
 //
-// "Can't tell" is read differently for the two kinds of cwd. A worktree the
-// wrap-up already removed can no longer be asked which repo it belongs to, and
-// it is exactly the target the worktree gate needs, so an unanswerable
-// worktree cwd stays. A plain directory that git cannot place is either
-// outside every repo or gone; neither has a tree to judge.
+// Only a positive answer moves the target, because moving it swaps which
+// evidence opens a gate on a kill-session:
+//
+//   - Git places the cwd in another repository: left.
+//   - Git says the cwd is in no repository: left. There is no tree to judge.
+//   - The cwd is gone. A worktree the wrap-up already removed is exactly the
+//     target the worktree gate needs, so it stays (it is taken to be this
+//     session's own: a vanished worktree cannot be attributed to a repo). A
+//     vanished plain directory has no tree to judge: left.
+//   - Git could not answer (missing, timed out): NOT left. A `git worktree add`
+//     sibling has no marker in its path, so the same outage also makes it look
+//     like a plain directory; falling back then would let a clean main
+//     checkout open the gate while the session's real worktree stands dirty.
+//     Keeping the cwd is the old behaviour, which blocks.
+//
+// The cost of falling back is stated plainly: a session that did real work in
+// another repository is judged on the launch repo alone. The gate vouches for
+// the session's own checkout, not for everything its shell visited.
 func cwdLeftLaunchRepo(cwd string, inWorktree bool, workDir, mainCheckout string) bool {
 	if workDir == "" || mainCheckout == "" || cwd == workDir {
 		return false
 	}
-	owner := mainCheckoutFor(cwd)
-	if owner == "" {
+	owner, placement := repoOwnerOf(cwd)
+	switch placement {
+	case repoOwned:
+		return !samePath(owner, mainCheckout)
+	case repoNone:
+		return true
+	case repoGone:
 		return !inWorktree
 	}
-	return !samePath(owner, mainCheckout)
+	return false
 }
 
 // samePath compares two directories with symlinks resolved, so a path git
