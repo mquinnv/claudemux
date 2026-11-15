@@ -58,13 +58,17 @@ the one captured when the prompt opened, sanitised the usual way.
 
 **Delivery.** Typed into the session's claude pane and submitted with the
 literal-then-delayed-Enter sequence teardown already uses, factored out of
-`teardownSendCmd` so both callers share it. No `C-u` first: a draft the user
-left in Claude's input is kept, and the message is appended to it. The lobby
+`teardownSendCmd` so both callers share it. `C-u` goes first, as in teardown:
+the line is cleared so the message can never be glued onto a draft, run in bash
+mode (`!`), or become a slash command. The message is submitted before the
+defer mark is cleared, so the conductor cannot carry the user into the session
+before the prompt is in, and the lobby holds the conductor for a few seconds
+after a send. The lobby
 targets the row's `ClaudePane`; the head resolves its pane as teardown does. A
 session that is mid-turn gets the message queued by Claude, which is fine.
 
-**Guard.** If the session's state is a permission prompt, the folder trust
-prompt, or still starting, or no claude pane is known, nothing is typed into
+**Guard.** If the session's state is a permission prompt, a question dialog,
+the folder trust prompt, or still starting, or no claude pane is known, nothing is typed into
 it. The prompt still opens and says why it cannot send; enter with text does
 nothing while that holds, so the typed explanation and the defer both survive
 until the session can take it. Enter on an empty line still clears silently.
@@ -82,5 +86,5 @@ section, describe the new behaviour.
 ## Calls made by Claude, not Michael
 
 Everything under Design except the inline approach itself: the message
-wording, no `C-u`, WAIT marks using the same prompt, and the guard clearing
+wording, WAIT marks using the same prompt, and the guard clearing
 nothing and holding the prompt open (Michael: "do what makes sense").

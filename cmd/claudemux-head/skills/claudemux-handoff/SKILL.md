@@ -71,4 +71,4 @@ When the peer replies or goes idle, clear the defer first, then relay what it re
 ```bash
 tmux set-option -t "$TMUX_PANE" -u @claudemux_defer \; set-option -t "$TMUX_PANE" -u @claudemux_defer_reason
 ```
-Clear it the same way if the user comes back with other work while you wait. Only ever clear a defer this session set.
+Clear it the same way if the user comes back with other work while you wait. Only ever clear a defer this session set. If the user sends a message starting `Blocker cleared`, they have already cleared the mark from the lobby or status pane, so do not clear it again: a later unset could remove a defer they set in between.
