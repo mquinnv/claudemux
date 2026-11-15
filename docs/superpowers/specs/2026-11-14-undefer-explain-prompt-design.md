@@ -64,11 +64,10 @@ targets the row's `ClaudePane`; the head resolves its pane as teardown does. A
 session that is mid-turn gets the message queued by Claude, which is fine.
 
 **Guard.** If the session's state is a permission prompt, the folder trust
-prompt, or still starting, nothing is typed into it:
-
-- at `d`: the prompt does not open; the defer clears immediately as today.
-- at enter (state changed while typing): the defer clears and a note says the
-  message was not sent and why. Same note when no claude pane is known.
+prompt, or still starting, or no claude pane is known, nothing is typed into
+it. The prompt still opens and says why it cannot send; enter with text does
+nothing while that holds, so the typed explanation and the defer both survive
+until the session can take it. Enter on an empty line still clears silently.
 
 **Docs.** Help entries and footers on both surfaces, plus the README's defer
 section, describe the new behaviour.
@@ -84,4 +83,4 @@ section, describe the new behaviour.
 
 Everything under Design except the inline approach itself: the message
 wording, no `C-u`, WAIT marks using the same prompt, and the guard clearing
-the defer rather than refusing.
+nothing and holding the prompt open (Michael: "do what makes sense").
