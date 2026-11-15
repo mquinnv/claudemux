@@ -1414,19 +1414,6 @@ func TestSwModelShiftDEmptyListNoop(t *testing.T) {
 	}
 }
 
-// d on an already-deferred row opens the undefer prompt rather than clearing
-// at once; nothing is sent to tmux until enter.
-func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
-	m := swUndeferModel("Idle")
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if cmd != nil {
-		t.Fatal("d on a deferred row must open the prompt, not fire")
-	}
-	if got := next.(swModel); !got.deferring || !got.deferClearing {
-		t.Errorf("deferring = %v clearing = %v, want the undefer prompt", got.deferring, got.deferClearing)
-	}
-}
-
 // swUndeferModel is swTestModel with "web" selected, deferred on "waiting on
 // Ana", and carrying a claude pane in the given published state.
 func swUndeferModel(state string) swModel {
@@ -1517,6 +1504,81 @@ func TestUndeferSessionAlreadyClear(t *testing.T) {
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if got := next.(swModel); got.deferring || cmd == nil {
 		t.Errorf("deferring=%v cmd=%v, want closed prompt and a cmd", got.deferring, cmd != nil)
+	}
+}
+
+func TestUndeferSessionGone(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Idle"), "ok")
+	m.snap.Sessions = []swSession{m.snap.Sessions[0], m.snap.Sessions[2]}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(swModel); got.deferring || got.deferClearing || cmd != nil {
+		t.Errorf("deferring=%v clearing=%v cmd=%v, want a closed prompt and no command", got.deferring, got.deferClearing, cmd != nil)
+	}
+}
+
+// Sending text holds the conductor so it cannot carry the user into the
+// session they just unblocked; the silent blank-enter clear sets no hold.
+func TestUndeferHoldSetOnlyWhenSending(t *testing.T) {
+	before := time.Now()
+	sent, _ := swKeyRunes(swOpenUndefer(t, "Idle"), "ok").Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := sent.(swModel).undeferHoldUntil; got.Before(before.Add(undeferHold)) {
+		t.Errorf("hold = %v after a send, want at least %v", got, before.Add(undeferHold))
+	}
+	blank, _ := swOpenUndefer(t, "Idle").Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := blank.(swModel).undeferHoldUntil; !got.IsZero() {
+		t.Errorf("hold = %v after a blank enter, want none", got)
+	}
+	// A blocked send keeps the prompt open and holds nothing.
+	blocked, _ := swKeyRunes(swOpenUndefer(t, "Awaiting"), "ok").Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := blocked.(swModel).undeferHoldUntil; !got.IsZero() {
+		t.Errorf("hold = %v after a blocked enter, want none", got)
+	}
+}
+
+func TestUndeferHeld(t *testing.T) {
+	now := time.Now()
+	m := swTestModel()
+	if m.undeferHeld(now) {
+		t.Error("a fresh model must not be held")
+	}
+	m.undeferHoldUntil = now.Add(time.Second)
+	if !m.undeferHeld(now) {
+		t.Error("before the deadline the conductor must be held")
+	}
+	if m.undeferHeld(now.Add(time.Second)) {
+		t.Error("at the deadline the hold must be over")
+	}
+}
+
+// While the hold is live the conductor sits out a poll that would dispatch it,
+// as it does for the prompts; once it lapses the same poll dispatches.
+func TestUndeferHoldSuppressesConductor(t *testing.T) {
+	snap := swSnapshot{
+		Sessions: []swSession{{Name: "api", State: "Idle", Since: time.Unix(100, 0)}},
+		Lobby:    "switchboard",
+		Clients:  map[string]string{"/dev/ttys001": "switchboard"},
+	}
+	m := swTestModel()
+	m.undeferHoldUntil = time.Now().Add(time.Minute)
+	next, _ := m.Update(swSnapshotMsg{snap: snap})
+	if got := next.(swModel); got.cond.phase != swParked || got.cond.escortee != "" {
+		t.Errorf("conductor dispatched during the hold: phase=%v escortee=%q", got.cond.phase, got.cond.escortee)
+	}
+	m.undeferHoldUntil = time.Now().Add(-time.Second)
+	next, _ = m.Update(swSnapshotMsg{snap: snap})
+	if got := next.(swModel); got.cond.phase == swParked && got.cond.escortee == "" {
+		t.Error("conductor did not dispatch once the hold lapsed")
+	}
+}
+
+// D opens the plain blocker prompt, so it must not inherit a stale clearing
+// flag or blocker from an earlier undefer.
+func TestDeferEditKeyResetsUndeferState(t *testing.T) {
+	m := swUndeferModel("Idle")
+	m.deferClearing, m.deferWas = true, "stale"
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if got := next.(swModel); !got.deferring || got.deferClearing || got.deferWas != "" {
+		t.Errorf("deferring=%v clearing=%v was=%q, want an edit prompt with no undefer state", got.deferring, got.deferClearing, got.deferWas)
 	}
 }
 

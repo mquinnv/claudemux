@@ -385,11 +385,14 @@ type swModel struct {
 	// deferEditing marks the `D`-on-a-deferred-row case, where the prompt
 	// starts pre-filled and is wording-wise an edit rather than a new defer;
 	// the tmux write is identical either way.
-	deferring    bool
-	deferInput   string
-	deferTarget  string
-	deferName    string
-	deferEditing bool
+	deferring bool
+	// undeferHoldUntil keeps the conductor from stepping until then — set when
+	// an undefer sends text, see undeferHold.
+	undeferHoldUntil time.Time
+	deferInput       string
+	deferTarget      string
+	deferName        string
+	deferEditing     bool
 	// deferClearing marks `d` on a deferred row: the prompt asks what
 	// unblocked it, and enter tells the session. deferWas is the blocker
 	// recorded when it opened, kept because the snapshot may move on while
@@ -835,10 +838,12 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// restore picker: dispatching the client away mid-typing (or
 		// mid-checklist) would yank the user off the prompt, and dispatching
 		// while a launch is in flight would race the switch the launch is
-		// about to issue itself.
+		// about to issue itself. It also sits out undeferHold: the session the
+		// user just told why it is unblocked would otherwise pull them in.
 		pv := m.previewCmd()
-		if !m.standby && !m.creating && !m.finding && !m.createBusy && !m.deferring && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
-			if act, ok := m.cond.step(m.snap, time.Now()); ok {
+		now := time.Now()
+		if !m.standby && !m.creating && !m.finding && !m.createBusy && !m.deferring && !m.undeferHeld(now) && !m.helpVisible && !(m.restore != nil && m.restore.picking) {
+			if act, ok := m.cond.step(m.snap, now); ok {
 				return m, tea.Batch(swNextTick(),
 					swSwitchCmd(act.Client, act.Target, m.bannerFor(act.Target)), pv, pub, restoreScan, creditCmd)
 			}
@@ -1130,6 +1135,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sess := m.snap.Sessions[m.sel]
 				m.deferring = true
 				m.deferInput = ""
+				m.deferClearing = false
+				m.deferWas = ""
 				m.deferEditing = sess.Deferred
 				if sess.Deferred {
 					m.deferInput = sanitizeDeferReason(sess.DeferReason)
@@ -1926,7 +1933,23 @@ func (m swModel) undeferEnter() (tea.Model, tea.Cmd) {
 	}
 	msg := undeferMessage(m.deferWas, m.deferInput)
 	m.closeDeferPrompt()
+	m.undeferHoldUntil = time.Now().Add(undeferHold)
 	return m, undeferCmd(target, sess.ClaudePane, msg)
+}
+
+// undeferHold is how long the conductor sits out after an undefer that sends
+// text. undeferCmd types the note, waits teardownKeyDelay, then presses Enter,
+// and only then clears the defer mark; the head still has to publish the new
+// working state on its next poll. Until then the session can read as waiting
+// and undeferred, and the conductor would carry the user into the session they
+// just unblocked. 3s covers the Enter delay plus that publish. A blank-enter
+// clear sets no hold: carrying the user to a silently cleared session is the
+// intended behaviour.
+const undeferHold = 3 * time.Second
+
+// undeferHeld reports whether an undefer's hold is still live at now.
+func (m swModel) undeferHeld(now time.Time) bool {
+	return now.Before(m.undeferHoldUntil)
 }
 
 // swDeferTarget is the tmux target the lobby toggles @claudemux_defer on.
