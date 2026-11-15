@@ -549,6 +549,65 @@ type teardownProbeMsg struct {
 // claudeGoneMsg reports whether the pane /exit was typed into has exited.
 type claudeGoneMsg struct{ gone bool }
 
+// promptKeysArgs builds the tmux calls that type text into pane and submit it:
+// pre runs first (the optional clear, then the literal text) and enter runs
+// after teardownKeyDelay. ok is false when pane or text is empty, so a failed
+// lookup types nothing.
+//
+// clear selects whether the input line is emptied first (see sendClearArgs).
+// Teardown wants it: the line must hold exactly the wrap-up text. Undefer does
+// not: a draft the user left half-typed in claude's input is theirs to keep,
+// and the message is typed after it rather than destroying it.
+func promptKeysArgs(pane, text string, clear bool) (pre [][]string, enter []string, ok bool) {
+	literal, ok := sendLiteralArgs(pane, text)
+	if !ok {
+		return nil, nil, false
+	}
+	enter, ok = sendEnterArgs(pane)
+	if !ok {
+		return nil, nil, false
+	}
+	if clear {
+		c, _ := sendClearArgs(pane) // pane is non-empty, checked above
+		pre = append(pre, c)
+	}
+	return append(pre, literal), enter, true
+}
+
+// sendPromptKeys types text into pane's claude input and submits it, blocking
+// for teardownKeyDelay — call it off the Update loop. See promptKeysArgs for
+// clear.
+//
+// Each tmux call gets its OWN deadline, per teardownTmuxTimeout's contract. A
+// single shared context would have to cover every subprocess plus the
+// teardownKeyDelay sleep, leaving the Enter with whatever fraction of the 2s
+// the earlier sends did not consume — so a slow-but-successful first call
+// could cancel a later one and report a failure to submit that never happened.
+//
+// The clear, when asked for, goes first so the line holds exactly text and
+// nothing that was already sitting in it — see sendClearArgs. No delay between
+// it and the literal: both are plain keystrokes claude consumes in order, and
+// there is no completion popup to outrun. The delay sits before the Enter
+// only — see teardownKeyDelay.
+func sendPromptKeys(pane, text string, clear bool) error {
+	pre, enter, ok := promptKeysArgs(pane, text, clear)
+	if !ok {
+		return errors.New("no pane or text to send")
+	}
+	run := func(args []string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
+		defer cancel()
+		return exec.CommandContext(ctx, "tmux", args...).Run()
+	}
+	for _, args := range pre {
+		if err := run(args); err != nil {
+			return err
+		}
+	}
+	time.Sleep(teardownKeyDelay) // see teardownKeyDelay
+	return run(enter)
+}
+
 // teardownSendCmd types text into the session's claude pane and submits it.
 //
 // The pane is resolved here rather than cached on the model so it is always
@@ -560,48 +619,8 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 		if !ok || pane == "" {
 			return teardownSentMsg{note: "no claude pane"}
 		}
-		// Each tmux call gets its OWN deadline, per teardownTmuxTimeout's
-		// contract. A single shared context would have to cover all three
-		// subprocesses plus the teardownKeyDelay sleep, leaving the Enter
-		// with whatever fraction of the 2s the earlier sends did not consume
-		// — so a slow-but-successful first call could cancel a later one and
-		// report a failure to submit that never happened.
-		//
-		// The clear goes first so the line holds exactly text and nothing
-		// that was already sitting in it — see sendClearArgs. No delay
-		// between it and the literal: both are plain keystrokes claude
-		// consumes in order, and there is no completion popup to outrun.
-		clear, ok := sendClearArgs(pane)
-		if !ok {
-			return teardownSentMsg{note: "wrap-up didn't submit"}
-		}
-		clearCtx, cancelClear := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-		err := exec.CommandContext(clearCtx, "tmux", clear...).Run()
-		cancelClear()
-		if err != nil {
-			return teardownSentMsg{note: "wrap-up didn't submit"}
-		}
-
-		literal, ok := sendLiteralArgs(pane, text)
-		if !ok {
-			return teardownSentMsg{note: "wrap-up didn't submit"}
-		}
-		literalCtx, cancelLiteral := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-		err = exec.CommandContext(literalCtx, "tmux", literal...).Run()
-		cancelLiteral()
-		if err != nil {
-			return teardownSentMsg{note: "wrap-up didn't submit"}
-		}
-
-		time.Sleep(teardownKeyDelay) // see teardownKeyDelay; this runs off the Update loop
-
-		enter, ok := sendEnterArgs(pane)
-		if !ok {
-			return teardownSentMsg{note: "wrap-up didn't submit"}
-		}
-		enterCtx, cancelEnter := context.WithTimeout(context.Background(), teardownTmuxTimeout)
-		defer cancelEnter()
-		if err := exec.CommandContext(enterCtx, "tmux", enter...).Run(); err != nil {
+		// clear=true: the wrap-up must be exactly what is on the line.
+		if err := sendPromptKeys(pane, text, true); err != nil {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
 		// Success here means the keystrokes were delivered, NOT that claude

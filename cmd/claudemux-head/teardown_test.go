@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -523,4 +524,23 @@ func TestGitCleanReason(t *testing.T) {
 			t.Errorf("got %q, want %q", got, "probe failed")
 		}
 	})
+}
+
+func TestPromptKeysArgs(t *testing.T) {
+	pre, enter, ok := promptKeysArgs("%2", "-p x;", true)
+	if !ok || len(pre) != 2 ||
+		!reflect.DeepEqual(pre[0], []string{"send-keys", "-t", "%2", "C-u"}) ||
+		!reflect.DeepEqual(pre[1], []string{"send-keys", "-t", "%2", "-l", "--", "-p x;"}) ||
+		!reflect.DeepEqual(enter, []string{"send-keys", "-t", "%2", "Enter"}) {
+		t.Fatalf("clear=true: pre=%v enter=%v ok=%v", pre, enter, ok)
+	}
+	if pre, _, ok := promptKeysArgs("%2", "hi", false); !ok || len(pre) != 1 || pre[0][3] != "-l" {
+		t.Fatalf("clear=false must send only the literal, got %v", pre)
+	}
+	if _, _, ok := promptKeysArgs("", "hi", false); ok {
+		t.Fatal("empty pane must not be ok")
+	}
+	if _, _, ok := promptKeysArgs("%2", "", false); ok {
+		t.Fatal("empty text must not be ok")
+	}
 }

@@ -105,3 +105,35 @@ func TestDeferInputKey(t *testing.T) {
 		t.Errorf("deferInputKey sequence = %q, want %q", in, "CI ")
 	}
 }
+
+func TestUndeferMessage(t *testing.T) {
+	if got := undeferMessage("waiting on Ana", " she approved "); got != "Blocker cleared (was: waiting on Ana): she approved" {
+		t.Errorf("got %q", got)
+	}
+	if got := undeferMessage("  ", "CI is green"); got != "Blocker cleared: CI is green" {
+		t.Errorf("got %q", got)
+	}
+	// Control characters in either part are flattened, as sanitizeDeferReason does.
+	if got := undeferMessage("a\tb", "c\nd"); got != "Blocker cleared (was: a b): c d" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestUndeferBlocked(t *testing.T) {
+	for _, c := range []struct{ state, pane, want string }{
+		{"Idle", "%2", ""}, {"Thinking", "%2", ""}, {"Asking", "%2", ""},
+		{"Awaiting", "%2", "on a permission prompt"},
+		{"Starting", "%2", "still starting"},
+		{"Idle", "", "no claude pane"},
+	} {
+		if got := undeferBlocked(c.state, c.pane); got != c.want {
+			t.Errorf("undeferBlocked(%q, %q) = %q, want %q", c.state, c.pane, got, c.want)
+		}
+	}
+}
+
+func TestUndeferPromptText(t *testing.T) {
+	if got := undeferPromptText("ok"); got != "◆ unblocked: ok▌" {
+		t.Errorf("got %q", got)
+	}
+}

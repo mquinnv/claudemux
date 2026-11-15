@@ -102,6 +102,63 @@ func setDeferCmd(target string, on bool, reason string) tea.Cmd {
 	}
 }
 
+// undeferPromptText is the text of the "what unblocked it?" prompt both
+// surfaces show while `d` on a deferred session is collecting a note: the
+// typed input with a cursor after it.
+func undeferPromptText(input string) string {
+	return "◆ unblocked: " + input + "▌"
+}
+
+// undeferMessage is what the session is told when its blocker clears: the
+// user's note, led by the blocker it was deferred for when one was recorded, so
+// the session can tell which wait just ended. Both parts are flattened like any
+// defer text — the message is typed into claude's input as one line, and a
+// stray newline would submit it early.
+func undeferMessage(blocker, text string) string {
+	text = sanitizeDeferReason(text)
+	if blocker = sanitizeDeferReason(blocker); blocker != "" {
+		return "Blocker cleared (was: " + blocker + "): " + text
+	}
+	return "Blocker cleared: " + text
+}
+
+// undeferBlocked reports why a message cannot be typed into the session's
+// claude input right now, or "" when it can. state is a statePublishValue
+// string. Typing into a permission prompt would answer it with the message's
+// first character, and a starting session may not have an input to type into.
+func undeferBlocked(state, claudePane string) string {
+	switch {
+	case claudePane == "":
+		return "no claude pane"
+	case state == "Awaiting":
+		return "on a permission prompt"
+	case state == "Starting":
+		return "still starting"
+	}
+	return ""
+}
+
+// undeferCmd clears target's defer mark and, when message is non-empty, tells
+// the session in claudePane why. The mark clears first and under the same hard
+// deadline as setDeferCmd, so a wedged tmux cannot block Update and a failed
+// send still leaves the session undeferred. Errors are dropped like
+// setDeferCmd's.
+//
+// The message goes through sendPromptKeys with clear=false: unlike a teardown,
+// an undefer must not destroy a draft the user left in claude's input.
+func undeferCmd(target, claudePane, message string) tea.Cmd {
+	args := deferArgs(target, false, "")
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		if message != "" {
+			_ = sendPromptKeys(claudePane, message, false)
+		}
+		return nil
+	}
+}
+
 // readDeferOption fetches the raw mark and its blocker for the head's poll in
 // one tmux call. An unset option expands to an empty string, and a failed
 // read is "" for both, same as readConductOption.
