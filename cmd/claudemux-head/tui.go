@@ -339,7 +339,7 @@ type model struct {
 	// deferClearing turns that prompt around: `d` on a deferred session asks
 	// what unblocked it rather than for a blocker, and enter clears the defer
 	// and tells the session. deferWas is the blocker recorded when it opened,
-	// kept because the poll may refresh deferReason while the user types.
+	// kept because the poll may refresh deferMark.Reason while the user types.
 	deferClearing bool
 	deferWas      string
 	// undeferNote means the last undefer's message could not be typed into
@@ -3000,7 +3000,9 @@ func formatDuration(d time.Duration) string {
 // reason is a note, not a gate); esc and ctrl+c back out without changing
 // anything, which for a `D` edit leaves the recorded blocker as it was. Every
 // other key edits the text, so q or esc can't quit the pane mid-sentence;
-// Tab and Shift+Tab complete other sessions' names (deferPromptEdit).
+// Tab and Shift+Tab complete other sessions' names (deferPromptEdit). In the
+// undefer direction enter goes to undeferEnter and the text is plain: there is
+// nothing to complete.
 func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
@@ -3090,7 +3092,9 @@ func (m model) deferChipText() string {
 		_, link := deferSubmit(m.deferInput, self, rows)
 		return swDeferStyle.Render(deferPromptText(m.deferInput, link.set()))
 	}
-	if m.undeferNote {
+	// Only while the mark is still set: once it clears some other way the
+	// note would be a lie, and would hide the done note.
+	if m.undeferNote && isDeferValue(m.deferMark.Raw) {
 		return swDeferStyle.Render("◆ " + undeferNotSent)
 	}
 	if c := deferChip(m.deferMark.Raw, m.deferMark.Reason); c != "" {

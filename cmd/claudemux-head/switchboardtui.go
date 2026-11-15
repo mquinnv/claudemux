@@ -988,7 +988,11 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.sent {
 			m.undeferNote = msg.name + " " + undeferNotSent
 			m.undeferHoldUntil = time.Time{}
+			return m, nil
 		}
+		// Sent: restart the hold from now. A slow tmux can take longer than
+		// undeferHold between enter and the mark clearing.
+		m.undeferHoldUntil = time.Now().Add(undeferHold)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1659,9 +1663,6 @@ func (m swModel) View() string {
 	case m.deferring && m.deferClearing:
 		status = swDeferStyle.Render("undefer "+m.deferName+" ") + undeferPromptText(m.deferInput)
 		statusStyled = false
-	case m.undeferNote != "":
-		status = swDeferStyle.Render(m.undeferNote)
-		statusStyled = false
 	case m.deferring:
 		verb := "defer "
 		if m.deferEditing {
@@ -1676,6 +1677,9 @@ func (m swModel) View() string {
 	case m.createErr != "":
 		status = "create failed: " + m.createErr
 		statusStyle = swStatusStyle
+	case m.undeferNote != "":
+		status = swDeferStyle.Render(m.undeferNote)
+		statusStyled = false
 	}
 	statusLine := status
 	if statusStyled {
