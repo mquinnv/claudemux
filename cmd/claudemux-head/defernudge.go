@@ -18,12 +18,10 @@ import (
 // pane. A longer tail means the bottom of the pane is something else.
 const promptTailLines = 3
 
-// promptPlaceholder is how claude's empty input box starts its hint text
-// (`Try "fix typecheck errors"`). Claude draws it dim (SGR 2); typed text is
-// plain, so only the dim rendering counts as the hint.
-const promptPlaceholder = `Try "`
-
-// sgrDim is the escape claude emits immediately before the placeholder.
+// sgrDim is the escape claude emits immediately before ghost text in the input
+// box: the `Try "fix typecheck errors"` hint of a fresh session and the
+// suggested next prompt (`/done`, "run the tests") it offers after a turn.
+// Typed text is plain, so only a wholly dim line counts as nothing typed.
 const sgrDim = "\x1b[2m"
 
 // promptEmpty reports whether a capture-pane -e (escapes kept) of the claude
@@ -32,8 +30,9 @@ const sgrDim = "\x1b[2m"
 // A wrong "true" types into someone's half-written message, so this keys on the
 // whole shape of the idle input box and nothing looser: the last two
 // horizontal rules of the capture must enclose exactly ONE line, that line
-// must be the "❯" prompt carrying either nothing or the dim placeholder hint
-// (a typed `Try "` is plain text and is a draft), and at most promptTailLines
+// must be the "❯" prompt carrying either nothing or only dim ghost text (the
+// placeholder hint or a suggested prompt; a typed `Try "` is plain text and
+// is a draft), and at most promptTailLines
 // lines may follow the bottom rule. A multi-line draft or a dialog
 // (permission, AskUserQuestion) puts several lines between the rules. A footer
 // naming a vim mode other than INSERT is false too; see vimNotInsert. With
@@ -76,12 +75,28 @@ func promptEmpty(capture string, vimMode bool) bool {
 	if rest == "" {
 		return true
 	}
-	if !strings.HasPrefix(rest, promptPlaceholder) {
+	return dimOnly(rawLines[top+1])
+}
+
+// dimOnly reports whether everything after the "❯" on a raw (escapes kept)
+// prompt line is drawn dim: the dim escape comes straight after the glyph and
+// its padding, and no other escape follows until the text has ended. Ghost
+// text typed over disappears; a draft, even one with a dim part, must not be
+// typed into, so any plain character or mid-line style change is a no.
+func dimOnly(raw string) bool {
+	_, after, ok := strings.Cut(raw, "❯")
+	if !ok {
 		return false
 	}
-	raw := rawLines[top+1]
-	i := strings.Index(raw, promptPlaceholder)
-	return i >= 0 && strings.HasSuffix(raw[:i], sgrDim)
+	body, ok := strings.CutPrefix(strings.TrimLeft(after, " \u00a0"), sgrDim)
+	if !ok {
+		return false
+	}
+	text, trailer, reset := strings.Cut(body, "\x1b")
+	if reset && strings.TrimSpace(ansi.Strip("\x1b"+trailer)) != "" {
+		return false
+	}
+	return strings.TrimSpace(text) != ""
 }
 
 // claudeVimMode reports whether claude's editor is in vim mode, read from the
