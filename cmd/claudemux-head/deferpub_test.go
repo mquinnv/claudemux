@@ -121,7 +121,8 @@ func TestUndeferMessage(t *testing.T) {
 
 func TestUndeferBlocked(t *testing.T) {
 	for _, c := range []struct{ state, pane, want string }{
-		{"Idle", "%2", ""}, {"Thinking", "%2", ""}, {"Asking", "%2", ""},
+		{"Idle", "%2", ""}, {"Thinking", "%2", ""},
+		{"Asking", "%2", "on a question"}, {"Tool:AskUserQuestion", "%2", "on a question"},
 		{"Awaiting", "%2", "on a permission prompt"},
 		{"Starting", "%2", "still starting"},
 		{"Idle", "", "no claude pane"},

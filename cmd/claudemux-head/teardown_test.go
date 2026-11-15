@@ -527,20 +527,31 @@ func TestGitCleanReason(t *testing.T) {
 }
 
 func TestPromptKeysArgs(t *testing.T) {
-	pre, enter, ok := promptKeysArgs("%2", "-p x;", true)
+	// The line is always cleared first, and a trailing ";" is escaped so tmux
+	// does not read it as a command separator.
+	pre, enter, ok := promptKeysArgs("%2", "-p x;")
 	if !ok || len(pre) != 2 ||
 		!reflect.DeepEqual(pre[0], []string{"send-keys", "-t", "%2", "C-u"}) ||
-		!reflect.DeepEqual(pre[1], []string{"send-keys", "-t", "%2", "-l", "--", "-p x;"}) ||
+		!reflect.DeepEqual(pre[1], []string{"send-keys", "-t", "%2", "-l", "--", `-p x\;`}) ||
 		!reflect.DeepEqual(enter, []string{"send-keys", "-t", "%2", "Enter"}) {
-		t.Fatalf("clear=true: pre=%v enter=%v ok=%v", pre, enter, ok)
+		t.Fatalf("pre=%v enter=%v ok=%v", pre, enter, ok)
 	}
-	if pre, _, ok := promptKeysArgs("%2", "hi", false); !ok || len(pre) != 1 || pre[0][3] != "-l" {
-		t.Fatalf("clear=false must send only the literal, got %v", pre)
-	}
-	if _, _, ok := promptKeysArgs("", "hi", false); ok {
+	if _, _, ok := promptKeysArgs("", "hi"); ok {
 		t.Fatal("empty pane must not be ok")
 	}
-	if _, _, ok := promptKeysArgs("%2", "", false); ok {
+	if _, _, ok := promptKeysArgs("%2", ""); ok {
 		t.Fatal("empty text must not be ok")
+	}
+}
+
+// tmux drops a trailing ";" from a send-keys argument even with -l and "--"
+// (it reads it as a command separator); "\;" is its escape. Only the final
+// one is rewritten: a ";" mid-text is typed as is.
+func TestSendLiteralArgsEscapesTrailingSemicolon(t *testing.T) {
+	for text, want := range map[string]string{"done;": `done\;`, "a;b": "a;b", "x;;": `x;\;`} {
+		args, ok := sendLiteralArgs("%3", text)
+		if !ok || args[len(args)-1] != want {
+			t.Errorf("sendLiteralArgs(%q) = %v, want text %q", text, args, want)
+		}
 	}
 }

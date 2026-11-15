@@ -450,15 +450,23 @@ const teardownEscHint = " · esc cancels"
 // names, so a configured command containing "Enter" or "C-c" would be
 // interpreted rather than typed.
 //
-// "--" ends tmux's own option parsing. text is user config (teardown.command),
-// so a value like "-p something" would otherwise be read as flags to send-keys
-// rather than as characters to type.
+// "--" ends tmux's own option parsing. text is user config (teardown.command)
+// or typed by the user (the undefer note), so a value like "-p something"
+// would otherwise be read as flags to send-keys rather than as characters to
+// type.
+//
+// A trailing ";" is rewritten to "\;": tmux reads an argument ending in ";" as
+// a command separator even after -l and "--", and would drop it. "\;" is its
+// escape for a literal one (deferValueArgs does the same).
 //
 // The Enter that submits is a SEPARATE call (sendEnterArgs) with a delay
-// between them — see this file's teardownSendCmd for why.
+// between them — see sendPromptKeys and teardownKeyDelay for why.
 func sendLiteralArgs(pane, text string) ([]string, bool) {
 	if pane == "" || text == "" {
 		return nil, false
+	}
+	if strings.HasSuffix(text, ";") {
+		text = strings.TrimSuffix(text, ";") + `\;`
 	}
 	return []string{"send-keys", "-t", pane, "-l", "--", text}, true
 }
@@ -550,15 +558,15 @@ type teardownProbeMsg struct {
 type claudeGoneMsg struct{ gone bool }
 
 // promptKeysArgs builds the tmux calls that type text into pane and submit it:
-// pre runs first (the optional clear, then the literal text) and enter runs
-// after teardownKeyDelay. ok is false when pane or text is empty, so a failed
-// lookup types nothing.
+// pre runs first (the clear, then the literal text) and enter runs after
+// teardownKeyDelay. ok is false when pane or text is empty, so a failed lookup
+// types nothing.
 //
-// clear selects whether the input line is emptied first (see sendClearArgs).
-// Teardown wants it: the line must hold exactly the wrap-up text. Undefer does
-// not: a draft the user left half-typed in claude's input is theirs to keep,
-// and the message is typed after it rather than destroying it.
-func promptKeysArgs(pane, text string, clear bool) (pre [][]string, enter []string, ok bool) {
+// The input line is always cleared first (see sendClearArgs). For teardown the
+// line must hold exactly the wrap-up text; for an undefer it means the message
+// can never be glued onto a half-typed draft, run in bash mode when the draft
+// starts with "!", or turn into a slash command.
+func promptKeysArgs(pane, text string) (pre [][]string, enter []string, ok bool) {
 	literal, ok := sendLiteralArgs(pane, text)
 	if !ok {
 		return nil, nil, false
@@ -567,16 +575,13 @@ func promptKeysArgs(pane, text string, clear bool) (pre [][]string, enter []stri
 	if !ok {
 		return nil, nil, false
 	}
-	if clear {
-		c, _ := sendClearArgs(pane) // pane is non-empty, checked above
-		pre = append(pre, c)
-	}
-	return append(pre, literal), enter, true
+	c, _ := sendClearArgs(pane) // pane is non-empty, checked above
+	return [][]string{c, literal}, enter, true
 }
 
 // sendPromptKeys types text into pane's claude input and submits it, blocking
-// for teardownKeyDelay — call it off the Update loop. See promptKeysArgs for
-// clear.
+// for teardownKeyDelay — call it off the Update loop. The line is cleared
+// first; see promptKeysArgs.
 //
 // Each tmux call gets its OWN deadline, per teardownTmuxTimeout's contract. A
 // single shared context would have to cover every subprocess plus the
@@ -584,13 +589,13 @@ func promptKeysArgs(pane, text string, clear bool) (pre [][]string, enter []stri
 // the earlier sends did not consume — so a slow-but-successful first call
 // could cancel a later one and report a failure to submit that never happened.
 //
-// The clear, when asked for, goes first so the line holds exactly text and
-// nothing that was already sitting in it — see sendClearArgs. No delay between
-// it and the literal: both are plain keystrokes claude consumes in order, and
-// there is no completion popup to outrun. The delay sits before the Enter
-// only — see teardownKeyDelay.
-func sendPromptKeys(pane, text string, clear bool) error {
-	pre, enter, ok := promptKeysArgs(pane, text, clear)
+// The clear goes first so the line holds exactly text and nothing that was
+// already sitting in it — see sendClearArgs. No delay between it and the
+// literal: both are plain keystrokes claude consumes in order, and there is no
+// completion popup to outrun. The delay sits before the Enter only — see
+// teardownKeyDelay.
+func sendPromptKeys(pane, text string) error {
+	pre, enter, ok := promptKeysArgs(pane, text)
 	if !ok {
 		return errors.New("no pane or text to send")
 	}
@@ -619,8 +624,7 @@ func teardownSendCmd(selfPane, paneDir, text string) tea.Cmd {
 		if !ok || pane == "" {
 			return teardownSentMsg{note: "no claude pane"}
 		}
-		// clear=true: the wrap-up must be exactly what is on the line.
-		if err := sendPromptKeys(pane, text, true); err != nil {
+		if err := sendPromptKeys(pane, text); err != nil {
 			return teardownSentMsg{note: "wrap-up didn't submit"}
 		}
 		// Success here means the keystrokes were delivered, NOT that claude

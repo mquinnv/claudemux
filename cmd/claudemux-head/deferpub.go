@@ -125,36 +125,44 @@ func undeferMessage(blocker, text string) string {
 // undeferBlocked reports why a message cannot be typed into the session's
 // claude input right now, or "" when it can. state is a statePublishValue
 // string. Typing into a permission prompt would answer it with the message's
-// first character, and a starting session may not have an input to type into.
+// first character, and a question dialog would take it as a menu choice or as
+// the start of a free-text answer; a starting session may not have an input to
+// type into.
 func undeferBlocked(state, claudePane string) string {
 	switch {
 	case claudePane == "":
 		return "no claude pane"
 	case state == "Awaiting":
 		return "on a permission prompt"
+	case state == "Asking" || state == "Tool:AskUserQuestion":
+		return "on a question"
 	case state == "Starting":
 		return "still starting"
 	}
 	return ""
 }
 
-// undeferCmd clears target's defer mark and, when message is non-empty, tells
-// the session in claudePane why. The mark clears first and under the same hard
-// deadline as setDeferCmd, so a wedged tmux cannot block Update and a failed
-// send still leaves the session undeferred. Errors are dropped like
-// setDeferCmd's.
+// undeferCmd tells the session in claudePane why its blocker cleared, when
+// message is non-empty, and then clears target's defer mark. The message goes
+// first because the mark is what keeps the session out of the conductor's
+// queue: clearing it before the prompt is submitted would let the conductor
+// carry the user into the session the moment it reads as waiting. The mark
+// clears even when the send fails, so a failed send still leaves the session
+// undeferred. The clear runs under the same hard deadline as setDeferCmd, so a
+// wedged tmux cannot block Update. Errors are dropped like setDeferCmd's.
 //
-// The message goes through sendPromptKeys with clear=false: unlike a teardown,
-// an undefer must not destroy a draft the user left in claude's input.
+// The message goes through sendPromptKeys, which clears claude's input line
+// first so the message can never be glued onto a draft, run in bash mode
+// (a draft starting with "!"), or become a slash command.
 func undeferCmd(target, claudePane, message string) tea.Cmd {
 	args := deferArgs(target, false, "")
 	return func() tea.Msg {
+		if message != "" {
+			_ = sendPromptKeys(claudePane, message)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = exec.CommandContext(ctx, "tmux", args...).Run()
-		if message != "" {
-			_ = sendPromptKeys(claudePane, message, false)
-		}
 		return nil
 	}
 }
