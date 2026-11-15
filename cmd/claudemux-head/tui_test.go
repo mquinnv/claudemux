@@ -5495,15 +5495,130 @@ func TestKeyShiftDNoopOutsideTmux(t *testing.T) {
 	}
 }
 
-// On a deferred session d clears the mark immediately — no prompt.
-func TestKeyDClearsDeferImmediately(t *testing.T) {
-	m := model{ready: true, selfPane: "%1", deferRaw: "1", deferReason: "CI"}
+// On a deferred session d asks what unblocked it instead of clearing at once:
+// the clear waits for enter, so the session can be told why.
+func TestHeadUndeferOpensPrompt(t *testing.T) {
+	m := undeferModel()
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if cmd == nil {
-		t.Fatal("d on a deferred session must issue the clear cmd")
+	if cmd != nil {
+		t.Fatal("d on a deferred session must open the prompt, not issue a cmd")
 	}
-	if next.(model).deferPrompting {
-		t.Error("clearing must not open the prompt")
+	got := next.(model)
+	if !got.deferPrompting || !got.deferClearing {
+		t.Errorf("deferPrompting = %v, deferClearing = %v, want both true", got.deferPrompting, got.deferClearing)
+	}
+	if got.deferWas != "waiting on Ana" || got.deferInput != "" {
+		t.Errorf("deferWas = %q, deferInput = %q, want the recorded blocker and an empty line", got.deferWas, got.deferInput)
+	}
+}
+
+func undeferModel() model {
+	return model{ready: true, width: 500, height: 4, selfPane: "%1", claudePane: "%2", deferRaw: "1", deferReason: "waiting on Ana"}
+}
+
+func typeUndefer(t *testing.T, m model, text string) model {
+	t.Helper()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if text == "" {
+		return next.(model)
+	}
+	next, _ = next.(model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text)})
+	return next.(model)
+}
+
+func TestHeadUndeferEscKeepsDefer(t *testing.T) {
+	m := typeUndefer(t, undeferModel(), "ok")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("esc must issue no cmd: the session stays deferred")
+	}
+	got := next.(model)
+	if got.deferPrompting || got.deferClearing || got.deferWas != "" || got.deferInput != "" {
+		t.Errorf("esc left prompt state behind: %+v", got)
+	}
+}
+
+func TestHeadUndeferEmptyEnterClears(t *testing.T) {
+	for _, line := range []string{"", "   "} {
+		m := typeUndefer(t, undeferModel(), line)
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd == nil {
+			t.Errorf("enter on %q must issue the silent clear cmd", line)
+		}
+		got := next.(model)
+		if got.deferPrompting || got.deferClearing || got.deferWas != "" {
+			t.Errorf("enter on %q left prompt state behind: %+v", line, got)
+		}
+	}
+}
+
+func TestHeadUndeferEnterSends(t *testing.T) {
+	m := typeUndefer(t, undeferModel(), "Ana approved")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter with text must issue the undefer cmd")
+	}
+	got := next.(model)
+	if got.deferPrompting || got.deferClearing || got.deferWas != "" || got.deferInput != "" {
+		t.Errorf("enter left prompt state behind: %+v", got)
+	}
+}
+
+// A session on a permission prompt (or with nowhere to type) cannot take the
+// explanation, so enter holds the prompt open rather than clearing silently.
+func TestHeadUndeferBlockedHoldsInput(t *testing.T) {
+	m := undeferModel()
+	m.state = State{Kind: StateAwaiting}
+	m = typeUndefer(t, m, "ok")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("blocked enter must issue no cmd")
+	}
+	got := next.(model)
+	if !got.deferPrompting || !got.deferClearing || got.deferInput != "ok" {
+		t.Errorf("blocked enter must keep the prompt and input: %+v", got)
+	}
+	if chip := got.deferChipText(); !strings.Contains(chip, "can't send: on a permission prompt") {
+		t.Errorf("chip = %q, want the reason it cannot send", chip)
+	}
+}
+
+func TestHeadUndeferNoClaudePane(t *testing.T) {
+	m := undeferModel()
+	m.claudePane = ""
+	m = typeUndefer(t, m, "ok")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("enter with no claude pane must issue no cmd")
+	}
+	got := next.(model)
+	if !got.deferPrompting || got.deferInput != "ok" {
+		t.Errorf("enter must keep the prompt and input: %+v", got)
+	}
+	if chip := got.deferChipText(); !strings.Contains(chip, "can't send: no claude pane") {
+		t.Errorf("chip = %q, want the reason it cannot send", chip)
+	}
+}
+
+func TestHeadUndeferChipText(t *testing.T) {
+	m := typeUndefer(t, undeferModel(), "Ana")
+	if chip := m.deferChipText(); !strings.Contains(chip, "◆ unblocked: Ana") || strings.Contains(chip, "can't send") {
+		t.Errorf("chip = %q, want the unblocked prompt with no blocked note", chip)
+	}
+}
+
+// D and the defer direction of d open a plain blocker prompt, never the
+// undefer one, even if a stale clearing flag were left behind.
+func TestHeadDeferPromptsResetClearing(t *testing.T) {
+	for _, key := range []rune{'d', 'D'} {
+		m := model{ready: true, selfPane: "%1", deferClearing: true}
+		if key == 'D' {
+			m.deferRaw = "1"
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		if got := next.(model); !got.deferPrompting || got.deferClearing {
+			t.Errorf("%c: deferPrompting = %v, deferClearing = %v, want true/false", key, got.deferPrompting, got.deferClearing)
+		}
 	}
 }
 

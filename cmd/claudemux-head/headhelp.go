@@ -9,7 +9,7 @@ import (
 
 var headShortcuts = []string{
 	"R Reload head", "? Help", "s Refresh summary", "r Pin/unpin tab",
-	"Space Conduct/standby", "d Defer", "D Edit blocker", "t Open shell", "p Parent session",
+	"Space Conduct/standby", "d Defer / undefer and say why", "D Edit blocker", "t Open shell", "p Parent session",
 	"c Restart Claude: c resume / n fresh / Esc cancel",
 	"x Wrap up; x again when ready closes session", "X Direct close (press twice)",
 	"Esc Cancel armed close / quit head", "q/Ctrl+C Quit head (closes pane)",

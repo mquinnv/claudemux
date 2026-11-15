@@ -315,6 +315,12 @@ type model struct {
 	// seeds deferInput with the recorded blocker; `d` always starts empty.
 	deferPrompting bool
 	deferInput     string
+	// deferClearing turns that prompt around: `d` on a deferred session asks
+	// what unblocked it rather than for a blocker, and enter clears the defer
+	// and tells the session. deferWas is the blocker recorded when it opened,
+	// kept because the poll may refresh deferReason while the user types.
+	deferClearing bool
+	deferWas      string
 	// conductPendingMode holds the mode this head's space key just asked the
 	// lobby for, shown in place of conductRaw until a poll confirms it or
 	// conductPendingUntil passes. Without it the chip would answer a keypress
@@ -1531,21 +1537,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conductPendingUntil = now.Add(conductPendingWindow)
 			return m, requestConductToggleCmd(now)
 		case "d":
-			// Toggle this session's own defer mark. Clearing is immediate;
-			// setting first asks for the blocker (see deferPromptKey), and
-			// `D` below re-opens that prompt on an already-deferred session
-			// to edit the blocker rather than clear it. Unlike
+			// Toggle this session's own defer mark. Both directions open a
+			// prompt (see deferPromptKey): setting asks for the blocker,
+			// clearing asks what unblocked it. `D` below re-opens the
+			// blocker prompt on an already-deferred session to edit the
+			// blocker rather than clear it. Unlike
 			// space there is no pending/optimistic layer here — deferRaw
 			// simply lags one poll behind the change, which the brief
 			// accepts. No-op outside tmux: there is no owning session to mark.
 			if m.selfPane == "" {
 				return m, nil
 			}
-			if isDeferValue(m.deferRaw) {
-				return m, setDeferCmd(m.selfPane, false, "")
-			}
 			m.deferPrompting = true
 			m.deferInput = ""
+			m.deferClearing = false
+			if isDeferValue(m.deferRaw) {
+				// Clearing asks why first, so the session learns its wait
+				// is over (see deferPromptKey).
+				m.deferClearing = true
+				m.deferWas = m.deferReason
+			}
 			return m, nil
 		case "D":
 			// Edit the blocker without clearing the defer: the same prompt
@@ -1558,6 +1569,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.deferPrompting = true
+			m.deferClearing = false
 			m.deferInput = ""
 			if isDeferValue(m.deferRaw) {
 				m.deferInput = sanitizeDeferReason(m.deferReason)
@@ -2916,7 +2928,8 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", h, mins)
 }
 
-// deferPromptKey handles a key while `d` or `D` is collecting a blocker.
+// deferPromptKey handles a key while `d` or `D` is collecting a blocker, or
+// `d` on a deferred session is collecting what unblocked it.
 // enter defers with whatever was typed (an empty blocker still defers — the
 // reason is a note, not a gate); esc and ctrl+c back out without changing
 // anything, which for a `D` edit leaves the recorded blocker as it was. Every
@@ -2924,23 +2937,57 @@ func formatDuration(d time.Duration) string {
 func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.deferPrompting = false
-		m.deferInput = ""
+		m.closeDeferPrompt()
 		return m, nil
 	case "enter":
+		if m.deferClearing {
+			return m.undeferEnter()
+		}
 		reason := m.deferInput
-		m.deferPrompting = false
-		m.deferInput = ""
+		m.closeDeferPrompt()
 		return m, setDeferCmd(m.selfPane, true, reason)
 	}
 	m.deferInput = deferInputKey(m.deferInput, msg)
 	return m, nil
 }
 
+// closeDeferPrompt leaves the prompt, resetting every field it used so the
+// next `d` cannot inherit a stale clearing flag or blocker.
+func (m *model) closeDeferPrompt() {
+	m.deferPrompting = false
+	m.deferClearing = false
+	m.deferInput = ""
+	m.deferWas = ""
+}
+
+// undeferEnter is enter in the undefer prompt. A blank line clears the defer
+// and says nothing. Text clears it and tells the session — unless the session
+// cannot take typed text right now, in which case nothing happens and the
+// prompt, with its input, stays open so the chip can say why.
+func (m model) undeferEnter() (model, tea.Cmd) {
+	if strings.TrimSpace(m.deferInput) == "" {
+		m.closeDeferPrompt()
+		return m, setDeferCmd(m.selfPane, false, "")
+	}
+	if undeferBlocked(statePublishValue(m.state), m.claudePane) != "" {
+		return m, nil
+	}
+	msg := undeferMessage(m.deferWas, m.deferInput)
+	m.closeDeferPrompt()
+	return m, undeferCmd(m.selfPane, m.claudePane, msg)
+}
+
 // deferChipText is the defer chip slot for both statusbar layouts: the
 // blocker prompt while one is being typed, else the chip for the published
 // mark.
 func (m model) deferChipText() string {
+	if m.deferPrompting && m.deferClearing {
+		text := undeferPromptText(m.deferInput)
+		if why := undeferBlocked(statePublishValue(m.state), m.claudePane); why != "" {
+			text += " (can't send: " + why + ")"
+		}
+		return swDeferStyle.Render(text)
+	}
 	if m.deferPrompting {
 		return swDeferStyle.Render(deferPromptText(m.deferInput))
 	}

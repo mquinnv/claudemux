@@ -216,7 +216,13 @@ should never carry you into it. Press `d` on the selected row in the
 lobby, or `d` from inside the session's own status pane, to toggle it. Deferring
 first asks what the session is blocked on: type the blocker and press `Enter` (an
 empty one still defers), or `Esc` to back out without deferring. Pressing `d` on a
-deferred session clears it, blocker and all, with no prompt. To change the blocker
+deferred session asks why it is unblocked instead: type what changed and press `Enter`,
+and claudemux clears the defer and sends Claude `Blocker cleared (was: <blocker>): <what
+you typed>` so it knows its wait is over. `Enter` on an empty line clears the defer
+without telling the session, and `Esc` leaves it deferred. While the session is on a
+permission prompt or still starting, the explanation can't be typed into it, so
+`Enter` does nothing and the prompt says why; clear it with an empty line or try
+again once the session is ready. To change the blocker
 without clearing the defer, press `D` instead — the same prompt, pre-filled with
 what's recorded now, on the selected row or on your own session; `Enter` saves the
 edit and `Esc` leaves it as it was. A deferred session is out of the queue
@@ -406,8 +412,8 @@ attaching.
 below — so you can stop the conductor without coming back here first.
 
 Keys in the lobby: `Space` toggles conducting/standby, `j`/`k` select, `Enter`
-jumps to a session (and pauses conducting), `d` toggles defer on the selected
-row, `D` edits that row's blocker, `p` hides or shows the preview box, `Esc`
+jumps to a session (and pauses conducting), `d` defers the selected
+row, or, on a deferred one, asks why it is unblocked, `D` edits that row's blocker, `p` hides or shows the preview box, `Esc`
 returns to the session you came from (tmux's per-client last session), `n`
 starts a new session, `/` finds a session by name or PR number, `q` quits.
 
@@ -1071,10 +1077,10 @@ so the chip is absent and `Space` does nothing. While a `#stay`-marked prompt
 instead — this turn will not carry you away — which is also how you can tell the
 marker was recognized.
 
-**Deferring from the status pane.** Press `d` to toggle defer on this session —
-the same mark the lobby's `d` sets on the selected row (see **Deferring a
-session** above). Setting it prompts for the blocker in the chip's place on the
-top line, and `D` re-opens that prompt pre-filled to edit the blocker without
+**Deferring from the status pane.** Press `d` to defer this session, or on a deferred
+one to ask why it is unblocked — the same mark the lobby's `d` sets on the
+selected row (see **Deferring a session** above). Either way the prompt takes the
+chip's place on the top line, and `D` re-opens the blocker prompt pre-filled to edit the blocker without
 clearing the defer; the pane then shows a `◆ defer: <blocker>` chip while it's
 set, and the mark persists on the tmux session itself, so it survives a head
 restart and is visible to the lobby with no head running at all. With a lobby
