@@ -48,7 +48,7 @@ The same prompt serves a handoff's WAIT mark.
 
 **Keys.**
 
-- enter, text typed: clear the mark and reason, then send the message.
+- enter, text typed: send the message, then clear the mark and reason.
 - enter, empty line: clear only, as `d` does today.
 - esc: close the prompt, session stays deferred.
 
