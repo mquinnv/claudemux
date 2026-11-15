@@ -390,6 +390,12 @@ type swModel struct {
 	deferTarget  string
 	deferName    string
 	deferEditing bool
+	// deferClearing marks `d` on a deferred row: the prompt asks what
+	// unblocked it, and enter tells the session. deferWas is the blocker
+	// recorded when it opened, kept because the snapshot may move on while
+	// the user types.
+	deferClearing bool
+	deferWas      string
 	// restart records that the user (R) or the binary watcher asked for a
 	// re-exec rather than a quit; runSwitchboard checks it after Run
 	// returns, mirroring the session head's flow in main().
@@ -1003,17 +1009,16 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.deferring {
 			switch msg.String() {
 			case "esc", "ctrl+c":
-				m.deferring = false
-				m.deferInput = ""
-				m.deferEditing = false
+				m.closeDeferPrompt()
 			case "enter":
+				if m.deferClearing {
+					return m.undeferEnter()
+				}
 				// An empty blocker still defers: the reason is a note, not a
 				// gate. Clearing an edited blocker back to empty is therefore
 				// a real outcome, not a cancel — esc is the way to keep it.
 				target, reason := m.deferTarget, m.deferInput
-				m.deferring = false
-				m.deferInput = ""
-				m.deferEditing = false
+				m.closeDeferPrompt()
 				return m, setDeferCmd(target, true, reason)
 			default:
 				m.deferInput = deferInputKey(m.deferInput, msg)
@@ -1099,15 +1104,18 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
 		case "d":
 			// Guard like the other row keys: a no-op when the list is empty.
-			// Clearing is immediate; deferring first asks for the blocker.
+			// Both directions ask first: deferring for the blocker, clearing
+			// for what unblocked it (so the session can be told).
 			if m.sel < len(m.snap.Sessions) {
 				sess := m.snap.Sessions[m.sel]
-				if sess.Deferred {
-					return m, setDeferCmd(swDeferTarget(sess), false, "")
-				}
 				m.deferring = true
 				m.deferInput = ""
 				m.deferEditing = false
+				m.deferClearing = sess.Deferred
+				m.deferWas = ""
+				if sess.Deferred {
+					m.deferWas = sess.DeferReason
+				}
 				m.deferTarget = swDeferTarget(sess)
 				m.deferName = sess.Name
 			}
@@ -1605,6 +1613,9 @@ func (m swModel) View() string {
 	case m.finding:
 		status = m.findStatus()
 		statusStyled = false
+	case m.deferring && m.deferClearing:
+		status = swDeferStyle.Render("undefer "+m.deferName+" ") + undeferPromptText(m.deferInput)
+		statusStyled = false
 	case m.deferring:
 		verb := "defer "
 		if m.deferEditing {
@@ -1647,6 +1658,14 @@ func (m swModel) View() string {
 		footerText = "enter defer · esc cancel"
 		if m.deferEditing {
 			footerText = "enter save · esc cancel"
+		}
+		if m.deferClearing {
+			footerText = "enter undefer · esc cancel"
+			if sess, ok := m.snap.session(m.deferName); ok {
+				if why := undeferBlocked(sess.State, sess.ClaudePane); why != "" {
+					footerText = "can't send: " + why + " · enter on an empty line undefers silently · esc cancel"
+				}
+			}
 		}
 	}
 	footer := swStatusStyle.Render(footerText)
@@ -1874,6 +1893,40 @@ func runSwitchboard(stderr io.Writer) int {
 	// inside that window, so the chips never blink.
 	unsetConductOption()
 	return 0
+}
+
+// closeDeferPrompt leaves whichever defer prompt is open, resetting all of its
+// state so the next one starts clean.
+func (m *swModel) closeDeferPrompt() {
+	m.deferring = false
+	m.deferInput = ""
+	m.deferEditing = false
+	m.deferClearing = false
+	m.deferWas = ""
+}
+
+// undeferEnter is enter in the undefer prompt. A blank line clears the defer
+// and says nothing. With text, the session is looked up by name — the row may
+// have moved or gone while the user typed — and told why; if it cannot take
+// typed text right now the prompt stays open with its input, since typing into
+// a permission prompt would answer it.
+func (m swModel) undeferEnter() (tea.Model, tea.Cmd) {
+	target := m.deferTarget
+	if strings.TrimSpace(m.deferInput) == "" {
+		m.closeDeferPrompt()
+		return m, setDeferCmd(target, false, "")
+	}
+	sess, ok := m.snap.session(m.deferName)
+	if !ok {
+		m.closeDeferPrompt()
+		return m, nil
+	}
+	if undeferBlocked(sess.State, sess.ClaudePane) != "" {
+		return m, nil
+	}
+	msg := undeferMessage(m.deferWas, m.deferInput)
+	m.closeDeferPrompt()
+	return m, undeferCmd(target, sess.ClaudePane, msg)
 }
 
 // swDeferTarget is the tmux target the lobby toggles @claudemux_defer on.

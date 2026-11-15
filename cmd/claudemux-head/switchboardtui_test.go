@@ -1414,17 +1414,118 @@ func TestSwModelShiftDEmptyListNoop(t *testing.T) {
 	}
 }
 
-// d on an already-deferred row clears it immediately, no prompt.
+// d on an already-deferred row opens the undefer prompt rather than clearing
+// at once; nothing is sent to tmux until enter.
 func TestSwModelDeferKeyClearsDeferred(t *testing.T) {
+	m := swUndeferModel("Idle")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatal("d on a deferred row must open the prompt, not fire")
+	}
+	if got := next.(swModel); !got.deferring || !got.deferClearing {
+		t.Errorf("deferring = %v clearing = %v, want the undefer prompt", got.deferring, got.deferClearing)
+	}
+}
+
+// swUndeferModel is swTestModel with "web" selected, deferred on "waiting on
+// Ana", and carrying a claude pane in the given published state.
+func swUndeferModel(state string) swModel {
 	m := swTestModel()
 	m.sel = 1
 	m.snap.Sessions[1].Deferred = true
+	m.snap.Sessions[1].DeferReason = "waiting on Ana"
+	m.snap.Sessions[1].ClaudePane = "%2"
+	m.snap.Sessions[1].State = state
+	return m
+}
+
+func swKeyRunes(m swModel, s string) swModel {
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+	return next.(swModel)
+}
+
+func swOpenUndefer(t *testing.T, state string) swModel {
+	t.Helper()
+	m := swUndeferModel(state)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if cmd == nil {
-		t.Fatal("d on a deferred row must fire the clear cmd")
+	if cmd != nil {
+		t.Fatal("d must open the prompt without a command")
 	}
-	if next.(swModel).deferring {
-		t.Error("clearing must not open the prompt")
+	return next.(swModel)
+}
+
+func TestUndeferOpensPrompt(t *testing.T) {
+	m := swOpenUndefer(t, "Idle")
+	if !m.deferring || !m.deferClearing || m.deferWas != "waiting on Ana" || m.deferName != "web" {
+		t.Fatalf("deferring=%v clearing=%v was=%q name=%q", m.deferring, m.deferClearing, m.deferWas, m.deferName)
+	}
+}
+
+func TestUndeferEscKeepsDefer(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Idle"), "ok")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := next.(swModel)
+	if cmd != nil || got.deferring || got.deferClearing || got.deferWas != "" {
+		t.Errorf("esc: cmd=%v deferring=%v clearing=%v was=%q, want a closed prompt and no command", cmd != nil, got.deferring, got.deferClearing, got.deferWas)
+	}
+}
+
+func TestUndeferEmptyEnterClearsSilently(t *testing.T) {
+	for _, typed := range []string{"", "   "} {
+		m := swKeyRunes(swOpenUndefer(t, "Idle"), typed)
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if got := next.(swModel); got.deferring || got.deferClearing || cmd == nil {
+			t.Errorf("typed %q: deferring=%v clearing=%v cmd=%v, want closed prompt and a clear cmd", typed, got.deferring, got.deferClearing, cmd != nil)
+		}
+	}
+}
+
+func TestUndeferEnterSends(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Idle"), "ok")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(swModel); got.deferring || got.deferClearing || cmd == nil {
+		t.Errorf("deferring=%v clearing=%v cmd=%v, want closed prompt and a cmd", got.deferring, got.deferClearing, cmd != nil)
+	}
+}
+
+func TestUndeferBlockedHoldsInput(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Awaiting"), "ok")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(swModel)
+	if cmd != nil || !got.deferring || got.deferInput != "ok" {
+		t.Fatalf("cmd=%v deferring=%v input=%q, want the prompt held with its input", cmd != nil, got.deferring, got.deferInput)
+	}
+	if view := ansi.Strip(got.View()); !strings.Contains(view, "can't send: on a permission prompt") {
+		t.Errorf("footer missing the reason:\n%s", view)
+	}
+}
+
+func TestUndeferBoundToNameAcrossReorder(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Idle"), "ok")
+	s := m.snap.Sessions
+	m.snap.Sessions = []swSession{s[2], s[1], s[0]}
+	m.sel = 0
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(swModel); got.deferring || cmd == nil {
+		t.Errorf("deferring=%v cmd=%v, want closed prompt and a cmd", got.deferring, cmd != nil)
+	}
+}
+
+func TestUndeferSessionAlreadyClear(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Idle"), "ok")
+	m.snap.Sessions[1].Deferred = false
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := next.(swModel); got.deferring || cmd == nil {
+		t.Errorf("deferring=%v cmd=%v, want closed prompt and a cmd", got.deferring, cmd != nil)
+	}
+}
+
+func TestUndeferViewPrompt(t *testing.T) {
+	view := ansi.Strip(swOpenUndefer(t, "Idle").View())
+	for _, want := range []string{"undefer web", "◆ unblocked: ", "enter undefer · esc cancel"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q:\n%s", want, view)
+		}
 	}
 }
 
