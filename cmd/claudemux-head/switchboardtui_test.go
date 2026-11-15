@@ -1372,7 +1372,7 @@ func TestSwModelShiftDEditsBlocker(t *testing.T) {
 	if !strings.Contains(view, "blocker web ◆ blocker: Ana's review") {
 		t.Errorf("status line missing the edit prompt:\n%s", view)
 	}
-	if !strings.Contains(view, "enter save · esc cancel") {
+	if !strings.Contains(view, "enter save · tab session · esc cancel") {
 		t.Errorf("footer missing the edit wording:\n%s", view)
 	}
 	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1395,7 +1395,7 @@ func TestSwModelShiftDOnUndeferredIsAnEmptyPrompt(t *testing.T) {
 	if !m.deferring || m.deferEditing || m.deferInput != "" {
 		t.Fatalf("deferring = %v editing = %v input = %q, want an empty defer prompt", m.deferring, m.deferEditing, m.deferInput)
 	}
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "enter defer · esc cancel") {
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "enter defer · tab session · esc cancel") {
 		t.Errorf("footer must keep the defer wording:\n%s", view)
 	}
 }
@@ -2298,5 +2298,46 @@ func TestSwHighlightRowNoColorIsANoop(t *testing.T) {
 
 	if got := swHighlightRow(" plain row", 40); got != " plain row" {
 		t.Errorf("swHighlightRow without color = %q, want the row untouched", got)
+	}
+}
+
+// A message that could not be typed leaves the session deferred: the lobby
+// says so, lets the conductor go again, and drops the note on the next key.
+func TestUndeferNotSentNote(t *testing.T) {
+	m := swOpenUndefer(t, "Idle")
+	m.closeDeferPrompt()
+	m.undeferHoldUntil = time.Now().Add(undeferHold)
+	next, _ := m.Update(undeferDoneMsg{name: "web"})
+	got := next.(swModel)
+	if got.undeferNote != "web "+undeferNotSent || got.undeferHeld(time.Now()) {
+		t.Fatalf("note=%q held=%v, want the note and no hold", got.undeferNote, got.undeferHeld(time.Now()))
+	}
+	if view := ansi.Strip(got.View()); !strings.Contains(view, "web "+undeferNotSent) {
+		t.Errorf("status line missing the note:\n%s", view)
+	}
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if next.(swModel).undeferNote != "" {
+		t.Error("a key must acknowledge the note")
+	}
+}
+
+// A delivered message leaves no note and keeps the conductor's hold.
+func TestUndeferSentKeepsHold(t *testing.T) {
+	m := swOpenUndefer(t, "Idle")
+	m.closeDeferPrompt()
+	m.undeferHoldUntil = time.Now().Add(undeferHold)
+	next, _ := m.Update(undeferDoneMsg{name: "web", sent: true})
+	if got := next.(swModel); got.undeferNote != "" || !got.undeferHeld(time.Now()) {
+		t.Errorf("note=%q held=%v, want no note and the hold kept", got.undeferNote, got.undeferHeld(time.Now()))
+	}
+}
+
+// Tab in the undefer prompt is not session-name completion: what unblocked
+// it is free text.
+func TestUndeferPromptIgnoresTab(t *testing.T) {
+	m := swKeyRunes(swOpenUndefer(t, "Idle"), "ok")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := next.(swModel); got.deferInput != "ok" || !got.deferClearing {
+		t.Errorf("input=%q clearing=%v, want the text untouched", got.deferInput, got.deferClearing)
 	}
 }

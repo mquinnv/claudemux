@@ -122,10 +122,10 @@ func emptyConfigNode() *yaml.Node {
 }
 
 // setDottedPath walks mapNode by parts, creating intermediate mappings that
-// don't exist yet, and sets the final part as a string scalar. Only string
-// scalar leaves are supported — every value config set can target
-// (launch.layout today) is a string, and the picker TUI has no use for
-// anything richer.
+// don't exist yet, and sets the final part with setScalar: a string scalar,
+// except that the literals true and false become YAML booleans so bool keys
+// (defer.auto_nudge) can be set. Numbers, lists and maps are not supported —
+// the picker TUI has no use for anything richer.
 func setDottedPath(mapNode *yaml.Node, parts []string, value string) error {
 	for _, key := range parts[:len(parts)-1] {
 		child := findMapValue(mapNode, key)
@@ -140,13 +140,26 @@ func setDottedPath(mapNode *yaml.Node, parts []string, value string) error {
 
 	leaf := parts[len(parts)-1]
 	if v := findMapValue(mapNode, leaf); v != nil {
-		v.SetString(value)
+		setScalar(v, value)
 		return nil
 	}
 	var v yaml.Node
-	v.SetString(value)
+	setScalar(&v, value)
 	mapNode.Content = append(mapNode.Content, scalarKey(leaf), &v)
 	return nil
+}
+
+// setScalar writes value into n. The literals true and false become real YAML
+// booleans: SetString would quote them, and a quoted "false" cannot decode into
+// a bool field such as defer.auto_nudge. A string field given "true" still
+// decodes, so this costs the string keys nothing.
+func setScalar(n *yaml.Node, value string) {
+	if value == "true" || value == "false" {
+		// Field by field, not a fresh Node, so an existing value's comments survive.
+		n.Kind, n.Tag, n.Value, n.Style = yaml.ScalarNode, "!!bool", value, 0
+		return
+	}
+	n.SetString(value)
 }
 
 // findMapValue returns the value node for key in a mapping node's Content

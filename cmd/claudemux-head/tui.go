@@ -301,14 +301,35 @@ type model struct {
 	// render time (not poll time) so its heartbeat keeps decaying against the
 	// clock even if polls stall — see conductChip.
 	conductRaw string
-	// deferRaw is the last-read @claudemux_defer value, "1" when this
-	// session is marked deferred, "" when unset/unreadable. Unlike
-	// conductRaw there is no pending/optimistic layer for it — see the
+	// deferMark is the last good read of this session's defer: the
+	// @claudemux_defer value (Raw, "1" or "wait" when deferred), the blocker
+	// typed for it (Reason, shown in the chip) and the link to the session it
+	// waits on. A failed read keeps the previous mark rather than zeroing it.
+	// Unlike conductRaw there is no pending/optimistic layer for it — see the
 	// defer-toggle brief: a one-poll lag on the chip is fine.
-	deferRaw string
-	// deferReason is the last-read @claudemux_defer_reason: the blocker typed
-	// when the session was deferred, shown in the defer chip.
-	deferReason string
+	deferMark deferMark
+	// fleet/fleetOK are the last poll's session listing, which the defer
+	// watcher judges the blocker from. fleetOK false means the listing failed
+	// and must never be read as the blocker being gone.
+	fleet   []fleetRow
+	fleetOK bool
+	// deferWatch is the grace-period machine for a linked defer (deferwatch.go).
+	deferWatch deferWatch
+	// deferAutoNudge is defer.auto_nudge: whether a release also types a
+	// prompt into the claude pane. The clear itself always happens.
+	deferAutoNudge bool
+	// deferRelease is the release in flight (watchClear or watchClearNudge),
+	// watchNone when there is none. While one is in flight the watcher is not
+	// stepped, so a mark that still reads set from a poll racing the clear
+	// cannot release twice; a poll that reads the mark unset ends it.
+	deferRelease deferWatchAction
+	// deferNudgeSpent records that a release for the current defer already
+	// tried the nudge but failed to clear the mark. The retry clears without
+	// typing the prompt again. Forgotten once a poll reads the mark unset.
+	deferNudgeSpent bool
+	// deferDoneNote says which blocker finished or closed, shown in the defer
+	// chip slot from the release until this session's next turn starts.
+	deferDoneNote string
 	// deferPrompting means `d` or `D` is collecting a blocker: the defer chip
 	// slot shows deferInput with a cursor, and every key is routed to the
 	// prompt until enter (defer with it) or esc (leave the mark alone). `D`
@@ -321,6 +342,16 @@ type model struct {
 	// kept because the poll may refresh deferReason while the user types.
 	deferClearing bool
 	deferWas      string
+	// undeferNote means the last undefer's message could not be typed into
+	// claude's prompt, so the session is still deferred; the chip says so
+	// until the next key.
+	undeferNote bool
+	// deferComplete is the prompt's Tab cycle (defercomplete.go).
+	// deferEditValue is the mark `D` found when it opened on a deferred
+	// session, "" for a new defer: enter keeps that value, and the link
+	// unless the text names a new one.
+	deferComplete  deferCompleter
+	deferEditValue string
 	// conductPendingMode holds the mode this head's space key just asked the
 	// lobby for, shown in place of conductRaw until a poll confirms it or
 	// conductPendingUntil passes. Without it the chip would answer a keypress
@@ -575,6 +606,7 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		showLast:           cfg.Head.ShowLast,
 		showFirst:          cfg.Head.ShowFirst,
 		teardownCmdText:    cfg.Teardown.Command,
+		deferAutoNudge:     cfg.Defer.AutoNudge,
 		shellSplitSize:     shellSplitSize("", cfg.Launch.ShellSize),
 		// Init fires the seed summarize call when summarizer != nil and a
 		// session is actually bound (see Init below); this flag must already
@@ -1175,13 +1207,15 @@ func (m model) pollData() tea.Cmd {
 		// everything else. Only inside tmux (selfPane set); a failed or absent
 		// read is "" and the chip simply stays off.
 		conductRaw := ""
-		deferRaw, deferReason := "", ""
+		mark, markOK := deferMark{}, false
+		fleet, fleetOK := []fleetRow(nil), false
 		sessionName, lineage, lineageOK := "", []crumb(nil), false
 		if selfPane != "" {
 			cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
 			conductRaw = readConductOption(cctx)
-			deferRaw, deferReason = readDeferOption(cctx, selfPane)
+			mark, markOK = readDeferMark(cctx, selfPane)
 			sessionName, lineage, lineageOK = readLineage(cctx, selfPane)
+			fleet, fleetOK = readFleet(cctx)
 			ccancel()
 		}
 		return dataMsg{
@@ -1191,8 +1225,10 @@ func (m model) pollData() tea.Cmd {
 			rateLimits:   rl,
 			rateLimitErr: rlErr,
 			conductRaw:   conductRaw,
-			deferRaw:     deferRaw,
-			deferReason:  deferReason,
+			deferMark:    mark,
+			deferMarkOK:  markOK,
+			fleet:        fleet,
+			fleetOK:      fleetOK,
 			claudePane:   claudePane,
 			unmapped:     claudeUnmapped,
 			sessionName:  sessionName,
@@ -1208,14 +1244,16 @@ type dataMsg struct {
 	newEvents    []Event
 	rateLimits   RateLimits
 	rateLimitErr error
-	conductRaw   string  // raw @claudemux_conducting value, "" when unset/unreadable
-	deferRaw     string  // raw @claudemux_defer value, "" when unset/unreadable
-	deferReason  string  // raw @claudemux_defer_reason value, "" when unset/unreadable
-	claudePane   string  // the claude pane this poll bound to, "" when none was seen
-	unmapped     bool    // a claude pane was seen, and the hook has written no map for it
-	sessionName  string  // this head's tmux session, valid when lineageOK
-	lineage      []crumb // handoff ancestors, root first, valid when lineageOK
-	lineageOK    bool    // the lineage read succeeded; false keeps the last chain
+	conductRaw   string     // raw @claudemux_conducting value, "" when unset/unreadable
+	deferMark    deferMark  // this session's defer, valid when deferMarkOK
+	deferMarkOK  bool       // the mark read succeeded; false keeps the last mark
+	fleet        []fleetRow // every session, for judging a defer's blocker
+	fleetOK      bool       // the listing succeeded; false is never "blocker gone"
+	claudePane   string     // the claude pane this poll bound to, "" when none was seen
+	unmapped     bool       // a claude pane was seen, and the hook has written no map for it
+	sessionName  string     // this head's tmux session, valid when lineageOK
+	lineage      []crumb    // handoff ancestors, root first, valid when lineageOK
+	lineageOK    bool       // the lineage read succeeded; false keeps the last chain
 }
 
 // turnEndedByIdle reports whether kind reads as "the main thread's turn
@@ -1454,7 +1492,15 @@ func (m model) acquireSummarizer() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case undeferDoneMsg:
+		// The message could not be typed, so the session is still deferred;
+		// the chip says so until the next key.
+		m.undeferNote = !msg.sent
+		return m, nil
+
 	case tea.KeyMsg:
+		// Any key acknowledges the undefer note.
+		m.undeferNote = false
 		if m.helpVisible {
 			return m.headHelpKey(msg)
 		}
@@ -1542,7 +1588,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// clearing asks what unblocked it. `D` below re-opens the
 			// blocker prompt on an already-deferred session to edit the
 			// blocker rather than clear it. Unlike
-			// space there is no pending/optimistic layer here — deferRaw
+			// space there is no pending/optimistic layer here — deferMark
 			// simply lags one poll behind the change, which the brief
 			// accepts. No-op outside tmux: there is no owning session to mark.
 			if m.selfPane == "" {
@@ -1550,12 +1596,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.deferPrompting = true
 			m.deferInput = ""
+			m.deferComplete.reset()
+			m.deferEditValue = ""
 			m.deferClearing = false
-			if isDeferValue(m.deferRaw) {
+			if isDeferValue(m.deferMark.Raw) {
 				// Clearing asks why first, so the session learns its wait
 				// is over (see deferPromptKey).
 				m.deferClearing = true
-				m.deferWas = m.deferReason
+				m.deferWas = m.deferMark.Reason
 			}
 			return m, nil
 		case "D":
@@ -1571,8 +1619,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.deferPrompting = true
 			m.deferClearing = false
 			m.deferInput = ""
-			if isDeferValue(m.deferRaw) {
-				m.deferInput = sanitizeDeferReason(m.deferReason)
+			m.deferComplete.reset()
+			m.deferEditValue = ""
+			if isDeferValue(m.deferMark.Raw) {
+				m.deferInput = sanitizeDeferReason(m.deferMark.Reason)
+				m.deferEditValue = m.deferMark.Raw
 			}
 			return m, nil
 		case "t":
@@ -1711,8 +1762,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ahead of the rotation early-returns below: the conduct chip must
 		// track the lobby regardless of which transcript this head is bound to.
 		m.conductRaw = msg.conductRaw
-		m.deferRaw = msg.deferRaw
-		m.deferReason = msg.deferReason
+		if msg.deferMarkOK {
+			m.deferMark = msg.deferMark
+		}
+		m.fleet, m.fleetOK = msg.fleet, msg.fleetOK
 		if msg.claudePane != "" {
 			m.claudePane = msg.claudePane
 		}
@@ -1782,7 +1835,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recomputeFromEvents(msg.time)
 		pubCmd := m.maybePublishState(msg.time)
 		infoCmds := m.maybePublishInfo()
-		allPub := tea.Batch(append(infoCmds, pubCmd, startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.time))...)
+		// After the recompute, so the watcher judges this session by the state
+		// this poll just read; folded into allPub so every return below keeps it.
+		deferCmd := m.watchDefer(msg.time, msg.deferMarkOK)
+		allPub := tea.Batch(append(infoCmds, pubCmd, deferCmd, startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.time))...)
 		m.lastUpdate = msg.time
 		m.autoArmTeardown(prevTyped, msg.time)
 		// A ready gate is evidence gathered at the moment it opened, not a
@@ -1819,6 +1875,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.issueSummarize(), allPub)
 		}
 		return m, allPub
+
+	case deferReleasedMsg:
+		// A failed clear leaves the mark set, so the watcher must be free to
+		// try again; the nudge, though, may already have been typed, and a
+		// second copy would land as a new prompt. The retry only clears.
+		if !msg.cleared {
+			m.deferRelease = watchNone
+			m.deferNudgeSpent = true
+		}
+		return m, nil
 
 	case permitProbeMsg:
 		m.permit.observe(msg.at, msg.up, msg.ok)
@@ -2933,7 +2999,8 @@ func formatDuration(d time.Duration) string {
 // enter defers with whatever was typed (an empty blocker still defers — the
 // reason is a note, not a gate); esc and ctrl+c back out without changing
 // anything, which for a `D` edit leaves the recorded blocker as it was. Every
-// other key edits the text, so q or esc can't quit the pane mid-sentence.
+// other key edits the text, so q or esc can't quit the pane mid-sentence;
+// Tab and Shift+Tab complete other sessions' names (deferPromptEdit).
 func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
@@ -2943,11 +3010,18 @@ func (m model) deferPromptKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.deferClearing {
 			return m.undeferEnter()
 		}
-		reason := m.deferInput
+		input, editValue := m.deferInput, m.deferEditValue
 		m.closeDeferPrompt()
-		return m, setDeferCmd(m.selfPane, true, reason)
+		self, rows := m.deferScope()
+		return m, deferSubmitCmd(m.selfPane, editValue, input, self, rows)
 	}
-	m.deferInput = deferInputKey(m.deferInput, msg)
+	if m.deferClearing {
+		// What unblocked it is free text: no session names to complete.
+		m.deferInput = deferInputKey(m.deferInput, msg)
+		return m, nil
+	}
+	self, rows := m.deferScope()
+	m.deferInput = deferPromptEdit(m.deferInput, &m.deferComplete, msg, deferCandidates(self, rows))
 	return m, nil
 }
 
@@ -2958,6 +3032,8 @@ func (m *model) closeDeferPrompt() {
 	m.deferClearing = false
 	m.deferInput = ""
 	m.deferWas = ""
+	m.deferComplete.reset()
+	m.deferEditValue = ""
 }
 
 // undeferEnter is enter in the undefer prompt. A blank line clears the defer
@@ -2974,12 +3050,33 @@ func (m model) undeferEnter() (model, tea.Cmd) {
 	}
 	msg := undeferMessage(m.deferWas, m.deferInput)
 	m.closeDeferPrompt()
-	return m, undeferCmd(m.selfPane, m.claudePane, msg)
+	return m, undeferCmd(m.selfPane, m.claudePane, m.sessionName, msg)
+}
+
+// deferScope is this head's own session and the sessions its blocker can
+// name. Both are empty until a poll has read the session name and a good
+// listing: without its own name the head would offer itself, and a failed
+// listing would link against sessions that may be gone. Only rows that publish
+// a claudemux state are in scope, matching the lobby's list: the lobby's own
+// session and plain tmux sessions are not blockers anyone hands work to. The
+// filter lives here, not in parseFleet, because the watcher needs every row to
+// tell a gone blocker from a present one.
+func (m model) deferScope() (self string, rows []fleetRow) {
+	if m.sessionName == "" || !m.fleetOK {
+		return "", nil
+	}
+	for _, r := range m.fleet {
+		if r.State != "" {
+			rows = append(rows, r)
+		}
+	}
+	return m.sessionName, rows
 }
 
 // deferChipText is the defer chip slot for both statusbar layouts: the
 // blocker prompt while one is being typed, else the chip for the published
-// mark.
+// mark, else the note that a blocker just finished — which explains why an
+// idle session left defer on its own.
 func (m model) deferChipText() string {
 	if m.deferPrompting && m.deferClearing {
 		text := undeferPromptText(m.deferInput)
@@ -2989,9 +3086,76 @@ func (m model) deferChipText() string {
 		return swDeferStyle.Render(text)
 	}
 	if m.deferPrompting {
-		return swDeferStyle.Render(deferPromptText(m.deferInput))
+		self, rows := m.deferScope()
+		_, link := deferSubmit(m.deferInput, self, rows)
+		return swDeferStyle.Render(deferPromptText(m.deferInput, link.set()))
 	}
-	return deferChip(m.deferRaw, m.deferReason)
+	if m.undeferNote {
+		return swDeferStyle.Render("◆ " + undeferNotSent)
+	}
+	if c := deferChip(m.deferMark.Raw, m.deferMark.Reason); c != "" {
+		return c
+	}
+	return m.deferDoneNote
+}
+
+// deferOwnState is the one place the defer watcher's view of this session is
+// classified. idle is the plain idle-at-prompt state only: StateIdle already
+// excludes an open question (Asking), a permission dialog (permitOverride's
+// Awaiting), booting (Waiting) and background work (Background/Unsure), and
+// only there may a nudge be typed. working is mid-turn as the teardown watch
+// counts it (Thinking, Tool, Compacting), minus a Tool that is an open
+// AskUserQuestion, which is the human's turn, not the session's.
+func deferOwnState(s State) (idle, working bool) {
+	idle = s.Kind == StateIdle
+	working = !teardownTurnEnded(s.Kind) && !isWaiting(statePublishValue(s))
+	return idle, working
+}
+
+// watchDefer folds one poll into the defer watcher and returns the tmux work
+// it calls for: marking the blocker seen, or releasing the defer. markOK is
+// whether this poll's mark read succeeded; m.deferMark holds the last good
+// mark either way.
+func (m *model) watchDefer(now time.Time, markOK bool) tea.Cmd {
+	idle, working := deferOwnState(m.state)
+	if markOK && !isDeferValue(m.deferMark.Raw) {
+		// The mark is gone, by our release or anyone's: nothing is in flight
+		// and the next defer gets its own nudge.
+		m.deferRelease, m.deferNudgeSpent = watchNone, false
+	}
+	if markOK && isDeferValue(m.deferMark.Raw) && m.deferRelease == watchNone {
+		// A defer is set that is not ours to release yet: whatever finished
+		// before it is old news, and must not resurface once it clears.
+		m.deferDoneNote = ""
+	}
+	var cmd tea.Cmd
+	act, gone := watchNone, false
+	if m.deferRelease == watchNone {
+		verdict := blockerHold
+		if m.deferMark.Link.set() {
+			verdict = judgeBlocker(m.deferMark.Link, m.deferMark.Seen, m.fleet, m.fleetOK)
+		}
+		act, gone = m.deferWatch.step(deferWatchInput{
+			Now: now, Mark: m.deferMark, MarkOK: markOK, Verdict: verdict,
+			OwnIdle: idle, OwnWorking: working,
+			NudgeEnabled: m.deferAutoNudge && !m.deferNudgeSpent,
+		})
+	}
+	switch act {
+	case watchMarkSeen:
+		cmd = deferSeenCmd(m.selfPane)
+	case watchClear, watchClearNudge:
+		blocker := m.deferMark.Link.On
+		text := deferNudgeText(blocker, gone, m.deferMark.Reason)
+		cmd = deferReleaseCmd(m.selfPane, m.paneDir, text, act == watchClearNudge)
+		m.deferRelease = act
+		m.deferDoneNote = deferDoneChip(blocker, gone)
+		return cmd
+	}
+	if working {
+		m.deferDoneNote = ""
+	}
+	return cmd
 }
 
 // teardownKey advances the teardown state machine one press of `x`.

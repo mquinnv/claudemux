@@ -461,6 +461,32 @@ func TestTeardownCommandEmptyStringIsPreserved(t *testing.T) {
 	}
 }
 
+func TestDeferAutoNudgeDefaultsOn(t *testing.T) {
+	writeConfig(t, "teardown:\n  command: /done\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !cfg.Defer.AutoNudge {
+		t.Error("defer.auto_nudge = false with no defer block, want true")
+	}
+}
+
+// loadConfig decodes into defaults, so an explicit false must beat the true
+// default rather than being mistaken for "unset".
+func TestDeferAutoNudgeOff(t *testing.T) {
+	writeConfig(t, "defer:\n  auto_nudge: false\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Defer.AutoNudge {
+		t.Error("defer.auto_nudge = true, want false")
+	}
+}
+
 func TestTeardownCommandOverride(t *testing.T) {
 	writeConfig(t, "teardown:\n  command: /wrapup\n")
 

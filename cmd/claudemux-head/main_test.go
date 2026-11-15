@@ -14,6 +14,12 @@ func TestKnownSubcommandsAreAccepted(t *testing.T) {
 	}
 }
 
+func TestDeferIsKnownSubcommand(t *testing.T) {
+	if got, ok := unknownSubcommand([]string{"claudemux-head", "defer", "--clear"}); ok {
+		t.Errorf("defer rejected as %q", got)
+	}
+}
+
 func TestUnknownSubcommand(t *testing.T) {
 	cases := []struct {
 		name string

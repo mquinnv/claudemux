@@ -257,6 +257,63 @@ func TestRelinkArgs(t *testing.T) {
 	}
 }
 
+func deferredRec(name, on string, deferred bool) lostSession {
+	l := lostRec(name, "x-"+name, "/p", "", 1, false)
+	l.Rec.Deferred, l.Rec.DeferOn = deferred, on
+	return l
+}
+
+// A restored link never carries the seen flag: a blocker interrupted by the
+// reboot may come back at an idle prompt, and must be seen working again
+// before it can read as finished. A record written before the flag was
+// dropped still loads, and its old key changes nothing.
+func TestDeferRelinkArgs(t *testing.T) {
+	old := deferredRec("beejax", "", true)
+	if err := json.Unmarshal([]byte(`{"session_name":"beejax","deferred":true,"defer_on":"phenix-2","defer_on_seen":true}`), &old.Rec); err != nil {
+		t.Fatalf("an old record with defer_on_seen must still load: %v", err)
+	}
+	restored := []lostSession{deferredRec("phenix-1", "phenix-2", true),
+		old, lostRec("phenix-2", "2", "/p", "", 1, false)}
+	created := map[string]int64{"phenix-1": 400, "beejax": 401, "phenix-2": 1763000500}
+	got := deferRelinkArgs(restored, created)
+	want := [][]string{
+		{"set-option", "-t", "phenix-1:", deferOnOption, "phenix-2", ";",
+			"set-option", "-t", "phenix-1:", deferOnCreatedOption, "1763000500"},
+		{"set-option", "-t", "beejax:", deferOnOption, "phenix-2", ";",
+			"set-option", "-t", "beejax:", deferOnCreatedOption, "1763000500"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("deferRelinkArgs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if strings.Join(got[i], " ") != strings.Join(want[i], " ") {
+			t.Errorf("argv %d = %v, want %v", i, got[i], want[i])
+		}
+		for _, a := range got[i] {
+			if a == deferOnSeenOption {
+				t.Errorf("argv %d sets %s: %v", i, deferOnSeenOption, got[i])
+			}
+		}
+	}
+}
+
+// A blocker that was not restored is gone after a reboot, not closed: the
+// defer stays plain rather than pointing at a missing session.
+func TestDeferRelinkArgsBlockerNotRestored(t *testing.T) {
+	restored := []lostSession{deferredRec("phenix-1", "phenix-2", true)}
+	if got := deferRelinkArgs(restored, map[string]int64{"phenix-1": 400, "phenix-2": 500}); len(got) != 0 {
+		t.Errorf("deferRelinkArgs = %v, want none", got)
+	}
+}
+
+func TestDeferRelinkArgsNotDeferred(t *testing.T) {
+	restored := []lostSession{deferredRec("phenix-1", "phenix-2", false),
+		lostRec("phenix-2", "2", "/p", "", 1, false)}
+	if got := deferRelinkArgs(restored, map[string]int64{"phenix-2": 500}); len(got) != 0 {
+		t.Errorf("deferRelinkArgs = %v, want none", got)
+	}
+}
+
 func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
 	m := newSwModel("%0")
 	a := lostRec("a", "1", "/p", "", 1, false)

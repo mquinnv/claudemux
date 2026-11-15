@@ -562,10 +562,9 @@ type claudeGoneMsg struct{ gone bool }
 // teardownKeyDelay. ok is false when pane or text is empty, so a failed lookup
 // types nothing.
 //
-// The input line is always cleared first (see sendClearArgs). For teardown the
-// line must hold exactly the wrap-up text; for an undefer it means the message
-// can never be glued onto a half-typed draft, run in bash mode when the draft
-// starts with "!", or turn into a slash command.
+// The input line is always cleared first (see sendClearArgs): the line must
+// hold exactly the wrap-up text. An undefer's note does NOT come this way — it
+// is typed only into an empty prompt, never over a draft (see undeferCmd).
 func promptKeysArgs(pane, text string) (pre [][]string, enter []string, ok bool) {
 	literal, ok := sendLiteralArgs(pane, text)
 	if !ok {

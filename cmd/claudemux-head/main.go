@@ -17,7 +17,7 @@ var version = "dev"
 // must be kept in step with the dispatch chain at the top of main — a
 // subcommand added there but not here becomes a usage error, which
 // TestKnownSubcommandsAreAccepted is what catches.
-var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner", "project", "statusline"}
+var knownSubcommands = []string{"version", "config", "boot", "hook", "switchboard", "onboard", "banner", "project", "statusline", "defer"}
 
 // unknownSubcommand reports a first argument that reads as a subcommand — a
 // bare word, not a flag — that this binary does not implement. Anything
@@ -107,6 +107,12 @@ func main() {
 	// `banner` runs inside the switchboard's display-popup (see banner.go).
 	if len(os.Args) > 1 && os.Args[1] == "banner" {
 		os.Exit(runBanner(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
+	// `defer` is run by agents (the handoff skill) to mark their own session
+	// as waiting on another one.
+	if len(os.Args) > 1 && os.Args[1] == "defer" {
+		os.Exit(runDefer(os.Args[2:], os.Stdout, os.Stderr, os.Getenv, execTmux))
 	}
 
 	// Everything past this point is the session head. A first argument that

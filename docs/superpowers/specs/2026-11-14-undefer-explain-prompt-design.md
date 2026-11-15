@@ -56,16 +56,16 @@ The same prompt serves a handoff's WAIT mark.
 blocker was recorded, `Blocker cleared: <typed text>`. The recorded blocker is
 the one captured when the prompt opened, sanitised the usual way.
 
-**Delivery.** Typed into the session's claude pane and submitted with the
-literal-then-delayed-Enter sequence teardown already uses, factored out of
-`teardownSendCmd` so both callers share it. `C-u` goes first, as in teardown:
-the line is cleared so the message can never be glued onto a draft, run in bash
-mode (`!`), or become a slash command. The message is submitted before the
-defer mark is cleared, so the conductor cannot carry the user into the session
-before the prompt is in, and the lobby holds the conductor for a few seconds
-after a send. The lobby
-targets the row's `ClaudePane`; the head resolves its pane as teardown does. A
-session that is mid-turn gets the message queued by Claude, which is fine.
+**Delivery.** Typed into the session's claude pane and submitted through the
+same empty-prompt nudge the linked-defer release uses (`nudgeClaudePane`): the
+pane is captured, and the message is typed only if Claude's input is verifiably
+empty. The line is never cleared first; a draft is the user's. If the message
+cannot be typed, nothing is sent, the session stays deferred, and both surfaces
+show a note until the next key. The message is submitted before the defer mark
+is cleared, so the conductor cannot carry the user into the session before the
+prompt is in, and the lobby holds the conductor for a few seconds after a send.
+The lobby targets the row's `ClaudePane`; the head uses the pane its poll bound
+to. A session that is mid-turn gets the message queued by Claude, which is fine.
 
 **Guard.** If the session's state is a permission prompt, a question dialog,
 the folder trust prompt, or still starting, or no claude pane is known, nothing is typed into

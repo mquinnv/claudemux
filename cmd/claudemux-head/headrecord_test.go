@@ -1,10 +1,70 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestSessionRecordCarriesDeferLink: the link options die with tmux too, so
+// the record keeps the blocker's name for restore. Not the seen flag: after a
+// reboot the blocker must be seen working again (deferRelinkArgs).
+func TestSessionRecordCarriesDeferLink(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := model{sessionID: "abc", workDir: "/p/x", deferMark: deferMark{
+		Raw: "1", Reason: "phenix-2", Link: deferLink{On: "phenix-2", Created: "1762999000"}, Seen: true}}
+	r := m.sessionRecordFor(now)
+	if r.DeferOn != "phenix-2" {
+		t.Errorf("linked record = %q, want phenix-2", r.DeferOn)
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "defer_on_seen") {
+		t.Errorf("record json carries the seen flag: %s", b)
+	}
+	var back sessionRecord
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.DeferOn != "phenix-2" {
+		t.Errorf("round trip = %q, want phenix-2", back.DeferOn)
+	}
+	m.deferMark = deferMark{Raw: "1", Reason: "Jean"}
+	r = m.sessionRecordFor(now)
+	if r.DeferOn != "" {
+		t.Errorf("unlinked record = %q, want empty", r.DeferOn)
+	}
+	if b, _ := json.Marshal(r); strings.Contains(string(b), "defer_on") {
+		t.Errorf("unlinked record json has link fields: %s", b)
+	}
+}
+
+// TestRecordDueOnLinkChange: linking writes the record at once even when mark
+// and reason are unchanged. The blocker being seen does not: the record no
+// longer carries that flag.
+func TestRecordDueOnLinkChange(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := model{selfPane: "%1", sessionID: "abc", lastRecordAt: now,
+		deferMark: deferMark{Raw: "1", Reason: "CI"}}
+	m.lastRecordState = statePublishValue(m.state)
+	m.lastRecordDefer = m.recordDeferKey()
+	if m.recordDue(now.Add(time.Second)) {
+		t.Fatal("due with nothing changed")
+	}
+	m.deferMark.Link = deferLink{On: "phenix-2", Created: "1762999000"}
+	if !m.recordDue(now.Add(time.Second)) {
+		t.Fatal("not due after link set")
+	}
+	m.lastRecordDefer = m.recordDeferKey()
+	m.deferMark.Seen = true
+	if m.recordDue(now.Add(time.Second)) {
+		t.Fatal("due after blocker seen; the record does not carry the seen flag")
+	}
+}
 
 func TestRecordDue(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
@@ -176,7 +236,7 @@ func TestParseSessionNamePath(t *testing.T) {
 // session, so the record must carry it for restore to put it back.
 func TestSessionRecordCarriesDefer(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	m := model{sessionID: "abc", workDir: "/p/x", deferRaw: "1", deferReason: " waiting on\tJean "}
+	m := model{sessionID: "abc", workDir: "/p/x", deferMark: deferMark{Raw: "1", Reason: " waiting on\tJean "}}
 	r := m.sessionRecordFor(now)
 	if !r.Deferred || r.DeferReason != "waiting on Jean" {
 		t.Errorf("deferred record = %v %q, want true %q", r.Deferred, r.DeferReason, "waiting on Jean")
@@ -184,11 +244,11 @@ func TestSessionRecordCarriesDefer(t *testing.T) {
 	if r.DeferWait {
 		t.Error("a user defer recorded as a handoff wait")
 	}
-	m.deferRaw = deferWaitValue
+	m.deferMark.Raw = deferWaitValue
 	if r := m.sessionRecordFor(now); !r.Deferred || !r.DeferWait {
 		t.Errorf("handoff wait record = %v %v, want deferred and wait", r.Deferred, r.DeferWait)
 	}
-	m.deferRaw = ""
+	m.deferMark.Raw = ""
 	if r := m.sessionRecordFor(now); r.Deferred || r.DeferReason != "" {
 		t.Errorf("undeferred record = %v %q, want false \"\"", r.Deferred, r.DeferReason)
 	}
@@ -203,12 +263,12 @@ func TestRecordDueOnDeferChange(t *testing.T) {
 	if m.recordDue(now.Add(time.Second)) {
 		t.Fatal("due with nothing changed")
 	}
-	m.deferRaw, m.deferReason = "1", "CI"
+	m.deferMark.Raw, m.deferMark.Reason = "1", "CI"
 	if !m.recordDue(now.Add(time.Second)) {
 		t.Fatal("not due after defer set")
 	}
 	m.lastRecordDefer = m.recordDeferKey()
-	m.deferReason = "review"
+	m.deferMark.Reason = "review"
 	if !m.recordDue(now.Add(time.Second)) {
 		t.Fatal("not due after blocker changed")
 	}

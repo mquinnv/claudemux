@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Haiku 5.5 · Claude
+ ▝▝   ▝▝   ~/project · /rc
+
+  ⎿  SessionStart:startup says: ○○○ Semgrep Guardian : this session is protected, files are scanned as they
+     are written
+  ⎿  SessionStart:startup says: team-core: team - 14 prohibitions loaded
+
+❯ Use your AskUserQuestion tool to ask me one yes/no question about whether I like tea. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Tea
+
+Do you like tea?
+
+❯ 1. Yes
+     You like tea.
+  2. No
+     You do not like tea.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

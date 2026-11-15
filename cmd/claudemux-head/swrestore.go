@@ -253,9 +253,42 @@ func relinkArgs(restored []lostSession, created map[string]int64) [][]string {
 	return out
 }
 
-// swRelinkCmd re-stamps handoff parent links on the relaunched sessions.
-// Best-effort: a failure leaves a child unlinked (it shows as a root), which
-// is not worth failing the restore over.
+// deferRelinkArgs builds one tmux argv per restored deferred child whose
+// recorded blocker was also restored and is live in created. After a reboot
+// every blocker is momentarily absent, so a link to a session that was not
+// restored is dropped (the defer stays plain, as restore already set it)
+// rather than left to be read as "every blocker closed". The seen flag is
+// never restored, for the same reason: a blocker the reboot interrupted may
+// come back at an idle prompt, so it must be seen working again before it
+// can read as finished. The relink is best-effort like relinkArgs; if it
+// fails the defer stays a plain one, and the head's next record write drops
+// the persisted link.
+func deferRelinkArgs(restored []lostSession, created map[string]int64) [][]string {
+	names := make(map[string]bool, len(restored))
+	for _, l := range restored {
+		names[l.Rec.SessionName] = true
+	}
+	var out [][]string
+	for _, l := range restored {
+		child, on := l.Rec.SessionName, l.Rec.DeferOn
+		if !l.Rec.Deferred || on == "" || !names[on] {
+			continue
+		}
+		c, ok := created[on]
+		if !ok {
+			continue
+		}
+		out = append(out, []string{
+			"set-option", "-t", child + ":", deferOnOption, on, ";",
+			"set-option", "-t", child + ":", deferOnCreatedOption, strconv.FormatInt(c, 10)})
+	}
+	return out
+}
+
+// swRelinkCmd re-stamps handoff parent links and defer links on the
+// relaunched sessions, from one listing of their new creation times.
+// Best-effort: a failure leaves a child unlinked (it shows as a root, or its
+// defer stays a plain one), which is not worth failing the restore over.
 func swRelinkCmd(restored []lostSession) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -276,6 +309,9 @@ func swRelinkCmd(restored []lostSession) tea.Cmd {
 			}
 		}
 		for _, args := range relinkArgs(restored, created) {
+			_ = exec.CommandContext(ctx, "tmux", args...).Run()
+		}
+		for _, args := range deferRelinkArgs(restored, created) {
 			_ = exec.CommandContext(ctx, "tmux", args...).Run()
 		}
 		return nil

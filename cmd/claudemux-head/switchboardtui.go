@@ -384,21 +384,29 @@ type swModel struct {
 	// selection on enter — a poll can reorder the list while the user types.
 	// deferEditing marks the `D`-on-a-deferred-row case, where the prompt
 	// starts pre-filled and is wording-wise an edit rather than a new defer;
-	// the tmux write is identical either way.
-	deferring bool
-	// undeferHoldUntil keeps the conductor from stepping until then — set when
-	// an undefer sends text, see undeferHold.
-	undeferHoldUntil time.Time
-	deferInput       string
-	deferTarget      string
-	deferName        string
-	deferEditing     bool
+	// deferEditValue is that row's mark value ("1" or "wait"), "" for a new
+	// defer: enter keeps it, and rewrites only the reason unless the text
+	// names a session to relink to. deferComplete is the prompt's Tab cycle
+	// (defercomplete.go).
+	deferring      bool
+	deferInput     string
+	deferTarget    string
+	deferName      string
+	deferEditing   bool
+	deferEditValue string
+	deferComplete  deferCompleter
 	// deferClearing marks `d` on a deferred row: the prompt asks what
 	// unblocked it, and enter tells the session. deferWas is the blocker
 	// recorded when it opened, kept because the snapshot may move on while
 	// the user types.
 	deferClearing bool
 	deferWas      string
+	// undeferHoldUntil keeps the conductor from stepping until then — set when
+	// an undefer sends text, see undeferHold.
+	undeferHoldUntil time.Time
+	// undeferNote says an undefer's message could not be delivered and the
+	// session is still deferred. Shown on the status line until the next key.
+	undeferNote string
 	// restart records that the user (R) or the binary watcher asked for a
 	// re-exec rather than a quit; runSwitchboard checks it after Run
 	// returns, mirroring the session head's flow in main().
@@ -973,7 +981,19 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, swSwitchCmd(m.cond.client, msg.name, nil)
 		}
 		return m, nil
+	case undeferDoneMsg:
+		// The message could not be typed, so the session is still deferred:
+		// say so, and let the conductor go again — nothing was sent for it
+		// to wait out.
+		if !msg.sent {
+			m.undeferNote = msg.name + " " + undeferNotSent
+			m.undeferHoldUntil = time.Time{}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		// Any key acknowledges the undefer note.
+		m.undeferNote = ""
 		if m.helpVisible {
 			return m.switchboardHelpKey(msg)
 		}
@@ -1022,11 +1042,19 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// An empty blocker still defers: the reason is a note, not a
 				// gate. Clearing an edited blocker back to empty is therefore
 				// a real outcome, not a cancel — esc is the way to keep it.
-				target, reason := m.deferTarget, m.deferInput
+				target, input, editValue := m.deferTarget, m.deferInput, m.deferEditValue
+				name := m.deferName
 				m.closeDeferPrompt()
-				return m, setDeferCmd(target, true, reason)
+				return m, deferSubmitCmd(target, editValue, input, name, fleetFromSnapshot(m.snap.Sessions))
 			default:
-				m.deferInput = deferInputKey(m.deferInput, msg)
+				if m.deferClearing {
+					// What unblocked it is free text: no session names
+					// to complete.
+					m.deferInput = deferInputKey(m.deferInput, msg)
+					return m, nil
+				}
+				m.deferInput = deferPromptEdit(m.deferInput, &m.deferComplete, msg,
+					deferCandidates(m.deferName, fleetFromSnapshot(m.snap.Sessions)))
 			}
 			return m, nil
 		}
@@ -1121,6 +1149,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if sess.Deferred {
 					m.deferWas = sess.DeferReason
 				}
+				m.deferEditValue = ""
+				m.deferComplete.reset()
 				m.deferTarget = swDeferTarget(sess)
 				m.deferName = sess.Name
 			}
@@ -1138,8 +1168,14 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.deferClearing = false
 				m.deferWas = ""
 				m.deferEditing = sess.Deferred
+				m.deferEditValue = ""
+				m.deferComplete.reset()
 				if sess.Deferred {
 					m.deferInput = sanitizeDeferReason(sess.DeferReason)
+					m.deferEditValue = deferOnValue
+					if sess.DeferWait {
+						m.deferEditValue = deferWaitValue
+					}
 				}
 				m.deferTarget = swDeferTarget(sess)
 				m.deferName = sess.Name
@@ -1623,12 +1659,16 @@ func (m swModel) View() string {
 	case m.deferring && m.deferClearing:
 		status = swDeferStyle.Render("undefer "+m.deferName+" ") + undeferPromptText(m.deferInput)
 		statusStyled = false
+	case m.undeferNote != "":
+		status = swDeferStyle.Render(m.undeferNote)
+		statusStyled = false
 	case m.deferring:
 		verb := "defer "
 		if m.deferEditing {
 			verb = "blocker "
 		}
-		status = swDeferStyle.Render(verb+m.deferName+" ") + deferPromptText(m.deferInput)
+		_, link := deferSubmit(m.deferInput, m.deferName, fleetFromSnapshot(m.snap.Sessions))
+		status = swDeferStyle.Render(verb+m.deferName+" ") + deferPromptText(m.deferInput, link.set())
 		statusStyled = false
 	case m.createBusy:
 		status = "creating session…"
@@ -1662,9 +1702,9 @@ func (m swModel) View() string {
 		footerText = "type a name · ↑↓ next match · enter jump · esc cancel"
 	}
 	if m.deferring {
-		footerText = "enter defer · esc cancel"
+		footerText = "enter defer · tab session · esc cancel"
 		if m.deferEditing {
-			footerText = "enter save · esc cancel"
+			footerText = "enter save · tab session · esc cancel"
 		}
 		if m.deferClearing {
 			footerText = "enter undefer · esc cancel"
@@ -1910,6 +1950,8 @@ func (m *swModel) closeDeferPrompt() {
 	m.deferEditing = false
 	m.deferClearing = false
 	m.deferWas = ""
+	m.deferEditValue = ""
+	m.deferComplete.reset()
 }
 
 // undeferEnter is enter in the undefer prompt. A blank line clears the defer
@@ -1934,7 +1976,7 @@ func (m swModel) undeferEnter() (tea.Model, tea.Cmd) {
 	msg := undeferMessage(m.deferWas, m.deferInput)
 	m.closeDeferPrompt()
 	m.undeferHoldUntil = time.Now().Add(undeferHold)
-	return m, undeferCmd(target, sess.ClaudePane, msg)
+	return m, undeferCmd(target, sess.ClaudePane, sess.Name, msg)
 }
 
 // undeferHold is how long the conductor sits out after an undefer that sends
