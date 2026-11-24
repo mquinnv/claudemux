@@ -30,7 +30,8 @@ import "strings"
 const stayMarker = "#stay"
 
 // stayMarkerOption carries whether the session's current turn stays (see
-// turnStays: a #stay-marked prompt or a "Chat about this" answer): "1" when
+// turnStays: a #stay-marked prompt, a "Chat about this" answer or a `!`
+// command): "1" when
 // it does, unset otherwise. It is published in the same tmux
 // invocation as @claudemux_state (statePublishArgs) because the marked prompt
 // and the busy state it causes come from the same transcript record: publishing
@@ -93,11 +94,20 @@ func stripCode(prompt string) string {
 // the human is escorted away at the very moment they asked to talk.
 const clarifyResultPrefix = "The user wants to clarify these questions."
 
+// bangInputPrefix opens the user record Claude Code writes for a `!` shell
+// command typed at the prompt (`!gh pr list`); its output follows as a second
+// user record opening <bash-stdout> or <bash-stderr>. The model then answers
+// the output (2.1.330: an assistant turn follows within seconds), so the
+// session really does go busy — and to the conductor that is a hand-back. It
+// is not one: the human ran the command to look at something here, and is
+// reading its output when the escort arrives.
+const bangInputPrefix = "<bash-input>"
+
 // turnStays reports whether the turn the session is on was started by
 // something that asked the conductor to leave the human here: a #stay-marked
-// typed prompt, or a "Chat about this" answer to an AskUserQuestion. Whichever
-// of the two is newer decides, so the next typed prompt (unmarked) ends a
-// clarify stay exactly as it ends a #stay one.
+// typed prompt, a "Chat about this" answer to an AskUserQuestion, or a `!`
+// command. Whichever is newest decides, so the next typed prompt (unmarked)
+// ends a clarify or `!` stay exactly as it ends a #stay one.
 //
 // The clarify result only counts when its tool_use_id names an
 // AskUserQuestion call: any tool's error output could carry the same words,
@@ -112,6 +122,11 @@ func turnStays(events []Event) bool {
 			if tr.IsError && strings.Contains(tr.Content, clarifyResultPrefix) && askToolUse(events[:i], tr.ToolUseID) {
 				return true
 			}
+		}
+		// Only the command record decides: its output record is skipped like
+		// any other injected text, so the command behind it is found next.
+		if strings.HasPrefix(e.UserText, bangInputPrefix) {
+			return true
 		}
 		if genuinePrompt(e) {
 			return stayMarked(e.UserText)

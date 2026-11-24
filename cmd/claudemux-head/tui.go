@@ -266,8 +266,8 @@ type model struct {
 	// something typed into this pane.
 	lastTypedPeer bool
 	// turnStays is whether the current turn asked the conductor to leave
-	// the human here (a #stay prompt or a "Chat about this" answer) — see
-	// turnStays in staymark.go. Published with the state.
+	// the human here (a #stay prompt, a "Chat about this" answer or a `!`
+	// command) — see turnStays in staymark.go. Published with the state.
 	turnStays bool
 	summary   Summary
 	// firstReply is the reader's FirstReply, the summarizer's second anchor

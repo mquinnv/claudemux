@@ -176,6 +176,11 @@ without the marker: Claude picks the turn back up to ask what you want to discus
 and that turn is a `#stay` turn, so you aren't carried off just as you asked to talk.
 Your next prompt hands the session back as usual.
 
+So does running a shell command with `!`. You typed `!gh pr list` to look at
+something, and Claude replies to the output, so the session does go busy for a
+moment — but that turn is a `#stay` turn too, and you're still there to read what
+the command printed. Again, your next prompt hands the session back.
+
 Every escorted arrival is announced: a small popup pulls in a locomotive and
 introduces the session you just landed in — what it's working on, its name, and
 which model is driving at what context — closing after two seconds or on your

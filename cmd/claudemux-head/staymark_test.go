@@ -284,6 +284,15 @@ func clarifyEvents(tool string, isErr bool) []Event {
 	}
 }
 
+// bangEvents is what `!gh pr list` leaves in the transcript (Claude Code
+// 2.1.330): the command and its output as two plain user records.
+func bangEvents() []Event {
+	return []Event{
+		{Type: "user", UserText: "<bash-input>gh pr list</bash-input>"},
+		{Type: "user", UserText: "<bash-stdout>6\tAG-115\tOPEN</bash-stdout><bash-stderr></bash-stderr>"},
+	}
+}
+
 func TestTurnStays(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -304,6 +313,23 @@ func TestTurnStays(t *testing.T) {
 			append(clarifyEvents("AskUserQuestion", true), Event{Type: "user", UserText: "more #stay"}), true},
 		{"injected notice does not end it",
 			append(clarifyEvents("AskUserQuestion", true), Event{Type: "user", UserText: "<task-notification>done</task-notification>"}), true},
+		{"! command still running", []Event{
+			{Type: "user", UserText: "go"}, {Type: "assistant", UserText: "done"},
+			{Type: "user", UserText: "<bash-input>gh pr list</bash-input>"}}, true},
+		{"! command, output in", bangEvents(), true},
+		{"! command, model replying to its output",
+			append(bangEvents(), Event{Type: "assistant", UserText: "One open PR."}), true},
+		{"! command with leading space",
+			[]Event{{Type: "user", UserText: "<bash-input> ./deploy.sh</bash-input>"}}, true},
+		{"! command that only wrote stderr", []Event{
+			{Type: "user", UserText: "<bash-input>false</bash-input>"},
+			{Type: "user", UserText: "<bash-stderr>boom</bash-stderr>"}}, true},
+		{"typed prompt after a ! command ends it",
+			append(bangEvents(), Event{Type: "user", UserText: "merge it"}), false},
+		{"! command after a typed prompt starts it", append(
+			[]Event{{Type: "user", UserText: "merge it"}, {Type: "assistant", UserText: "merged"}},
+			bangEvents()...), true},
+		{"a prompt that merely quotes the tag", []Event{{Type: "user", UserText: "what does <bash-input> mean"}}, false},
 	}
 	for _, c := range cases {
 		if got := turnStays(c.events); got != c.want {
