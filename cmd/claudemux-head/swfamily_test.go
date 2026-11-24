@@ -200,3 +200,24 @@ func TestArrangeFamiliesUnsetCreatedNeverAdopts(t *testing.T) {
 		t.Errorf("kid = depth %d from %q, want top-level orphan of p", got[1].Depth, got[1].From)
 	}
 }
+
+// Every member of a family, grandchildren included, carries the root's color
+// for the gutter bar; a lone session carries none, even one with a color of
+// its own, so a bar always means "these rows belong together". An orphan is
+// lone too: its parent is gone, so there is no block to tie it to.
+func TestArrangeFamiliesFamilyColor(t *testing.T) {
+	colored := func(s swSession, c string) swSession { s.Color = c; return s }
+	got := swArrangeFamilies([]swSession{
+		colored(fam("root", 10, "", 0), "aa0000"),
+		colored(fam("kid", 20, "root", 10), "00bb00"),
+		colored(fam("grandkid", 30, "kid", 20), "0000cc"),
+		colored(fam("lone", 40, "", 0), "dddd00"),
+		colored(fam("orphan", 50, "gone", 1), "ee00ee"),
+	})
+	want := map[string]string{"root": "aa0000", "kid": "aa0000", "grandkid": "aa0000", "lone": "", "orphan": ""}
+	for _, s := range got {
+		if s.FamilyColor != want[s.Name] {
+			t.Errorf("%s FamilyColor = %q, want %q", s.Name, s.FamilyColor, want[s.Name])
+		}
+	}
+}

@@ -61,7 +61,8 @@
   .fleet .c-reason { width: 28%; }
   .name { font-weight: 600; text-shadow: 0 0 1px rgba(0,0,0,.35); }
   .state { color: var(--busy); }
-  tr.waiting td:first-child { box-shadow: inset 3px 0 0 var(--wait); }
+  /* The left edge belongs to families (see familyEdges), as the gutter bar
+     does in the lobby; waiting is said by the orange state word. */
   tr.waiting .state { color: var(--wait); font-weight: 600; }
   .dim { color: var(--dim); }
   .topic { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
@@ -203,6 +204,9 @@
     }
     // Family members indent by depth; the web draws no tree glyphs.
     if (s.depth) c.style.paddingLeft = 'calc(8px + 1.1em * ' + s.depth + ')';
+    // Every row of a family wears its root's color down the left edge, so
+    // the block reads as one family rather than a run of separate rows.
+    if (s.fam_color) c.style.boxShadow = 'inset 3px 0 0 ' + s.fam_color;
     if (s.description) c.appendChild(el('div', 'sub desc', s.description));
     // Phones drop the topic column; the topic rides under the name instead.
     if (s.topic) c.appendChild(el('div', 'sub m-topic', s.topic));
@@ -289,8 +293,8 @@
   }
 
   // A closing row says how far the teardown has got where a deferred row
-  // says what it is blocked on; a waiting one keeps its orange edge, since
-  // the conductor still brings the engineer to it.
+  // says what it is blocked on; a waiting one keeps its orange state word,
+  // since the conductor still brings the engineer to it.
   // A family that is closing sits here whole, so a member that is not itself
   // closing (a deferred child, say) prints what it really is in place of a
   // borrowed "closing".
@@ -330,8 +334,26 @@
     return frag;
   }
 
+  // familyEdges marks each member of a family with the color its rows'
+  // left edge is drawn in: the root's, on the root and every row nested
+  // under it. A root with no child below it is a lone session and gets no
+  // edge. The server sends families as contiguous blocks, parents first,
+  // already re-rooted around any session the privacy filter hides, so one
+  // pass in list order is enough.
+  function familyEdges(sessions) {
+    var cur = null;
+    sessions.forEach(function (s, i) {
+      if (!s.depth) {
+        var next = sessions[i + 1];
+        cur = next && next.depth ? (s.color || 'var(--dim)') : null;
+      }
+      s.fam_color = cur;
+    });
+  }
+
   function render(v) {
     var now = Date.now();
+    familyEdges(v.sessions);
     var head = document.getElementById('headline');
     var meta = document.getElementById('headline-meta');
     var counts = v.counts.sessions + ' session' + (v.counts.sessions === 1 ? '' : 's') +

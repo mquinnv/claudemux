@@ -61,7 +61,7 @@ const (
 	// leading space, the marker and badge cells (each plus a space), and every
 	// fixed column after the topic, separators included. swTopicW subtracts it
 	// from the pane width to see what the topic can afford.
-	swRowChromeW = 1 + (swMarkerW + 1) + (emojiCellW + 1) + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
+	swRowChromeW = 1 + (swGutterW + 1) + (emojiCellW + 1) + swNameColW + 1 + 1 + swStateColW + swAgeColW + 2 + swCtxColW + 1 + swModelColW
 )
 
 // swTopicW is the topic column's width for one render — swTopicColW when the
@@ -249,33 +249,26 @@ func swHighlightRow(line string, width int) string {
 	return open + line + "\x1b[0m"
 }
 
-// swMarkerW is the marker cell's width: one glyph, no emoji.
-const swMarkerW = 1
+// swGutterW is the gutter cell's width: one glyph, no emoji.
+const swGutterW = 1
 
-// swDetailIndent is the name column's offset on line 1 (" marker emoji name"),
-// where a row's detail line starts.
-const swDetailIndent = 1 + swMarkerW + 1 + emojiCellW + 1
+// swGutterGlyph is the bar drawn down a family's left edge.
+const swGutterGlyph = "▌"
 
-// swMarker renders a row's marker cell, exactly swMarkerW wide. It is the
-// attention flag and nothing else: ◆ deferred, an orange dot waiting, a grey
-// dot waiting but deliberately snoozed, blank otherwise. Deferred wins
-// outright — a deferred session must not be forgotten, whether or not it is
-// currently waiting.
+// swGutter renders a row's gutter cell, exactly swGutterW wide: a bar in the
+// family root's color on every line of a family's block, blank beside a lone
+// session. It is the one thing in the lobby's leftmost column, so the eye
+// scanning down that edge sees families as blocks rather than a flat list.
 //
-// The action is not drawn here. It briefly was, and the front of the row then
-// held two emoji side by side — the action and the project badge — which read
-// as one jumble. The action belongs with its word in the state cell (see
-// swStateText); the front of the row is for which session it is.
-func swMarker(sess swSession, snoozed bool) string {
-	switch {
-	case sess.Deferred:
-		return swDeferStyle.Render("◆")
-	case isWaiting(sess.State) && snoozed:
-		return swUnknownStyle.Render("●")
-	case isWaiting(sess.State):
-		return swWaitStyle.Render("●")
+// It replaced an attention marker (● waiting, ◆ deferred) that only repeated
+// what the state cell and the DEFER badge already say. The one thing only
+// the marker told — a waiting session the user snoozed — now greys the state
+// cell instead (see the row renderer).
+func swGutter(sess swSession) string {
+	if !isHex6(sess.FamilyColor) {
+		return " "
 	}
-	return " "
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#" + sess.FamilyColor)).Render(swGutterGlyph)
 }
 
 // swStateText is the state cell's text: the action emoji, then the published
@@ -1492,10 +1485,14 @@ func (m swModel) View() string {
 			}
 			b.WriteString(rule + "\n")
 		}
-		marker := swMarker(sess, isWaiting(sess.State) && m.cond.isSnoozed(sess, now))
+		gutter := swGutter(sess)
 		state, style := swStateText(sess.State), swBusyStyle
 		switch {
 		case sess.State == "":
+			style = swUnknownStyle
+		case isWaiting(sess.State) && m.cond.isSnoozed(sess, now):
+			// Snoozed: still waiting, but the user said "not now", so it
+			// drops the orange that says "your turn".
 			style = swUnknownStyle
 		case isWaiting(sess.State):
 			style = swWaitStyle
@@ -1523,8 +1520,10 @@ func (m swModel) View() string {
 		// by display width (not rune count) for the same reason as swCell: a
 		// CJK name clipped to swNameColW runes still overruns the column in
 		// cells.
-		// A child's tree prefix is dim and comes out of the same column, so
-		// the name shrinks by the prefix's width and the grid holds.
+		// A child's tree prefix is dim and drawn ahead of the emoji, so a
+		// child steps right at the row's left edge, not only inside the name
+		// column; its width still comes out of the name column, so the name
+		// shrinks by the prefix's width and the grid holds.
 		prefix, nameW := swFitTreePrefix(sess.TreePrefix)
 		nameStyle := swNameStyle(sess.Color, i == m.sel)
 		// While finding, a name the query does not match greys out, so the
@@ -1532,8 +1531,7 @@ func (m swModel) View() string {
 		if findHit != nil && !findHit[i] && i != m.sel {
 			nameStyle = swUnknownStyle
 		}
-		name := swStatusStyle.Render(prefix) + nameStyle.
-			Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
+		name := nameStyle.Render(swPad(ansi.Truncate(sess.Name, nameW, "…"), nameW))
 		// The badge names the group the row is listed in (swGroupOf), so a
 		// session that is both closing and deferred wears the closing badge.
 		badge := ""
@@ -1556,7 +1554,7 @@ func (m swModel) View() string {
 		// The PR sits right after the name: it identifies the session as much
 		// as the name does, and there the topic column yields the room for it
 		// (rowTopicW) instead of clipLine cutting it off the right edge.
-		line := fmt.Sprintf(" %s %s %s%s %s %s%s  %s %s%s", marker, emojiCell(sess.Emoji), name,
+		line := fmt.Sprintf(" %s %s%s %s%s %s %s%s  %s %s%s", gutter, swStatusStyle.Render(prefix), emojiCell(sess.Emoji), name,
 			prCell,
 			swCell(sess.Topic, topicW, swTopicStyle, false),
 			swCell(state, swStateColW, style, false),
@@ -1578,14 +1576,14 @@ func (m swModel) View() string {
 			// Same width guard as line 1: a rune count is not a cell count,
 			// and an unclipped line here wraps in the terminal and shifts
 			// every row below it, destroying the column grid.
-			// It starts in the name column, past the marker and the emoji
-			// badge, so it reads as this row's continuation — indented any
-			// less, it sat where a child's tree prefix does and passed for one.
-			// The prefix continues the tree's bars down past this row, and is
-			// clipped by the same leading cells line 1's prefix lost so the
-			// bars stay under the glyphs they continue.
+			// It opens with the gutter bar, so a family's block has no gaps,
+			// then the tree's bars continuing down under the glyphs they
+			// extend (clipped by the same leading cells line 1's prefix
+			// lost), and its text starts in this row's name column, so it
+			// reads as this row's continuation and never as a child.
 			dprefix := ansi.TruncateLeft(sess.DetailPrefix, lipgloss.Width(sess.TreePrefix)-lipgloss.Width(prefix), "")
-			line2 := strings.Repeat(" ", swDetailIndent) + swStatusStyle.Render(dprefix) + detail
+			lead := swPad(swStatusStyle.Render(dprefix), lipgloss.Width(prefix)+emojiCellW+1)
+			line2 := " " + gutter + " " + lead + detail
 			if m.width > 0 {
 				line2 = clipLine(line2, m.width)
 			}

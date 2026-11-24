@@ -32,7 +32,7 @@ const (
 
 // swArrangeFamilies reorders the fleet so each family is one contiguous block,
 // parents above children, and fills in the tree fields (Depth, TreePrefix,
-// DetailPrefix, FamilyGroup, From) the renderers read. The input order is tmux's
+// DetailPrefix, FamilyGroup, FamilyColor, From) the renderers read. The input order is tmux's
 // list-sessions order and is the tie-break everywhere a rule leaves a choice,
 // so a session joining or leaving a family moves that block and leaves every
 // other row where the user last saw it.
@@ -138,11 +138,12 @@ func swArrangeFamilies(sessions []swSession) []swSession {
 	// prefix is this row's own glyph string; cont is what its children inherit
 	// ahead of their tee or elbow (a bar while this row has later siblings, a
 	// blank once it is the last, so no line hangs below a family's final row).
-	var emit func(i, depth int, prefix, cont string, g swGroup)
-	emit = func(i, depth int, prefix, cont string, g swGroup) {
+	var emit func(i, depth int, prefix, cont string, g swGroup, fam string)
+	emit = func(i, depth int, prefix, cont string, g swGroup, fam string) {
 		s := sessions[i]
 		s.Depth = depth
 		s.FamilyGroup = g
+		s.FamilyColor = fam
 		s.From = from[i]
 		s.TreePrefix = prefix
 		// The detail line under this row carries the same vertical lines
@@ -159,11 +160,18 @@ func swArrangeFamilies(sessions []swSession) []swSession {
 			if j == len(kids[i])-1 {
 				glyph, next = swGlyphElbow, cont+swGlyphBlank
 			}
-			emit(k, depth+1, cont+glyph, next, g)
+			emit(k, depth+1, cont+glyph, next, g, fam)
 		}
 	}
 	for _, r := range roots {
-		emit(r, 0, "", "", groups[r])
+		// A family is a root with at least one child; a lone session gets no
+		// family color, so the gutter stays blank beside it and a bar always
+		// means "these rows belong together".
+		fam := ""
+		if len(kids[r]) > 0 {
+			fam = sessions[r].Color
+		}
+		emit(r, 0, "", "", groups[r], fam)
 	}
 	return out
 }

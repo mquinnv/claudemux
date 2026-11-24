@@ -98,11 +98,14 @@ type swSession struct {
 	// group of the block the row is drawn in (the lowest group of any family
 	// member, which can differ from swGroupOf for a lone deferred parent);
 	// From names the launching session when the link did not hold (parent gone
-	// or its name reused), "" otherwise.
+	// or its name reused), "" otherwise. FamilyColor is the family root's
+	// Color on every member of a family of two or more, "" on a lone row; the
+	// lobby draws it as the gutter bar that ties a family's rows together.
 	Depth        int
 	TreePrefix   string
 	DetailPrefix string
 	FamilyGroup  swGroup
+	FamilyColor  string
 	From         string
 }
 

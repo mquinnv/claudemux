@@ -250,7 +250,7 @@ the defer is one you press while you're there; jumping into an already-deferred
 session to unblock it never gets you carried straight back out. (In standby, or
 with no lobby running, nothing moves you — there's no conductor to do it.)
 
-A deferred row gets a `◆ ` marker and a ` DEFER ` badge in the lobby, with the blocker
+A deferred row gets a ` DEFER ` badge in the lobby, with the blocker
 leading the row's second line; deferred rows sort to the bottom of the fleet list under
 a `─ deferred ─` rule, so the sessions you can still be carried into stay together at
 the top. The session's own status pane shows a
@@ -1046,9 +1046,14 @@ pane's state line and in the switchboard's state column:
 | 🛑 Awaiting | ❌ Error | 🧹 Compacting | 🔄 Working (background) |
 | ❓ Unsure | ⏳ Starting | | |
 
-The switchboard's leading marker is still the attention flag it always was: an orange `●`
-for a session waiting on you, a grey `●` for one you have snoozed, `◆` for a deferred
-one. These are built in — not configurable per project.
+The switchboard's state word is orange for a session waiting on you and grey for one
+you have snoozed. Deferred sessions wear the ` DEFER ` badge. The row's leftmost cell is
+the family bar: a `▌` in the launching session's color runs down the left edge of every
+session in a handoff family (a session and the sessions it launched, drawn as a tree
+below it), and is blank beside a session on its own. The tree glyphs sit ahead of the
+project emoji, so a child steps right at the row's left edge. The web status page draws
+the same family bar as a colored left edge. These are built in — not configurable per
+project.
 
 Every emoji is padded to a fixed two-cell slot by measuring it, not by assuming its
 width, so a narrow glyph cannot knock the switchboard's columns out of line. The badge

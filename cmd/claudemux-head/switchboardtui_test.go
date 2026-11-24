@@ -305,7 +305,7 @@ func TestSwModelViewAlignsColumns(t *testing.T) {
 	}}
 
 	const (
-		topicCol = 1 + swMarkerW + 1 + emojiCellW + 1 + swNameColW + 1
+		topicCol = 1 + swGutterW + 1 + emojiCellW + 1 + swNameColW + 1
 		ctxCol   = topicCol + swTopicColW + 1 + swStateColW + swAgeColW + 2
 	)
 	view := m.View()
@@ -391,7 +391,7 @@ func TestSwModelViewClipsWideRuneNameToColumn(t *testing.T) {
 		{Name: strings.Repeat("囲", swNameColW+5), State: "Idle", Since: now,
 			Context: 42, Topic: "wide-rune-name-alignment"},
 	}}
-	const topicCol = 1 + swMarkerW + 1 + emojiCellW + 1 + swNameColW + 1
+	const topicCol = 1 + swGutterW + 1 + emojiCellW + 1 + swNameColW + 1
 	view := ansi.Strip(m.View())
 	line := ""
 	for _, l := range strings.Split(view, "\n") {
@@ -1729,7 +1729,7 @@ func swDeferNarrowestW() int {
 	return swRowChromeW + swTopicColMinW + lipgloss.Width(swDeferBadgeText(false))
 }
 
-func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
+func TestSwModelViewShowsDeferBadge(t *testing.T) {
 	// A pane three cells above swDeferNarrowestW is deliberate here: narrow
 	// enough that the topic column fills the rest of the pane (see
 	// TestSwModelViewKeepsMetersOnANarrowPane), which is exactly the width
@@ -1748,9 +1748,6 @@ func TestSwModelViewShowsDeferMarkerAndBadge(t *testing.T) {
 	}
 	if row == "" {
 		t.Fatalf("could not find api's row:\n%s", view)
-	}
-	if !strings.Contains(row, "◆") {
-		t.Errorf("deferred row missing ◆ marker:\n%q", row)
 	}
 	if !strings.HasSuffix(row, "DEFER ") {
 		t.Errorf("deferred row missing full DEFER badge at the end:\n%q", row)
@@ -1830,10 +1827,10 @@ func TestSwModelViewNormalRowHasNoDeferMarkerOrBadge(t *testing.T) {
 	}
 }
 
-// A deferred but currently-waiting session must still show the defer
-// marker, not the waiting dot — deferred is shown whether or not the
-// session is waiting.
-func TestSwModelViewDeferredWaitingSessionShowsDeferNotWaitDot(t *testing.T) {
+// The row's front carries no attention marker any more: a deferred, waiting
+// session says so with its DEFER badge and its state cell, and the gutter
+// stays blank beside a lone session.
+func TestSwModelViewDeferredWaitingSessionHasNoMarker(t *testing.T) {
 	m := swTestModel()
 	m.snap.Sessions[1].State = "Idle"
 	m.snap.Sessions[1].Deferred = true
@@ -1848,11 +1845,11 @@ func TestSwModelViewDeferredWaitingSessionShowsDeferNotWaitDot(t *testing.T) {
 	if row == "" {
 		t.Fatalf("could not find web's row:\n%s", view)
 	}
-	if !strings.Contains(row, "◆") {
-		t.Errorf("deferred+waiting row must show ◆:\n%q", row)
+	if strings.ContainsAny(row, "◆●") {
+		t.Errorf("row must carry no ◆ or ● marker:\n%q", row)
 	}
-	if strings.Contains(row, "●") {
-		t.Errorf("deferred+waiting row must not show the waiting dot:\n%q", row)
+	if !strings.Contains(row, "Idle") || !strings.Contains(row, "DE") {
+		t.Errorf("row must still show its state and its DEFER badge:\n%q", row)
 	}
 }
 
@@ -1935,34 +1932,30 @@ func TestSwModelStandbyReadoptsReplacedClient(t *testing.T) {
 	}
 }
 
-// The marker column is the attention flag again, not the action: ◆ for
-// deferred, a dot for waiting (grey when snoozed — the color is not visible in
-// a non-TTY test, so only the glyph is asserted), blank for everything else.
-// The action lives in the state cell beside its word (see swStateText). Every
-// answer is exactly one cell, so the columns after it never move.
-func TestSwMarker(t *testing.T) {
+// The gutter is a family's bar and nothing else: the root's color on every
+// member of a family, blank beside a lone session or when the color is junk
+// (a tmux option can hold anything). Every answer is exactly one cell, so the
+// columns after it never move.
+func TestSwGutter(t *testing.T) {
 	tests := []struct {
-		name    string
-		sess    swSession
-		snoozed bool
-		want    string
+		name string
+		sess swSession
+		want string
 	}{
-		{"deferred wins over waiting", swSession{State: "Idle", Deferred: true}, false, "◆"},
-		{"deferred wins over snoozed", swSession{State: "Idle", Deferred: true}, true, "◆"},
-		{"snoozed waiting", swSession{State: "Idle"}, true, "●"},
-		{"waiting", swSession{State: "Idle"}, false, "●"},
-		{"question is waiting", swSession{State: "Tool:AskUserQuestion"}, false, "●"},
-		{"busy is blank", swSession{State: "Thinking"}, false, " "},
-		{"unknown is blank", swSession{}, false, " "},
+		{"family member", swSession{FamilyColor: "b34dff"}, swGutterGlyph},
+		{"lone session", swSession{Color: "b34dff"}, " "},
+		{"junk color", swSession{FamilyColor: "purple"}, " "},
+		{"waiting lone session has no marker", swSession{State: "Idle"}, " "},
+		{"deferred lone session has no marker", swSession{State: "Idle", Deferred: true}, " "},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := swMarker(tt.sess, tt.snoozed)
+			got := swGutter(tt.sess)
 			if ansi.Strip(got) != tt.want {
-				t.Errorf("swMarker = %q, want %q", ansi.Strip(got), tt.want)
+				t.Errorf("swGutter = %q, want %q", ansi.Strip(got), tt.want)
 			}
-			if w := lipgloss.Width(got); w != swMarkerW {
-				t.Errorf("width(swMarker) = %d, want %d", w, swMarkerW)
+			if w := lipgloss.Width(got); w != swGutterW {
+				t.Errorf("width(swGutter) = %d, want %d", w, swGutterW)
 			}
 		})
 	}
@@ -2099,8 +2092,19 @@ func TestSwDetailLineOrphanTagLeads(t *testing.T) {
 	}
 }
 
-// A child's tree prefix comes out of the name column, so every later column
-// starts at the same cell on the parent's line and the child's.
+// swCol is the display column where sub starts in line (bytes are not cells:
+// a tree glyph is three bytes and one cell).
+func swCol(line, sub string) int {
+	i := strings.Index(line, sub)
+	if i < 0 {
+		return -1
+	}
+	return lipgloss.Width(line[:i])
+}
+
+// A child's tree prefix is drawn ahead of its emoji, so the child steps right
+// at the row's left edge; its width comes out of the name column, so every
+// later column starts at the same cell on the parent's line and the child's.
 func TestViewIndentsChildrenAndKeepsGrid(t *testing.T) {
 	now := time.Now()
 	m := newSwModel("%9")
@@ -2118,13 +2122,17 @@ func TestViewIndentsChildrenAndKeepsGrid(t *testing.T) {
 			pl = l
 		case strings.Contains(l, "ctopic"):
 			cl = l
-			if i+1 < len(lines) && !strings.HasPrefix(lines[i+1], strings.Repeat(" ", swDetailIndent+2)+"kid summary") {
-				t.Errorf("child detail line = %q, want an extra 2-cell indent", lines[i+1])
+			// The detail text starts in the child's own name column.
+			if i+1 < len(lines) && swCol(lines[i+1], "kid summary") != swCol(l, "child") {
+				t.Errorf("child detail line = %q, want its text under the child's name in %q", lines[i+1], l)
 			}
 		}
 	}
-	if !strings.Contains(cl, "└ child") {
-		t.Fatalf("child line has no tree prefix before its name: %q", cl)
+	if !strings.HasPrefix(cl, strings.Repeat(" ", 1+swGutterW+1)+"└ ") {
+		t.Fatalf("child line does not open with its tree glyph: %q", cl)
+	}
+	if d := swCol(cl, "child") - swCol(pl, "parent"); d != 2 {
+		t.Errorf("child name sits %d cells right of the parent's, want 2:\n%s\n%s", d, pl, cl)
 	}
 	pw := lipgloss.Width(pl[:strings.Index(pl, "ptopic")])
 	cw := lipgloss.Width(cl[:strings.Index(cl, "ctopic")])
@@ -2169,7 +2177,7 @@ func TestViewDeepNestingKeepsGrid(t *testing.T) {
 	if rw != dw {
 		t.Errorf("topic column at %d on the root, %d on the deepest row:\n%s\n%s", rw, dw, rl, dl)
 	}
-	if !strings.Contains(dl, "└ …") && !strings.Contains(dl, "└ n") {
+	if !strings.Contains(dl, "n14") && !strings.Contains(dl, "…") {
 		t.Errorf("deepest row lost its name cell: %q", dl)
 	}
 }
@@ -2192,12 +2200,14 @@ func TestViewDetailLinesContinueTreeBars(t *testing.T) {
 		row("a", 30, "mid", 20),
 		row("b", 40, "mid", 20),
 	})}
-	ind := strings.Repeat(" ", swDetailIndent)
+	// No Color on these rows, so the gutter is blank: the lead is three
+	// spaces, then the bars, then the text at the row's own name column.
+	ind := strings.Repeat(" ", 1+swGutterW+1)
 	want := map[string]string{
-		"root summary": ind + "│ root summary",
-		"mid summary":  ind + "  │ mid summary",
-		"a summary":    ind + "  │ a summary",
-		"b summary":    ind + "    b summary",
+		"root summary": ind + "│  root summary",
+		"mid summary":  ind + "  │  mid summary",
+		"a summary":    ind + "  │    a summary",
+		"b summary":    ind + "       b summary",
 	}
 	for _, l := range strings.Split(ansi.Strip(m.View()), "\n") {
 		for k, w := range want {
