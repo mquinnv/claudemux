@@ -1,10 +1,18 @@
-import { COLS, fit, wrap, wrapTail } from './layout';
-import type { Effect, Gesture, NextResponse, Row, State } from './types';
+import { WIDTH_PX, clean, fit, replacesGlyphs, truncate, wrap, wrapTail } from './layout';
+import type { Effect, Gesture, NextResponse, RemoteDetail, Row, State } from './types';
 
 const STALE_MS = 10_000;
 const WINDOW = 5;
-const BODY_LINES = 3; // the lobby's remoteBodyLines (remotedetail.go) must match
+// Lines in the body region (96 px at the firmware's 27 px line height),
+// note included. The lobby's remoteBodyLines (remotedetail.go) is the same 3,
+// but its 46-column count is only an approximation of this pixel layout.
+const BODY_LINES = 3;
 const CONFIRM_TEXT = 'tap again to confirm';
+
+// Option row prefixes. They measure the same (15 px: ">" is 10, a space 5),
+// so a row does not shift sideways when the cursor reaches or leaves it.
+export const CURSOR_MARK = '> ';
+export const NO_MARK = '   ';
 
 // State.error values with their own header text; any other error reads as
 // the lobby being unreachable.
@@ -18,18 +26,38 @@ export const TAP_GUARD_MS = 1000;
 // same action whatever the episode.
 const NAV_ROWS = new Set(['defer', 'skip']);
 
+// The body region's lines: the detail's body wrapped to the lines left by
+// its note, then the note. An idle body is the end of the session's last
+// message, so its last lines are kept; other kinds read from the top.
+// incomplete says the lines do not show the body exactly as sent: some was
+// cut, or a character the font lacks was replaced.
+function bodyLayout(d: RemoteDetail): { lines: string[]; incomplete: boolean } {
+  const note = d.note ? truncate(clean(d.note).replace(/\n/g, ' '), WIDTH_PX) : '';
+  const room = BODY_LINES - (note ? 1 : 0);
+  const text = clean(d.body);
+  const wrapped = d.kind === 'idle' ? wrapTail(text, WIDTH_PX, room) : wrap(text, WIDTH_PX, room);
+  return {
+    lines: note ? [...wrapped.lines, note] : wrapped.lines,
+    incomplete: wrapped.cut || replacesGlyphs(d.body),
+  };
+}
+
 // Rows the cursor moves over: on the session screen the options, then defer
-// and skip; on the fleet screen the sessions.
+// and skip; on the fleet screen the sessions. An answer row needs a second
+// tap when it is broad, or when it answers a permission prompt whose body
+// the glasses could not show completely.
 export function rows(s: State): Row[] {
   if (s.screen === 'fleet') {
     return (s.fleet?.sessions ?? []).map((f) => ({ id: f.name, label: `${f.name}  ${f.title}` }));
   }
   const d = s.next?.detail;
   if (!d) return [];
+  const bodyIncomplete = d.kind === 'permit' && bodyLayout(d).incomplete;
   const opts: Row[] = d.options.map((o) => {
     const r: Row = { id: o.id, label: o.label };
     if (o.broad) r.broad = true;
     if (o.suggested) r.suggested = true;
+    if (o.broad || bodyIncomplete) r.needsConfirm = true;
     return r;
   });
   return [...opts, { id: 'defer', label: 'defer' }, { id: 'skip', label: 'skip' }];
@@ -73,7 +101,7 @@ export function reduce(s: State, g: Gesture): { state: State; effect: Effect } {
   const cleared = { ...s, confirming: null };
   if (row.id === 'defer') return { state: cleared, effect: { kind: 'defer', session: d.session } };
   if (row.id === 'skip') return { state: cleared, effect: { kind: 'skip', session: d.session } };
-  if (row.broad && s.confirming !== row.id) {
+  if (row.needsConfirm && s.confirming !== row.id) {
     return { state: { ...s, confirming: row.id }, effect: null };
   }
   return {
@@ -119,16 +147,21 @@ export function withFlash(s: State, text: string | null): State {
   return { ...s, flash: text };
 }
 
+// Up to WINDOW rows around the cursor, each one line cut to WIDTH_PX.
 function optionWindow(list: Row[], cursor: number, confirming: string | null): string {
   const start = Math.max(0, Math.min(cursor - 2, list.length - WINDOW));
   return list
     .slice(start, start + WINDOW)
     .map((r, i) => {
-      const label = r.id === confirming ? CONFIRM_TEXT : r.label;
-      const mark = start + i === cursor ? '> ' : '  ';
-      return mark + label + (r.suggested ? ' *' : '');
+      const label = r.id === confirming ? CONFIRM_TEXT : oneLine(r.label);
+      const mark = start + i === cursor ? CURSOR_MARK : NO_MARK;
+      return truncate(mark + label, WIDTH_PX, r.suggested ? ' *' : '');
     })
     .join('\n');
+}
+
+function oneLine(text: string): string {
+  return clean(text).replace(/\n/g, ' ');
 }
 
 export function render(s: State, now: number): { header: string; body: string; options: string } {
@@ -140,7 +173,7 @@ export function render(s: State, now: number): { header: string; body: string; o
   if (s.screen === 'fleet') {
     const total = s.fleet?.sessions.length ?? 0;
     return {
-      header: fit('sessions', String(total), COLS),
+      header: fit('sessions', String(total), WIDTH_PX),
       body: '',
       options: optionWindow(rows(s), s.cursor, null),
     };
@@ -154,13 +187,9 @@ export function render(s: State, now: number): { header: string; body: string; o
   const age = now - s.lastOkAt;
   const { pos, total } = s.next.queue;
   const right = age > STALE_MS ? `${Math.floor(age / 1000)}s ago` : `${pos > 0 ? pos : '-'}/${total}`;
-  // An idle body is the end of the session's last message: its last lines
-  // are the ones that matter. Questions and prompts read from the top.
-  const text = d.kind === 'idle' ? wrapTail(d.body, COLS, BODY_LINES) : wrap(d.body, COLS, BODY_LINES);
-  const body = [text, d.note ?? ''].filter((p) => p !== '').join('\n');
   return {
-    header: fit(s.flash ?? d.title, right, COLS),
-    body,
+    header: fit(oneLine(s.flash ?? d.title), right, WIDTH_PX),
+    body: bodyLayout(d).lines.join('\n'),
     options: optionWindow(rows(s), s.cursor, s.confirming),
   };
 }

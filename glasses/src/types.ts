@@ -41,7 +41,9 @@ export type FleetResponse = { sessions: FleetSession[] };
 
 // App state.
 
-export type Row = { id: string; label: string; broad?: boolean; suggested?: boolean };
+// needsConfirm: a tap only arms the row, a second tap answers (broad rows,
+// and every answer to a permission prompt whose body was not fully shown).
+export type Row = { id: string; label: string; broad?: boolean; suggested?: boolean; needsConfirm?: boolean };
 
 export type Screen = 'session' | 'fleet';
 

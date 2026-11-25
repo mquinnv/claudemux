@@ -115,8 +115,10 @@ What is offered, per kind of wait:
 - A question: its options. A permission prompt for Bash, Edit or Write: the dialog's rows, with the title,
   the file name (Edit, Write) and the command or diff shown first. Broad rows take a second tap, and so
   does a plain `Yes` unless the title, file name and whole command or diff fit in the three body lines
-  (and the whole prompt is short). Any other permission dialog, or one with a Tab-amended row, says
-  `answer at the desk`.
+  (and the whole prompt is short). The glasses add their own check: when the body they draw is cut
+  short (it has three lines, two when a note takes the last one) or a character the glasses' font lacks
+  had to be replaced, every answer row takes a second tap. Any other permission dialog, or one with a
+  Tab-amended row, says `answer at the desk`.
 - A plan approval: the rows that start with `Yes`.
 - An idle session: the fixed replies first, then suggested replies (marked `*`) when they arrive. The body
   shows the end of the session's last message.
@@ -142,5 +144,6 @@ npm run build       # vite build, no origin baked in
 ```
 
 `src/api.ts` is the HTTP client, `src/controller.ts` the poll/POST sequencing, `src/view.ts` and
-`src/layout.ts` the screen, and `src/main.ts` the only file that touches the Even Hub SDK. The text width is
-`COLS` in `src/layout.ts`.
+`src/layout.ts` the screen, and `src/main.ts` the only file that touches the Even Hub SDK. Text is laid out
+in pixels with the firmware font's metrics (`@evenrealities/pretext`) to `WIDTH_PX` in `src/layout.ts`, so
+the glasses never re-wrap a line.

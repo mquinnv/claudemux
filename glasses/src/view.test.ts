@@ -1,7 +1,12 @@
+import { getTextWidth } from '@evenrealities/pretext';
 import { describe, expect, it } from 'vitest';
-import { COLS } from './layout';
+import { ELLIPSIS, WIDTH_PX } from './layout';
 import type { FleetResponse, NextResponse, RemoteDetail, RemoteOption, State } from './types';
-import { BAD_TOKEN, TAP_GUARD_MS, applyNext, reduce, render, rows, withFlash } from './view';
+import { BAD_TOKEN, CURSOR_MARK, NO_MARK, TAP_GUARD_MS, applyNext, reduce, render, rows, withFlash } from './view';
+
+const w = getTextWidth;
+// A header line reaches the right edge: within two spaces of WIDTH_PX.
+const atEdge = (line: string) => w(line) <= WIDTH_PX && w(line) > WIDTH_PX - 10;
 
 describe('bad token error', () => {
   it('shows the bad token text in the header', () => {
@@ -127,6 +132,52 @@ describe('reduce: tap', () => {
   });
 });
 
+describe('reduce: a permit whose body is cut', () => {
+  const yesNo = [opt('key:1', 'Yes'), opt('key:2', 'No')];
+  const permit = (body: string, note?: string) =>
+    state({ next: next(detail({ kind: 'permit', body, options: yesNo, ...(note ? { note } : {}) })) });
+  const long = 'Bash command\n' + 'rm -rf build && make all && make test && make install '.repeat(6);
+
+  it('answers Yes at once when the body fits', () => {
+    const r = reduce(permit('Bash command\nls -la'), 'tap');
+    expect(r.effect).toEqual({ kind: 'answer', session: 'alpha', episode: 'ep1', option: 'key:1' });
+    expect(rows(permit('Bash command\nls -la'))[0]?.needsConfirm).toBeFalsy();
+  });
+
+  it('asks for a second tap on Yes when the body was cut, then answers', () => {
+    const first = reduce(permit(long), 'tap');
+    expect(first.effect).toBeNull();
+    expect(first.state.confirming).toBe('key:1');
+    expect(reduce(first.state, 'tap').effect).toEqual({ kind: 'answer', session: 'alpha', episode: 'ep1', option: 'key:1' });
+  });
+
+  it('marks every answer row, not defer or skip', () => {
+    const r = rows(permit(long));
+    expect(r.map((x) => !!x.needsConfirm)).toEqual([true, true, false, false]);
+  });
+
+  it('counts the note line: a body that fits three lines but not two is cut', () => {
+    const three = 'Bash command\nfirst line of the command\nsecond line of the command';
+    expect(rows(permit(three))[0]?.needsConfirm).toBeFalsy();
+    expect(rows(permit(three, 'prompt has a draft'))[0]?.needsConfirm).toBe(true);
+  });
+
+  it('asks for a second tap when a character had to be replaced', () => {
+    expect(rows(permit('Bash command\necho `whoami`'))[0]?.needsConfirm).toBe(true);
+  });
+
+  it('does not apply to other kinds', () => {
+    const s = state({ next: next(detail({ kind: 'idle', body: long, options: yesNo })) });
+    expect(reduce(s, 'tap').effect).toEqual({ kind: 'answer', session: 'alpha', episode: 'ep1', option: 'key:1' });
+  });
+
+  it('a broad row needs a second tap even with a fitting body', () => {
+    const s = state({ next: next(detail({ kind: 'permit', body: 'ls', options: [opt('key:1', 'Yes'), opt('key:2', 'Always', { broad: true })] })), cursor: 1 });
+    expect(rows(s)[1]?.needsConfirm).toBe(true);
+    expect(reduce(s, 'tap').effect).toBeNull();
+  });
+});
+
 describe('reduce: double and fleet', () => {
   it('switches to the fleet screen and loads it', () => {
     const r = reduce(state({ cursor: 2 }), 'double');
@@ -184,7 +235,7 @@ describe('error freezes input', () => {
 describe('flash', () => {
   it('replaces the title on the left of the header', () => {
     const h = render(withFlash(state(), 'sent'), 2000).header;
-    expect(h.length).toBe(COLS);
+    expect(atEdge(h)).toBe(true);
     expect(h.startsWith('sent')).toBe(true);
     expect(h).not.toContain('Fix the build');
     expect(h.endsWith('1/3')).toBe(true);
@@ -314,11 +365,21 @@ describe('applyNext: tap guard', () => {
 });
 
 describe('render', () => {
-  it('header is title plus pos/total, COLS wide', () => {
+  it('header is title plus pos/total, reaching the right edge', () => {
     const out = render(state(), 2000);
-    expect(out.header.length).toBe(COLS);
+    expect(atEdge(out.header)).toBe(true);
     expect(out.header.startsWith('Fix the build')).toBe(true);
     expect(out.header.endsWith('1/3')).toBe(true);
+  });
+
+  it('a very long title is cut by pixels and the right part stays at the edge', () => {
+    const title = 'Make the glasses remote lay out WWW MMM text by pixels '.repeat(3);
+    for (const now of [2000, 1000 + 12_500]) {
+      const h = render(state({ next: next(detail({ title })) }), now).header;
+      expect(atEdge(h)).toBe(true);
+      expect(h).toContain(ELLIPSIS);
+      expect(h.endsWith(now === 2000 ? ' 1/3' : ' 12s ago')).toBe(true);
+    }
   });
 
   it('shows -/total when the session is not in the queue', () => {
@@ -340,24 +401,46 @@ describe('render', () => {
     expect(render(state({ error: 'x' }), 2000).header).toBe('lobby not reachable');
   });
 
-  it('body wraps to three lines and appends the note', () => {
+  it('body wraps to three lines without a note', () => {
     const long = 'word '.repeat(100).trim();
-    const out = render(state({ next: next(detail({ body: long, note: 'careful' })) }), 2000);
-    const lines = out.body.split('\n');
-    expect(lines.length).toBe(4);
-    expect(lines[2]!.endsWith('…')).toBe(true);
-    expect(lines[3]).toBe('careful');
+    const lines = render(state({ next: next(detail({ body: long })) }), 2000).body.split('\n');
+    expect(lines.length).toBe(3);
+    expect(lines[2]!.endsWith(ELLIPSIS)).toBe(true);
   });
 
-  it('an idle body shows its last three lines, marking the cut at the start', () => {
-    const long = 'START ' + 'word '.repeat(60) + 'the very end';
+  it('with a note the body is at most three lines: two of text, then the note', () => {
+    const long = 'word '.repeat(100).trim();
+    const lines = render(state({ next: next(detail({ body: long, note: 'prompt has a draft' })) }), 2000).body.split('\n');
+    expect(lines.length).toBe(3);
+    expect(lines[1]!.endsWith(ELLIPSIS)).toBe(true);
+    expect(lines[2]).toBe('prompt has a draft');
+  });
+
+  it('an idle body shows its last lines, marking the cut at the start, note last', () => {
+    const long = 'START ' + 'word '.repeat(150) + 'the very end';
     const out = render(state({ next: next(detail({ kind: 'idle', body: long, note: 'careful' })) }), 2000);
     const lines = out.body.split('\n');
-    expect(lines.length).toBe(4);
-    expect(lines[0]!.startsWith('…')).toBe(true);
-    expect(lines.slice(0, 3).join(' ').endsWith('the very end')).toBe(true);
+    expect(lines.length).toBe(3);
+    expect(lines[0]!.startsWith(ELLIPSIS)).toBe(true);
+    expect(lines.slice(0, 2).join(' ').endsWith('the very end')).toBe(true);
     expect(out.body).not.toContain('START');
-    expect(lines[3]).toBe('careful');
+    expect(lines[2]).toBe('careful');
+  });
+
+  it('every body line fits the width, even a line of wide characters', () => {
+    const body = 'W'.repeat(46) + '\n' + 'm'.repeat(46) + ' ' + 'M'.repeat(10);
+    for (const kind of ['permit', 'idle'] as const) {
+      const lines = render(state({ next: next(detail({ kind, body, note: 'n' })) }), 2000).body.split('\n');
+      expect(lines.length).toBeLessThanOrEqual(3);
+      for (const l of lines) expect(w(l)).toBeLessThanOrEqual(WIDTH_PX);
+    }
+  });
+
+  it('replaces a backtick, which the font lacks, with an apostrophe', () => {
+    const d = detail({ title: 'run `x`', body: 'echo `whoami`', options: [opt('key:1', 'use `y`')] });
+    const out = render(state({ next: next(d) }), 2000);
+    for (const part of [out.header, out.body, out.options]) expect(part).not.toContain('`');
+    expect(out.body).toBe("echo 'whoami'");
   });
 
   it('a non-idle body still shows its first lines', () => {
@@ -376,28 +459,45 @@ describe('render', () => {
   it('prefixes the cursor row and marks suggested rows', () => {
     const d = detail({ options: [opt('suggest:0', 'Yes, go ahead', { suggested: true }), opt('key:1', 'No')] });
     const lines = render(state({ next: next(d), cursor: 0 }), 2000).options.split('\n');
-    expect(lines[0]).toBe('> Yes, go ahead *');
-    expect(lines[1]).toBe('  No');
+    expect(lines[0]).toBe(`${CURSOR_MARK}Yes, go ahead *`);
+    expect(lines[1]).toBe(`${NO_MARK}No`);
+  });
+
+  it('the cursor and non-cursor prefixes have the same pixel width', () => {
+    expect(CURSOR_MARK).not.toBe(NO_MARK);
+    expect(w(CURSOR_MARK)).toBe(w(NO_MARK));
+    expect(w(CURSOR_MARK + 'Option')).toBe(w(NO_MARK + 'Option'));
   });
 
   it('replaces a confirming row label', () => {
     const lines = render(state({ cursor: 1, confirming: 'key:2' }), 2000).options.split('\n');
-    expect(lines[1]).toBe('> tap again to confirm');
+    expect(lines[1]).toBe(`${CURSOR_MARK}tap again to confirm`);
   });
 
   it('the option window scrolls to keep the cursor visible', () => {
     const at = (cursor: number) => render(state({ cursor }), 2000).options.split('\n');
-    expect(at(0)).toEqual(['> Option A', '  Option B', '  Option C', '  defer', '  skip']);
+    expect(at(0)).toEqual([`${CURSOR_MARK}Option A`, `${NO_MARK}Option B`, `${NO_MARK}Option C`, `${NO_MARK}defer`, `${NO_MARK}skip`]);
     const down = at(4);
     expect(down.length).toBe(5);
-    expect(down[4]).toBe('> skip');
+    expect(down[4]).toBe(`${CURSOR_MARK}skip`);
   });
 
   it('scrolls through a long list', () => {
     const options = Array.from({ length: 8 }, (_, i) => opt(`key:${i}`, `Opt ${i}`));
     const lines = render(state({ next: next(detail({ options })), cursor: 6 }), 2000).options.split('\n');
     expect(lines.length).toBe(5);
-    expect(lines.filter((l) => l.startsWith('> '))).toEqual(['> Opt 6']);
+    expect(lines.filter((l) => l.startsWith(CURSOR_MARK))).toEqual([`${CURSOR_MARK}Opt 6`]);
+  });
+
+  it('cuts each long option row to one line by pixels, keeping the suggested marker', () => {
+    const label = 'Yes, and also do the WWW MMM thing with a very long explanation attached to it';
+    const options = Array.from({ length: 7 }, (_, i) => opt(`suggest:${i}`, `${i} ${label}`, { suggested: true }));
+    const lines = render(state({ next: next(detail({ options })), cursor: 1 }), 2000).options.split('\n');
+    expect(lines.length).toBe(5);
+    for (const l of lines.slice(0, 4)) {
+      expect(w(l)).toBeLessThanOrEqual(WIDTH_PX);
+      expect(l.endsWith(`${ELLIPSIS} *`)).toBe(true);
+    }
   });
 
   it('renders the fleet screen', () => {

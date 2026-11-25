@@ -1,68 +1,135 @@
+import { getAdvW, getTextWidth } from '@evenrealities/pretext';
 import { describe, expect, it } from 'vitest';
-import { COLS, fit, wrap, wrapTail } from './layout';
+import { ELLIPSIS, WIDTH_PX, clean, fit, replacesGlyphs, truncate, wrap, wrapTail } from './layout';
 
-describe('wrapTail', () => {
-  it('keeps the last lines and marks the cut at the start', () => {
-    // Wrapped: "aaa bbb" / "ccc ddd" / "eee fff"; "…ccc ddd" is too wide.
-    const out = wrapTail('aaa bbb ccc ddd eee fff', 7, 2);
-    expect(out).toBe('…ddd\neee fff');
-    expect(wrapTail('aaa bbb ccc ddd eee fff', 8, 2)).toBe('…ccc ddd\neee fff');
-  });
-
-  it('adds nothing when everything fits', () => {
-    expect(wrapTail('aaa bbb', 7, 2)).toBe('aaa bbb');
-  });
-
-  it('drops leading words to make room for the ellipsis', () => {
-    expect(wrapTail('aaa bbb ccc', 7, 1)).toBe('…ccc');
-  });
-
-  it('returns an empty string for empty text', () => {
-    expect(wrapTail('  ', 10, 3)).toBe('');
-  });
-});
+const w = getTextWidth;
+const allFit = (lines: string[], max: number) => lines.every((l) => w(l) <= max);
 
 describe('wrap', () => {
-  it('breaks at word boundaries within cols', () => {
-    expect(wrap('aaa bbb ccc ddd', 7, 5)).toBe('aaa bbb\nccc ddd');
+  it('breaks at spaces within the pixel width', () => {
+    const max = w('aaa bbb');
+    expect(wrap('aaa bbb ccc ddd', max, 5)).toEqual({ lines: ['aaa bbb', 'ccc ddd'], cut: false });
   });
 
-  it('cuts at a word and adds an ellipsis', () => {
-    const out = wrap('aaa bbb ccc ddd eee', 7, 2);
-    expect(out).toBe('aaa bbb\nccc…');
-    for (const line of out.split('\n')) expect(line.length).toBeLessThanOrEqual(7);
+  it('cuts at a word, ends with an ellipsis and reports the cut', () => {
+    const max = w('aaa bbb');
+    const out = wrap('aaa bbb ccc ddd eee', max, 2);
+    expect(out.cut).toBe(true);
+    expect(out.lines).toEqual(['aaa bbb', `ccc${ELLIPSIS}`]);
+    expect(allFit(out.lines, max)).toBe(true);
   });
 
-  it('does not add an ellipsis when everything fits', () => {
-    expect(wrap('aaa bbb', 7, 1)).toBe('aaa bbb');
+  it('does not report a cut when everything fits', () => {
+    expect(wrap('aaa bbb', WIDTH_PX, 1)).toEqual({ lines: ['aaa bbb'], cut: false });
   });
 
-  it('hard-splits a word longer than cols', () => {
-    expect(wrap('abcdefghij', 4, 5)).toBe('abcd\nefgh\nij');
+  it('splits a line of 46 wide characters so every line fits', () => {
+    const text = 'W'.repeat(46);
+    expect(w(text)).toBeGreaterThan(WIDTH_PX);
+    const out = wrap(text, WIDTH_PX, 3);
+    expect(out.lines.length).toBe(2);
+    expect(out.lines.join('')).toBe(text);
+    expect(allFit(out.lines, WIDTH_PX)).toBe(true);
+    expect(out.cut).toBe(false);
+  });
+
+  it('fills a line of typical text to the pixel width, not 46 characters', () => {
+    const text = 'the quick brown fox jumps over the lazy dog '.repeat(4).trim();
+    const out = wrap(text, WIDTH_PX, 5);
+    expect(out.lines[0]!.length).toBeGreaterThan(46);
+    expect(allFit(out.lines, WIDTH_PX)).toBe(true);
   });
 
   it('keeps explicit newlines as line breaks', () => {
-    expect(wrap('one\ntwo', 10, 5)).toBe('one\ntwo');
+    expect(wrap('one\ntwo', WIDTH_PX, 5).lines).toEqual(['one', 'two']);
   });
 
-  it('returns an empty string for empty text', () => {
-    expect(wrap('', 10, 3)).toBe('');
+  it('returns no lines for empty text', () => {
+    expect(wrap('  ', WIDTH_PX, 3)).toEqual({ lines: [], cut: false });
+  });
+});
+
+describe('wrapTail', () => {
+  it('keeps the last lines and marks the cut at the start', () => {
+    const max = w('aaa bbb');
+    const out = wrapTail('aaa bbb ccc ddd eee fff', max, 2);
+    expect(out.cut).toBe(true);
+    expect(out.lines[1]).toBe('eee fff');
+    expect(out.lines[0]!.startsWith(ELLIPSIS)).toBe(true);
+    expect(out.lines[0]!.endsWith('ddd')).toBe(true);
+    expect(allFit(out.lines, max)).toBe(true);
+  });
+
+  it('adds nothing when everything fits', () => {
+    expect(wrapTail('aaa bbb', WIDTH_PX, 2)).toEqual({ lines: ['aaa bbb'], cut: false });
+  });
+
+  it('cuts wide characters to fit with the ellipsis', () => {
+    const out = wrapTail('M'.repeat(200), WIDTH_PX, 2);
+    expect(out.lines.length).toBe(2);
+    expect(allFit(out.lines, WIDTH_PX)).toBe(true);
+  });
+});
+
+describe('truncate', () => {
+  it('returns text that fits unchanged, with its tail', () => {
+    expect(truncate('> Yes', WIDTH_PX, ' *')).toBe('> Yes *');
+  });
+
+  it('cuts by pixels with an ellipsis and keeps the tail', () => {
+    const out = truncate('> ' + 'Wm'.repeat(40), WIDTH_PX, ' *');
+    expect(w(out)).toBeLessThanOrEqual(WIDTH_PX);
+    expect(out.endsWith(`${ELLIPSIS} *`)).toBe(true);
+    expect(out.startsWith('> Wm')).toBe(true);
   });
 });
 
 describe('fit', () => {
-  it('pads left so right is flush', () => {
-    expect(fit('abc', '1/2', 10)).toBe('abc    1/2');
+  it('puts the right part within a space of the right edge', () => {
+    for (const left of ['abc', 'x', 'a medium title of some sort']) {
+      const out = fit(left, '1/2', WIDTH_PX);
+      expect(out.startsWith(left)).toBe(true);
+      expect(out.endsWith(' 1/2')).toBe(true);
+      expect(w(out)).toBeLessThanOrEqual(WIDTH_PX);
+      expect(w(out)).toBeGreaterThan(WIDTH_PX - 10);
+    }
   });
 
-  it('truncates left with an ellipsis when too long', () => {
-    const out = fit('abcdefghijkl', '1/2', 10);
-    expect(out.length).toBe(10);
-    expect(out.endsWith(' 1/2')).toBe(true);
-    expect(out).toContain('…');
+  it('truncates a long left with an ellipsis and keeps the right part at the edge', () => {
+    const out = fit('Implement the WWWWWW pixel layout for the glasses remote and much more '.repeat(3), '12s ago', WIDTH_PX);
+    expect(out).toContain(ELLIPSIS);
+    expect(out.endsWith(' 12s ago')).toBe(true);
+    expect(w(out)).toBeLessThanOrEqual(WIDTH_PX);
+    expect(w(out)).toBeGreaterThan(WIDTH_PX - 10);
+  });
+});
+
+describe('clean', () => {
+  it('replaces a backtick with an apostrophe', () => {
+    expect(clean('run `ls`')).toBe("run 'ls'");
   });
 
-  it('uses COLS-wide output when given COLS', () => {
-    expect(fit('x', 'y', COLS).length).toBe(COLS);
+  it('replaces characters the font lacks with ?', () => {
+    expect(getAdvW(0xe000)).toBe(0);
+    expect(clean('ab')).toBe('a?b');
+  });
+
+  it('keeps newlines, the ellipsis and characters the font has', () => {
+    expect(getAdvW(ELLIPSIS.codePointAt(0)!)).toBeGreaterThan(0);
+    expect(clean(`one\ntwo ${ELLIPSIS} é`)).toBe(`one\ntwo ${ELLIPSIS} é`);
+  });
+
+  it('turns other whitespace into spaces', () => {
+    expect(clean('a\tb\r\nc')).toBe('a b \nc');
+  });
+
+  it('drops emoji variation selectors', () => {
+    expect(clean('ok ❤️')).toBe('ok ❤');
+  });
+
+  it('replacesGlyphs says whether anything visible was substituted', () => {
+    expect(replacesGlyphs('a `b`')).toBe(true);
+    expect(replacesGlyphs('a')).toBe(true);
+    expect(replacesGlyphs('plain\ttext\n')).toBe(false);
   });
 });
