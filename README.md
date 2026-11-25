@@ -214,7 +214,7 @@ To **skip** a session you don't want to answer right now, jump back to the lobby
 snoozed and the conductor carries you to the next waiting one. A snooze only
 says "someone else first": the moment every session is busy, deferred, or
 snoozed, all snoozes are released and the conductor carries you back through
-the skipped sessions, oldest first. To stay out of a session, defer it.
+the skipped sessions in the usual order. To stay out of a session, defer it.
 
 **Deferring a session** is different from a snooze: it says this session is waiting on
 something — a review, a build, another person, or another session — and the conductor
@@ -288,8 +288,8 @@ it as above.
 — you typed `/done` in it, pressed `x` or `X` in its status pane, or it is sitting at
 `⏻ press x to tear down` — moves under a `─ closing ─` rule, between the working fleet
 and the deferred rows, with a badge that says where the teardown stands — ` /DONE `
-while the wrap-up is still working, ` CONFIRM ` (orange) once it stops to ask you — whether the head published `wrapup` or `blocked` —
-` BLOCKED ` if the wrap-up stopped with the gate shut, ` READY ` when one more `x` tears it down
+while the wrap-up is still working, ` CONFIRM ` (orange) while it is stopped on a question for you,
+` BLOCKED ` if it ended with the gate shut, ` READY ` when one more `x` tears it down
 (` KILL? ` for an armed `X`, ` EXITING ` on the way out) — and the teardown's phase leading its
 second line (`⏻ wrapping up…`, `⏻ wrap-up needs an answer`, `⏻ wrap-up blocked`, `⏻ press x to tear down`, …). The
 status line counts them (`· 2 closing`). The mark also moves a waiting closing row to the
