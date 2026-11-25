@@ -71,9 +71,16 @@ npx evenhub upload claudemux-glasses.ehpk -m "first build"
 4. Under "In development", find the uploaded private build and install it.
 
 Development load: on the same "Developer hub" screen, the "prototype mode" QR scanner loads a build served
-by `npm run dev`. The whitelist still comes from `app.json`, so run `scripts/pack.mjs` once first.
+by `npm run dev`. The dev server bakes the lobby origin in from the environment just as the pack script
+does, so start it with the same variable, and run `scripts/pack.mjs` once first because the whitelist still
+comes from `app.json`:
 
-(Even's own documentation describes a different menu path; the one above is what the Even app shows.)
+```sh
+CLAUDEMUX_REMOTE_ORIGIN=http://100.64.0.15:7474 npm run dev
+```
+
+(Even's own documentation describes a different menu path. The one above is what the Even app showed on one
+iPhone during the spike; it is not guaranteed to match other versions of the app.)
 
 ## 4. Enter the token
 
@@ -82,11 +89,14 @@ Open the app from the phone. Its page has a token field: paste `CLAUDEMUX_REMOTE
 The page also shows the last ten log lines, which is where to look when the glasses show an error.
 
 Once the token is saved, a header reading `bad token - open setup` means the lobby rejected it: re-enter it.
-`lobby not reachable` means the phone could not connect (tailnet down or the lobby is not running).
+`lobby not reachable` is shown for any failed poll other than a rejected token: no connection (tailnet down
+or the lobby not running), a timeout, or an error answer from the lobby. The log lines on the phone say
+which.
 
 ## 5. Use it
 
-Open the app from the glasses' app menu (a private or in-development build appears there once installed).
+Open the app from the glasses' app menu. On the one device tried, a private or in-development build
+appeared there once installed; that is an observation, not a documented guarantee.
 
 | Gesture | Action |
 | --- | --- |
@@ -95,13 +105,30 @@ Open the app from the glasses' app menu (a private or in-development build appea
 | Double-tap | Switch between the question and the session list |
 | Long press | Ignored |
 
-A session opened from the session list stays on screen: the lobby pins it until it is skipped, so the
-regular polls keep returning it.
+A session opened from the session list stays on screen until you answer, defer or skip it: the lobby pins
+it, so the regular polls keep returning it. After an answer (even one shown as `sent? check desk` or
+`typed, not sent`) or a defer, the pin is released and the glasses go back to the queue.
 
-The last two rows of the options list are `defer` and `skip`. A short message replaces the title for one
-poll after an answer: `sent`, `not accepted - try again`, `prompt has a draft`, `sent? check desk` (the key
-went out but could not be confirmed), `typed, not sent`, `reply refused`, `gone` or `failed`. `sent` is shown
-only when the lobby confirms it.
+What is offered, per kind of wait:
+
+- A question: its options. A permission prompt for Bash, Edit or Write: the dialog's rows, with the title
+  and command shown first; broad rows, and a plain `Yes` on a prompt too long to show whole, take a second
+  tap. Any other permission dialog, or one with a Tab-amended row, says `answer at the desk`.
+- A plan approval: the rows that start with `Yes`.
+- An idle session: the fixed replies first, then suggested replies (marked `*`) when they arrive. The body
+  shows the end of the session's last message.
+
+Once an answer has gone out, the session shows the note `sent` and nothing to press until it moves on, so
+a second tap cannot repeat it. When a poll changes the row under the cursor (a new dialog, another
+session), a tap in the following second is ignored: it was aimed at what was there before. Scrolling is
+never blocked.
+
+The last two rows of the options list are `defer` and `skip`. `defer` marks the session deferred in the
+lobby with the text `deferred from glasses` (no link, no automatic nudge). A short message replaces the
+title for one poll after an answer: `sent`, `not accepted - try again`, `prompt has a draft`, `sent? check
+desk` (the request may have reached the lobby but no confirmation came back: a timeout, a dropped
+connection, or a key that went out unconfirmed), `typed, not sent`, `reply refused`, `gone` or `failed`.
+`sent` is shown only when the lobby confirms it.
 
 ## Development
 

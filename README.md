@@ -415,17 +415,33 @@ offers:
 
 - **A question** (`AskUserQuestion`, one question, single choice): its options.
   Multi-select and multi-question dialogs say `answer at the desk`.
-- **A permission prompt**: the dialog's own rows. Anything broader than a plain
-  `Yes` or `No` — "always allow", "switch to auto mode" — takes a second tap.
-- **A plan approval**: the dialog's rows; approving with auto mode takes a second
-  tap. Plan approvals count as waiting everywhere now, the conductor included.
-- **An idle session**: up to three suggested replies (Haiku, from the session's
-  last message; `remote.suggest: false` turns them off) and the fixed
-  `remote.replies`.
+- **A permission prompt** for Bash, Edit or Write (titled `Bash command`,
+  `Edit file`, `Create file`): the dialog's own rows. Anything broader than a
+  plain `Yes` or `No` — "always allow", "switch to auto mode" — takes a second
+  tap, and so does the plain `Yes` when the prompt is too long for the glasses
+  to show whole. The glasses show the title and the command (or diff) first,
+  then Claude's description. Any other permission dialog, and one where a row
+  has been Tab-amended into a text field, says `answer at the desk`.
+- **A plan approval**: the rows that start with `Yes`; approving with the first
+  row (auto mode, on accounts that have it) takes a second tap. Plan approvals
+  count as waiting everywhere now, the conductor included.
+- **An idle session**: the fixed `remote.replies` first, then up to three
+  suggested replies written by `summary.model` from the session's last message
+  (the end of that message is what the glasses show). Suggestions arrive a
+  moment after the session does, below the fixed replies, so they never move
+  the row you are on.
 
-Every wait also offers **defer** (the lobby's defer, with a nudge when the
-blocker clears) and **skip** (someone else first, as in the conductor).
-Double-tap switches to a list of every session, and a tap there opens one.
+Once a reply or key has gone out, the session shows `sent` with nothing to
+press until its state moves on, so a second tap cannot send it twice. A
+session whose pane cannot be read shows `cannot read pane` with only defer
+and skip.
+
+Every wait also offers **defer** (a plain lobby defer with the text
+`deferred from glasses`: no link, and no automatic nudge) and **skip**
+(someone else first, as in the conductor). Double-tap switches to a list of
+every session, and a tap there opens one; an opened session stays on the
+glasses until you answer it, defer it or skip it, and then they go back to
+the queue.
 
 The lobby never types what the glasses send. A request names an option the lobby
 itself offered, and the lobby re-reads the pane first: if the dialog on screen is
@@ -1002,15 +1018,17 @@ web:
   `claudemux fleet`.
 - `web.hide_private_orgs` — GitHub owners whose private repos' sessions are left
   off the web status page (see **Sharing the fleet on the tailnet** above).
+  Default empty: every session shows.
 - `remote.enabled` — serve the token-protected `/remote/` routes for the glasses
   (see **Glasses remote** above). Default `false`. Needs `web.listen` and
   `CLAUDEMUX_REMOTE_TOKEN`.
 - `remote.replies` — the fixed replies offered on an idle session, each 1 to 80
-  characters. A list replaces the defaults (`Yes, go ahead`, `Continue`,
-  `No, stop and wait for me`); `[]` offers none.
+  characters with no control or format characters. A list replaces the
+  defaults (`Yes, go ahead`, `Continue`, `No, stop and wait for me`); `[]`
+  offers none.
 - `remote.suggest` — offer suggested replies on an idle session. Default `true`;
-  it uses the summaries' API key and is off without one.
-  Default empty: every session shows.
+  it uses `summary.model` and the summaries' API key, and is off when
+  `summary.enabled` is false or there is no key.
 - `web.headline_interval` — the floor between fleet-headline calls, with
   `summary.min_interval`'s rules: it bounds what the page costs, `0` means no
   floor, negative is rejected. A call only fires when the fleet's topics,
