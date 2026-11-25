@@ -444,3 +444,10 @@ copy what is needed, the directory is not durable).
   `document.visibilityState` went to `hidden` and polling continued without
   a gap for at least 97 seconds; ring events were still delivered. Longer
   runs not yet measured.
+
+## Task 0 final result (2026-11-25): PASS
+
+- Packaged private build (`net.claudemux.spike` 0.1.0, installed from the Even app's Developer hub) polled `http://100.64.0.15:7475` over the tailnet from 14:19:49. Its requests carried `Origin: http://127.0.0.1:58712`: a packaged app is served from a phone-local port, so the lobby must answer CORS with `*` and authenticate by bearer token.
+- The dev load (QR, prototype mode) polled from 13:57:58 to 14:19:32 with no gap; the phone was locked from 14:04:10 for part of that.
+- Plain HTTP to a tailnet address works in both the dev WebView and the packaged build (iPhone, iOS 18.7). No TLS task is needed.
+- Ring events (swipe up/down, tap, double tap, long press) all arrived, including with the phone locked; in-place text updates did not flicker.
