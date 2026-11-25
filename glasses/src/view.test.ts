@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { COLS } from './layout';
 import type { FleetResponse, NextResponse, RemoteDetail, RemoteOption, State } from './types';
-import { applyNext, reduce, render, rows } from './view';
+import { applyNext, reduce, render, rows, withFlash } from './view';
 
 const opt = (id: string, label: string, extra: Partial<RemoteOption> = {}): RemoteOption => ({
   id,
@@ -139,6 +139,60 @@ describe('reduce: double and fleet', () => {
     expect(r.effect).toEqual({ kind: 'open', session: 's2' });
     expect(r.state.screen).toBe('session');
     expect(r.state.cursor).toBe(0);
+  });
+});
+
+describe('error freezes input', () => {
+  it('tap, up and down do nothing on the session screen', () => {
+    const s = state({ error: 'x', cursor: 1 });
+    for (const g of ['tap', 'up', 'down'] as const) {
+      const r = reduce(s, g);
+      expect(r.effect).toBeNull();
+      expect(r.state).toEqual(s);
+    }
+  });
+
+  it('tap, up and down do nothing on the fleet screen', () => {
+    const s = state({ screen: 'fleet', fleet, error: 'x', cursor: 0 });
+    for (const g of ['tap', 'up', 'down'] as const) {
+      const r = reduce(s, g);
+      expect(r.effect).toBeNull();
+      expect(r.state).toEqual(s);
+    }
+  });
+
+  it('double still switches screens', () => {
+    expect(reduce(state({ error: 'x' }), 'double').state.screen).toBe('fleet');
+    expect(reduce(state({ screen: 'fleet', fleet, error: 'x' }), 'double').state.screen).toBe('session');
+  });
+
+  it('render shows no option rows on either screen', () => {
+    expect(render(state({ error: 'x' }), 2000).options).toBe('');
+    const f = render(state({ screen: 'fleet', fleet, error: 'x' }), 2000);
+    expect(f.options).toBe('');
+    expect(f.header).toBe('lobby not reachable');
+  });
+});
+
+describe('flash', () => {
+  it('replaces the title on the left of the header', () => {
+    const h = render(withFlash(state(), 'sent'), 2000).header;
+    expect(h.length).toBe(COLS);
+    expect(h.startsWith('sent')).toBe(true);
+    expect(h).not.toContain('Fix the build');
+    expect(h.endsWith('1/3')).toBe(true);
+  });
+
+  it('error takes precedence over flash', () => {
+    expect(render(withFlash(state({ error: 'x' }), 'sent'), 2000).header).toBe('lobby not reachable');
+  });
+
+  it('withFlash null clears it', () => {
+    expect(withFlash(withFlash(state(), 'sent'), null).flash).toBeNull();
+  });
+
+  it('applyNext clears it', () => {
+    expect(applyNext(withFlash(state(), 'sent'), next(), 5000).flash).toBeNull();
   });
 });
 

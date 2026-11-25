@@ -30,6 +30,10 @@ function clampCursor(cursor: number, n: number): number {
 export function reduce(s: State, g: Gesture): { state: State; effect: Effect } {
   const list = rows(s);
 
+  // While the header says the lobby is unreachable no rows are shown, so
+  // nothing but screen switching may act on them.
+  if (s.error && g !== 'double') return { state: s, effect: null };
+
   if (g === 'up' || g === 'down') {
     const cursor = clampCursor(s.cursor + (g === 'down' ? 1 : -1), list.length);
     return { state: { ...s, cursor, confirming: null }, effect: null };
@@ -72,9 +76,14 @@ export function applyNext(s: State, n: NextResponse, now: number): State {
   const prev = s.next?.detail;
   const cur = n.detail;
   const same = prev && cur && prev.session === cur.session && prev.episode === cur.episode;
-  const merged: State = { ...s, next: n, lastOkAt: now, error: null };
+  const merged: State = { ...s, next: n, lastOkAt: now, error: null, flash: null };
   if (!same) return { ...merged, cursor: 0, confirming: null };
   return { ...merged, cursor: clampCursor(s.cursor, rows(merged).length) };
+}
+
+// Shows text in place of the title until the next successful poll.
+export function withFlash(s: State, text: string | null): State {
+  return { ...s, flash: text };
 }
 
 function optionWindow(list: Row[], cursor: number, confirming: string | null): string {
@@ -90,17 +99,17 @@ function optionWindow(list: Row[], cursor: number, confirming: string | null): s
 }
 
 export function render(s: State, now: number): { header: string; body: string; options: string } {
+  if (s.error) {
+    return { header: 'lobby not reachable', body: '', options: '' };
+  }
+
   if (s.screen === 'fleet') {
     const total = s.fleet?.sessions.length ?? 0;
     return {
-      header: s.error ? 'lobby not reachable' : fit('sessions', String(total), COLS),
+      header: fit('sessions', String(total), COLS),
       body: '',
       options: optionWindow(rows(s), s.cursor, null),
     };
-  }
-
-  if (s.error) {
-    return { header: 'lobby not reachable', body: '', options: '' };
   }
 
   const d = s.next?.detail;
@@ -113,7 +122,7 @@ export function render(s: State, now: number): { header: string; body: string; o
   const right = age > STALE_MS ? `${Math.floor(age / 1000)}s ago` : `${pos > 0 ? pos : '-'}/${total}`;
   const body = [wrap(d.body, COLS, BODY_LINES), d.note ?? ''].filter((p) => p !== '').join('\n');
   return {
-    header: fit(d.title, right, COLS),
+    header: fit(s.flash ?? d.title, right, COLS),
     body,
     options: optionWindow(rows(s), s.cursor, s.confirming),
   };
