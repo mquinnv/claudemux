@@ -20,8 +20,8 @@ import (
 // whenever its phase moves. A killed session takes the option with it.
 //
 // The mark changes where a session is listed and, for the conductor, where it
-// stands in the queue. The conductor never excludes a closing session on
-// purpose — one that is waiting is waiting on the human (the wrap-up's
+// stands in the queue. The conductor never excludes a closing session: one
+// that is waiting is waiting on the human (the wrap-up's
 // confirmation, the final x, a blocked gate), which is exactly what the
 // conductor exists to bring them to. It does visit the ones closest to done
 // first (swCloseTier), since each of those is a row off the list.

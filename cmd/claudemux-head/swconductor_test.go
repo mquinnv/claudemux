@@ -207,6 +207,19 @@ func TestConductorEscortAdvancesOnResolve(t *testing.T) {
 	}
 }
 
+func TestConductorEscortAdvancesToClosingFirst(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	c.step(snapAt("switchboard", waiting("cur", 50)), now)
+	act, ok := c.step(snapAt("cur", busy("cur"), waiting("old", 100), closingWaiting("r", "ready", "Idle", 900)), now)
+	if !ok || act.Target != "r" {
+		t.Fatalf("act = %+v ok=%v, want switch to r", act, ok)
+	}
+	if c.phase != swEscorting || c.escortee != "r" {
+		t.Errorf("phase=%v escortee=%q", c.phase, c.escortee)
+	}
+}
+
 func TestConductorEscortReturnsToLobbyWhenQueueEmpty(t *testing.T) {
 	now := time.Unix(1_754_700_000, 0)
 	c := newConductor()

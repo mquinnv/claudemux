@@ -136,7 +136,8 @@ up with the secrets in its environment rather than without them.
 Run `claudemux` with no arguments to open a **switchboard** (`claudemux switch` does the
 same thing, explicitly): a full-screen lobby session that watches
 every claudemux session and automatically carries your tmux client to whichever one
-is waiting on input — Claude's turn ended, or it asked you a question — oldest first,
+is waiting on input — Claude's turn ended, or it asked you a question — sessions about
+to close first (ready to tear down, then a wrap-up waiting on an answer), then oldest first,
 skipping any session you've deferred (see **Deferring a session** below).
 Answer, and it moves you to the next waiting session; when nothing waits, you're
 returned to the lobby — unless the session you're in is the only one there is, in
@@ -287,13 +288,14 @@ it as above.
 — you typed `/done` in it, pressed `x` or `X` in its status pane, or it is sitting at
 `⏻ press x to tear down` — moves under a `─ closing ─` rule, between the working fleet
 and the deferred rows, with a badge that says where the teardown stands — ` /DONE `
-while the wrap-up is still working, ` CONFIRM ` (orange) once it stops to ask you,
-` BLOCKED ` if it ended with the gate shut, ` READY ` when one more `x` tears it down
+while the wrap-up is still working, ` CONFIRM ` (orange) once it stops to ask you — whether the head published `wrapup` or `blocked` —
+` BLOCKED ` if the wrap-up stopped with the gate shut, ` READY ` when one more `x` tears it down
 (` KILL? ` for an armed `X`, ` EXITING ` on the way out) — and the teardown's phase leading its
-second line (`⏻ wrapping up…`, `⏻ wrap-up blocked`, `⏻ press x to tear down`, …). The
-status line counts them (`· 2 closing`). This is a listing change only: a closing
-session that is waiting is waiting on *you* — the wrap-up's confirmation, the final
-`x`, a blocked gate — so the conductor still carries you to it in its turn. Cancelling
+second line (`⏻ wrapping up…`, `⏻ wrap-up needs an answer`, `⏻ wrap-up blocked`, `⏻ press x to tear down`, …). The
+status line counts them (`· 2 closing`). The mark also moves a waiting closing row to the
+front of the conductor's queue — `READY` and direct teardowns first, then a wrap-up
+waiting on an answer (`CONFIRM`), then everyone else oldest first — since each is a row
+off the list; snooze and defer still keep it out. Cancelling
 the teardown (`esc`) puts the row back in the fleet. A session that is both closing
 and deferred is listed as closing.
 
