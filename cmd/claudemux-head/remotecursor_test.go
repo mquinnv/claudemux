@@ -52,8 +52,12 @@ func TestRemoteCursorMovesOnWhenAnswered(t *testing.T) {
 		t.Fatalf("got %q pos=%d total=%d ok=%v", s.Name, pos, total, ok)
 	}
 	// A new episode of the pinned session is a different Since: re-pick.
-	c.pick([]swSession{rcSess("b", "Idle", t0.Add(time.Minute)), rcSess("c", "Idle", t0)}, now)
-	s, _, _, _ = c.pick([]swSession{rcSess("b", "Idle", t0.Add(3*time.Minute)), rcSess("c", "Idle", t0)}, now)
+	var d remoteCursor
+	s, _, _, _ = d.pick([]swSession{rcSess("b", "Idle", t0), rcSess("c", "Idle", t0.Add(time.Minute))}, now)
+	if s.Name != "b" {
+		t.Fatalf("setup: head is %q, want b", s.Name)
+	}
+	s, _, _, _ = d.pick([]swSession{rcSess("b", "Idle", t0.Add(3*time.Minute)), rcSess("c", "Idle", t0.Add(time.Minute))}, now)
 	if s.Name != "c" {
 		t.Fatalf("new episode kept the pin: %q", s.Name)
 	}
@@ -116,5 +120,31 @@ func TestRemoteCursorOpenNonWaiting(t *testing.T) {
 	s, pos, _, ok = c.pick(sessions[:1], t0.Add(time.Minute))
 	if !ok || s.Name != "a" || pos != 1 {
 		t.Fatalf("fallback got %q pos=%d ok=%v", s.Name, pos, ok)
+	}
+}
+
+func TestRemoteCursorSkipReleasesOpenedPin(t *testing.T) {
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	now := t0.Add(time.Minute)
+	sessions := []swSession{rcSess("a", "Idle", t0), rcSess("b", "Idle", t0.Add(time.Second))}
+	var c remoteCursor
+	c.open("b")
+	s, pos, total, ok := c.pick(sessions, now)
+	if !ok || s.Name != "b" || pos != 2 || total != 2 {
+		t.Fatalf("open waiting: got %q pos=%d total=%d ok=%v", s.Name, pos, total, ok)
+	}
+	c.skip("b", s.Since, now)
+	s, pos, total, ok = c.pick(sessions, now)
+	if !ok || s.Name != "a" || pos != 1 || total != 1 {
+		t.Fatalf("after skip: got %q pos=%d total=%d ok=%v", s.Name, pos, total, ok)
+	}
+	// Skipping an opened non-waiting session also releases the pin.
+	busy := []swSession{rcSess("a", "Idle", t0), rcSess("w", "Tool:Bash", t0)}
+	var d remoteCursor
+	d.open("w")
+	d.pick(busy, now)
+	d.skip("w", time.Time{}, now)
+	if s, _, _, _ := d.pick(busy, now); s.Name != "a" {
+		t.Fatalf("non-waiting opened pin kept after skip: %q", s.Name)
 	}
 }

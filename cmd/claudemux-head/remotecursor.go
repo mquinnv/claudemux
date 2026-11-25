@@ -62,6 +62,9 @@ func (c *remoteCursor) skip(name string, since, now time.Time) {
 		c.skips = map[string]swSnooze{}
 	}
 	c.skips[name] = swSnooze{since: since, at: now}
+	if c.pinned == name {
+		c.pinned, c.since, c.opened = "", time.Time{}, false
+	}
 }
 
 // open pins a session chosen from the fleet list, waiting or not.
