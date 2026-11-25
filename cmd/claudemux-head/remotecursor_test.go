@@ -148,3 +148,25 @@ func TestRemoteCursorSkipReleasesOpenedPin(t *testing.T) {
 		t.Fatalf("non-waiting opened pin kept after skip: %q", s.Name)
 	}
 }
+
+func TestRemoteCursorReleaseOpenedPin(t *testing.T) {
+	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	now := t0.Add(time.Minute)
+	sessions := []swSession{rcSess("a", "Idle", t0), rcSess("b", "Idle", t0.Add(time.Second))}
+	var c remoteCursor
+	c.open("b")
+	c.pick(sessions, now)
+	c.release("a") // not the pinned session: no effect
+	if s, _, _, _ := c.pick(sessions, now); s.Name != "b" {
+		t.Fatalf("release of another session dropped the pin: %q", s.Name)
+	}
+	c.release("b")
+	if s, pos, _, _ := c.pick(sessions, now); s.Name != "a" || pos != 1 {
+		t.Fatalf("after release: %q pos=%d, want the queue head", s.Name, pos)
+	}
+	// A queue pin (not opened) is left to pick's own rules.
+	c.release("a")
+	if s, _, _, _ := c.pick(sessions, now); s.Name != "a" {
+		t.Fatalf("queue pin: %q", s.Name)
+	}
+}

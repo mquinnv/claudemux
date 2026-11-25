@@ -742,6 +742,10 @@ func TestRemoteConfigRejectsEmptyReply(t *testing.T) {
 	for name, yml := range map[string]string{
 		"empty":    "remote:\n  replies: [\"Continue\", \"\"]\n",
 		"too long": "remote:\n  replies: [\"" + long + "\"]\n",
+		"escape":   "remote:\n  replies: [\"go\\e[2J\"]\n",
+		"tab":      "remote:\n  replies: [\"go\\tnow\"]\n",
+		"format":   "remote:\n  replies: [\"go\\u200Bnow\"]\n",
+		"lsep":     "remote:\n  replies: [\"go\\u2028now\"]\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			writeConfig(t, yml)

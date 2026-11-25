@@ -38,19 +38,23 @@ const (
 )
 
 // remoteHub is the remote's state and its seams to tmux, the lobby and the
-// model. The fields below mu are guarded by it; gather, rio and suggestFn are
-// set once at construction (tests replace them before serving).
+// model. mu guards cursor, busy, pending, answered and deferFn. suggest and
+// texts carry their own locks. gather, rio and suggestFn are set once at
+// construction (tests replace them before serving).
 type remoteHub struct {
 	fleet *webFleet
 	cfg   RemoteConfig
 	token string
 
-	mu        sync.Mutex
-	cursor    remoteCursor
-	busy      map[string]bool // one answer in flight per session
-	pending   map[string]bool // suggestion generations in flight, by remoteSuggestKey
-	deferFn   func(swSession, string) error
+	mu       sync.Mutex
+	cursor   remoteCursor
+	busy     map[string]bool      // one answer in flight per session
+	pending  map[string]bool      // suggestion generations in flight, by remoteSuggestKey
+	answered map[string]time.Time // session name -> the Since it was last answered in
+	deferFn  func(swSession, string) error
+
 	suggest   suggestCache
+	texts     remoteTextCache
 	gather    func(swSession) (remoteInputs, error)                            // reads transcript and marker, captures the pane last
 	rio       func(pane string, rebuild func() (remoteDetail, error)) remoteIO // the sender's tmux calls, bound to pane
 	suggestFn func(lastText string) ([]string, error)                          // nil: no suggestions
@@ -60,14 +64,16 @@ type remoteHub struct {
 // sum may be nil (summaries off), which means no suggestions.
 func newRemoteHub(fleet *webFleet, cfg RemoteConfig, token string, sum *Summarizer) *remoteHub {
 	h := &remoteHub{
-		fleet:   fleet,
-		cfg:     cfg,
-		token:   token,
-		busy:    map[string]bool{},
-		pending: map[string]bool{},
-		gather:  gatherRemote,
-		rio:     liveRemoteIO,
+		fleet:    fleet,
+		cfg:      cfg,
+		token:    token,
+		busy:     map[string]bool{},
+		pending:  map[string]bool{},
+		answered: map[string]time.Time{},
+		texts:    remoteTextCache{read: lastAssistantText},
+		rio:      liveRemoteIO,
 	}
+	h.gather = func(s swSession) (remoteInputs, error) { return gatherRemote(s, h.texts.get) }
 	if sum != nil {
 		h.suggestFn = func(last string) ([]string, error) {
 			return sum.SuggestReplies(context.Background(), last)
@@ -166,6 +172,7 @@ func remoteHandler(h *remoteHub) http.Handler {
 		hd.Set("Access-Control-Allow-Origin", "*")
 		hd.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		hd.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		hd.Set("Access-Control-Max-Age", "600")
 		hd.Set("Cache-Control", "no-store")
 		hd.Set("X-Content-Type-Options", "nosniff")
 		if h.token == "" {
@@ -311,6 +318,8 @@ func (h *remoteHub) serveNext(w http.ResponseWriter, r *http.Request) {
 		h.cursor.open(name)
 	}
 	sess, pos, total, ok := h.cursor.pick(sessions, now)
+	h.pruneAnsweredLocked(sessions)
+	sent := ok && h.answeredLocked(sess)
 	h.mu.Unlock()
 
 	v := remoteNextView{TakenAt: webTime(taken), Queue: remoteQueue{Pos: pos, Total: total}}
@@ -321,15 +330,52 @@ func (h *remoteHub) serveNext(w http.ResponseWriter, r *http.Request) {
 	}
 	if ok {
 		d, in, err := h.detail(sess)
-		if err != nil {
+		switch {
+		case err != nil:
+			// Still shown, so the wearer can skip or defer it.
 			teardownLogf("remote: reading %s: %v", sess.Name, err)
-			writeRemoteJSON(w, http.StatusInternalServerError, remoteResult{"error"})
-			return
+			d = remoteDeskDetail(sess, noteCannotRead)
+		case sent:
+			// Answered moments ago; the snapshot has not caught up. Offering
+			// the same options again would let a second tap repeat the answer.
+			d.Note, d.Options = noteSent, []remoteOption{}
+			d.Episode = remoteEpisode(sess.Since, d.Kind, noteSent+"\x00"+d.Body, nil)
+		default:
+			h.fillSuggestions(d, in)
 		}
 		v.Detail = &d
-		h.fillSuggestions(d, in)
 	}
 	writeRemoteJSON(w, http.StatusOK, v)
+}
+
+// remoteDeskDetail is a detail that offers nothing, with note saying why.
+func remoteDeskDetail(sess swSession, note string) remoteDetail {
+	return remoteDetail{
+		Session: sess.Name,
+		Title:   remoteTitle(sess),
+		Kind:    "desk",
+		Note:    note,
+		Options: []remoteOption{},
+		Episode: remoteEpisode(sess.Since, "desk", note, nil),
+	}
+}
+
+// answeredLocked reports whether sess was answered in its current episode.
+// The caller holds mu.
+func (h *remoteHub) answeredLocked(sess swSession) bool {
+	since, ok := h.answered[sess.Name]
+	return ok && since.Equal(sess.Since)
+}
+
+// pruneAnsweredLocked forgets answers whose session left or whose Since
+// moved on. The caller holds mu.
+func (h *remoteHub) pruneAnsweredLocked(sessions []swSession) {
+	for name, since := range h.answered {
+		s, ok := swSnapshot{Sessions: sessions}.session(name)
+		if !ok || !s.Since.Equal(since) {
+			delete(h.answered, name)
+		}
+	}
 }
 
 func (h *remoteHub) serveFleet(w http.ResponseWriter, r *http.Request) {
@@ -391,6 +437,12 @@ func (h *remoteHub) serveAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
+	if h.answeredLocked(sess) {
+		// Already answered in this episode; what the glasses saw is stale.
+		h.mu.Unlock()
+		writeRemoteJSON(w, http.StatusConflict, remoteResult{"changed"})
+		return
+	}
 	if h.busy[sess.Name] {
 		h.mu.Unlock()
 		writeRemoteJSON(w, http.StatusConflict, remoteResult{"busy"})
@@ -415,6 +467,15 @@ func (h *remoteHub) serveAnswer(w http.ResponseWriter, r *http.Request) {
 	code, result := remoteAnswerStatus(err)
 	if code == http.StatusInternalServerError {
 		teardownLogf("remote: answering %s: %v", sess.Name, err)
+	}
+	switch result {
+	case "sent", "unverified", "typed":
+		// Something reached the pane: remember the episode as answered, and
+		// let an opened session go so the glasses move on to the queue.
+		h.mu.Lock()
+		h.answered[sess.Name] = sess.Since
+		h.cursor.release(sess.Name)
+		h.mu.Unlock()
 	}
 	writeRemoteJSON(w, code, remoteResult{result})
 }
@@ -469,22 +530,26 @@ func (h *remoteHub) serveDefer(w http.ResponseWriter, r *http.Request) {
 		writeRemoteJSON(w, http.StatusInternalServerError, remoteResult{"error"})
 		return
 	}
+	h.mu.Lock()
+	h.cursor.release(sess.Name)
+	h.mu.Unlock()
 	writeRemoteJSON(w, http.StatusOK, remoteResult{"deferred"})
 }
 
 // gatherRemote reads what buildRemoteDetail needs for sess. The transcript
 // and marker reads come first and the pane captures last, the plain one
 // (which decides the keys) at the very end: the time between that capture and
-// a keypress is the window in which the dialog can change.
-func gatherRemote(sess swSession) (remoteInputs, error) {
+// a keypress is the window in which the dialog can change. lastText reads a
+// transcript's last assistant text (the hub's cache).
+func gatherRemote(sess swSession, lastText func(path string) string) (remoteInputs, error) {
 	pane := sess.ClaudePane
 	if pane == "" {
 		return remoteInputs{}, errors.New("session has no claude pane")
 	}
 	in := remoteInputs{Sess: sess}
 	dir := paneMapDir()
-	if path, _, ok := readPaneMap(dir, pane); ok {
-		in.LastText = lastAssistantText(path)
+	if path, ok := remoteTranscriptPath(dir, claudeProjectsPath(), pane); ok {
+		in.LastText = lastText(path)
 	}
 	if id, ok := readPaneSession(dir, pane); ok {
 		in.Marker, in.MarkerOK = readAskMarker(askMarkerDir(), id)
@@ -505,6 +570,61 @@ func gatherRemote(sess swSession) (remoteInputs, error) {
 		return remoteInputs{}, fmt.Errorf("capture %s: %w", pane, err)
 	}
 	return in, nil
+}
+
+// remoteTranscriptPath finds pane's current transcript the way the head does:
+// by the session id the hook recorded, under projectsDir, because the map's
+// transcript_path goes stale when a session moves into a worktree. The map's
+// own path is the fallback.
+func remoteTranscriptPath(dir, projectsDir, pane string) (string, bool) {
+	if id, ok := readPaneSession(dir, pane); ok {
+		if path, found := transcriptForSession(projectsDir, id); found {
+			return path, true
+		}
+	}
+	if path, _, ok := readPaneMap(dir, pane); ok {
+		return path, true
+	}
+	return "", false
+}
+
+// remoteTextCacheMax bounds the cache: one entry per transcript polled, and
+// a long-lived lobby sees many.
+const remoteTextCacheMax = 64
+
+// remoteTextCache keeps the last assistant text per transcript, keyed by the
+// file's size and mtime: a poll of an unchanged transcript costs one os.Stat.
+type remoteTextCache struct {
+	mu   sync.Mutex
+	m    map[string]remoteTextEntry
+	read func(path string) string
+}
+
+type remoteTextEntry struct {
+	size int64
+	mod  time.Time
+	text string
+}
+
+func (c *remoteTextCache) get(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	c.mu.Lock()
+	e, ok := c.m[path]
+	c.mu.Unlock()
+	if ok && e.size == fi.Size() && e.mod.Equal(fi.ModTime()) {
+		return e.text
+	}
+	text := c.read(path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil || len(c.m) >= remoteTextCacheMax {
+		c.m = map[string]remoteTextEntry{}
+	}
+	c.m[path] = remoteTextEntry{size: fi.Size(), mod: fi.ModTime(), text: text}
+	return text
 }
 
 // lastAssistantText is the newest main-chain assistant text in the

@@ -182,11 +182,34 @@ func TestRemoteDetailIdle(t *testing.T) {
 	if d.Kind != "idle" || d.Body != "All done." || d.Note != "" {
 		t.Fatalf("%+v", d)
 	}
-	if got, want := optionIDs(d), []string{"suggest:0", "reply:0", "reply:1"}; !reflect.DeepEqual(got, want) {
+	// The fixed replies come first, so suggestions arriving later never
+	// move a fixed reply out from under the glasses' cursor.
+	if got, want := optionIDs(d), []string{"reply:0", "reply:1", "suggest:0"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("options %v", got)
 	}
-	if !d.Options[0].Suggested || d.Options[1].Suggested {
+	if d.Options[0].Suggested || d.Options[1].Suggested || !d.Options[2].Suggested {
 		t.Errorf("suggested flags %+v", d.Options)
+	}
+}
+
+// Suggestions land in the cache after the glasses first saw the session; the
+// episode must not change when they do, or a tap on a fixed reply made just
+// after would be refused. Fixed replies still count.
+func TestRemoteDetailIdleEpisodeIgnoresSuggestions(t *testing.T) {
+	e := readFixture(t, "prompt_empty.txt")
+	in := remoteInputs{
+		Sess: detailSess("Idle"), Capture: ansi.Strip(e), CaptureE: e,
+		LastText: "All done.", Replies: []string{"Continue", "Stop"}, VimMode: true,
+	}
+	without := buildRemoteDetail(in)
+	in.Suggested = []string{"commit it", "open the PR"}
+	with := buildRemoteDetail(in)
+	if len(with.Options) != 4 || without.Episode != with.Episode {
+		t.Errorf("episode %q without suggestions, %q with (options %v)", without.Episode, with.Episode, optionIDs(with))
+	}
+	in.Replies = []string{"Continue"}
+	if buildRemoteDetail(in).Episode == with.Episode {
+		t.Error("a change to the fixed replies must change the episode")
 	}
 }
 
@@ -310,37 +333,121 @@ func TestBroadChoice(t *testing.T) {
 	}
 }
 
-// A free-text row ahead of the selectable ones must not shift the digit that
-// an option presses, and a free-text row after No must not make No broad.
-func TestRemoteDetailPermitIDsUseRowNumbers(t *testing.T) {
-	c := strings.Replace(readFixture(t, "dialog_permit_edit.txt"), "1. Yes\n", "1. Yes, and tell Claude what to do next\n", 1)
-	c = strings.Replace(c, " Esc to cancel · Tab to amend", " Esc to cancel", 1)
+// A Tab-amended permission row is a focused text field; what a digit does
+// there was never measured, so such a dialog is answered at the desk.
+func TestRemoteDetailAmendedPermitIsDesk(t *testing.T) {
+	edit := readFixture(t, "dialog_permit_edit.txt")
+	amendedYes := strings.Replace(edit, "1. Yes\n", "1. Yes, and tell Claude what to do next\n", 1)
+	amendedNo := strings.Replace(edit, " 3. No\n", " 3. No, and tell Claude what to do differently\n", 1)
+	cases := map[string]string{
+		"amended first row":                  strings.Replace(amendedYes, " Esc to cancel · Tab to amend", " Esc to cancel", 1),
+		"amended last row":                   strings.Replace(amendedNo, " Esc to cancel · Tab to amend", " Esc to cancel", 1),
+		"free-text row, footer still amends": amendedYes,
+		"plain rows, footer lost Tab":        strings.Replace(edit, " Esc to cancel · Tab to amend", " Esc to cancel", 1),
+	}
+	for name, c := range cases {
+		d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: c})
+		if d.Kind != "desk" || d.Note != noteAtDesk || len(d.Options) != 0 {
+			t.Errorf("%s: %+v", name, d)
+		}
+	}
+}
+
+// keyOptions takes each option's digit from its row number, never from its
+// position among the offered rows, and a free-text row next to No does not
+// make No broad.
+func TestKeyOptionsUseRowNumbers(t *testing.T) {
+	dlg := paneDialog{Kind: dialogPermit, Prompt: "Edit file\nDo you want to make this edit?", Rows: []dialogRow{
+		{1, "Yes, and tell Claude what to do next", true},
+		{2, "Yes, and switch to accept edits", false},
+		{3, "No", false},
+		{4, "No, and tell Claude what to do differently", true},
+	}}
+	opts := keyOptions(dlg)
+	ids := make([]string, len(opts))
+	for i, o := range opts {
+		ids[i] = o.ID
+	}
+	if want := []string{"key:2", "key:3"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("options %v, want %v", ids, want)
+	}
+	if !opts[0].Broad || opts[1].Broad {
+		t.Errorf("broad flags %+v", opts)
+	}
+}
+
+// The permit body leads with the title and the command, so a long
+// model-written description cannot push the command off the glasses.
+func TestRemoteDetailPermitBodyOrder(t *testing.T) {
+	desc := "Create empty marker file"
+	long := strings.Repeat("A very long explanation of the command. ", 20)
+	c := strings.Replace(readFixture(t, "dialog_permit_bash.txt"), " "+desc+"\n", " "+long+"\n", 1)
 	d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: c})
 	if d.Kind != "permit" {
 		t.Fatalf("kind %q", d.Kind)
 	}
-	if got, want := optionIDs(d), []string{"key:2", "key:3"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("options %v, want %v", got, want)
+	if !strings.HasPrefix(d.Body, "Bash command\ntouch spike-marker.txt\n") {
+		t.Errorf("body %q", d.Body)
 	}
-	if !d.Options[0].Broad || d.Options[1].Broad {
-		t.Errorf("broad flags %+v", d.Options)
+	short := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: readFixture(t, "dialog_permit_bash.txt")})
+	want := "Bash command\ntouch spike-marker.txt\nCreate empty marker file\nDo you want to proceed?"
+	if short.Body != want {
+		t.Errorf("body %q, want %q", short.Body, want)
+	}
+	edit := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: readFixture(t, "dialog_permit_edit.txt")})
+	if !strings.HasPrefix(edit.Body, "Edit file\n1 -hello\n1 +goodbye\nnotes.txt\n") {
+		t.Errorf("edit body %q", edit.Body)
 	}
 }
 
-func TestRemoteDetailNoStaysNarrowBeforeFreeTextRow(t *testing.T) {
-	c := strings.Replace(readFixture(t, "dialog_permit_edit.txt"), " 3. No\n", " 3. No\n   4. No, and tell Claude what to do differently\n", 1)
-	c = strings.Replace(c, " Esc to cancel · Tab to amend", " Esc to cancel", 1)
-	d := parsePaneDialog(c)
-	if d.Kind != dialogPermit || len(d.Rows) != 4 || !d.Rows[3].FreeText {
-		t.Fatalf("parse %+v", d)
+// Two prompts that differ only past the trimmed body are two episodes.
+func TestRemoteDetailPermitEpisodeCoversWholePrompt(t *testing.T) {
+	base := readFixture(t, "dialog_permit_bash.txt")
+	cmd := "echo " + strings.Repeat("word ", 120)
+	at := strings.LastIndex(base, "touch spike-marker.txt") // the dialog's copy, not the scrollback's
+	a := base[:at] + cmd + "AAA" + base[at+len("touch spike-marker.txt"):]
+	b := base[:at] + cmd + "BBB" + base[at+len("touch spike-marker.txt"):]
+	da := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: a})
+	db := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: b})
+	if da.Kind != "permit" || db.Kind != "permit" {
+		t.Fatalf("kinds %q %q", da.Kind, db.Kind)
 	}
-	det := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: c})
-	if got, want := optionIDs(det), []string{"key:1", "key:2", "key:3"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("options %v, want %v", got, want)
+	if da.Body != db.Body {
+		t.Fatalf("bodies differ; the test needs the difference past the cut:\n%q\n%q", da.Body, db.Body)
 	}
-	for i, want := range []bool{false, true, false} {
-		if det.Options[i].Broad != want {
-			t.Errorf("option %d broad %v, want %v", i+1, det.Options[i].Broad, want)
+	if da.Episode == db.Episode {
+		t.Error("prompts differing past the body cut share an episode")
+	}
+}
+
+// A prompt longer than the glasses can show makes the plain Yes a second
+// tap too: the wearer cannot have read all of it.
+func TestRemoteDetailLongPermitYesIsBroad(t *testing.T) {
+	base := readFixture(t, "dialog_permit_edit.txt")
+	short := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: base})
+	if short.Options[0].Label != "Yes" || short.Options[0].Broad {
+		t.Fatalf("short prompt: %+v", short.Options)
+	}
+	long := strings.Replace(base, " 1 +goodbye\n", " 1 +goodbye\n"+strings.Repeat(" 2 +more text in the diff\n", 6), 1)
+	d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: long})
+	if d.Kind != "permit" {
+		t.Fatalf("kind %q", d.Kind)
+	}
+	for i, want := range []bool{true, true, false} {
+		if d.Options[i].Broad != want {
+			t.Errorf("option %s broad %v, want %v", d.Options[i].Label, d.Options[i].Broad, want)
 		}
+	}
+}
+
+// Plan rows are offered only when they say Yes.
+func TestRemoteDetailPlanOffersOnlyYesRows(t *testing.T) {
+	c := strings.Replace(readFixture(t, "dialog_plan.txt"), "2. Yes, manually approve edits", "2. Keep planning", 1)
+	d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: c})
+	if d.Kind != "plan" {
+		t.Fatalf("kind %q", d.Kind)
+	}
+	if got, want := optionIDs(d), []string{"key:1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("options %v, want %v", got, want)
 	}
 }

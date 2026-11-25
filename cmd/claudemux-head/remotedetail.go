@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // remoteOption is one thing the glasses can press.
@@ -49,6 +50,8 @@ const (
 	noteAtDesk      = "answer at the desk"
 	noteDraft       = "prompt has a draft"
 	noteWorking     = "working"
+	noteSent        = "sent"
+	noteCannotRead  = "cannot read pane"
 )
 
 // buildRemoteDetail decides what the glasses show and which options they may
@@ -61,10 +64,13 @@ func buildRemoteDetail(in remoteInputs) remoteDetail {
 		Options: []remoteOption{},
 	}
 	dlg := parsePaneDialog(in.Capture)
+	// full is the untrimmed text the episode covers: two dialogs that differ
+	// only past the body's cut are still two episodes.
+	full := dlg.Prompt
 
 	switch dlg.Kind {
 	case dialogAsk:
-		fillAsk(&d, dlg, in)
+		full = fillAsk(&d, dlg, in)
 	case dialogPermit:
 		d.Kind = "permit"
 		d.Body = headRunes(dlg.Prompt, remoteBodyRunes)
@@ -90,13 +96,20 @@ func buildRemoteDetail(in remoteInputs) remoteDetail {
 			d.Note = noteWorking
 			d.Options = []remoteOption{}
 		}
+		full = d.Body
 	}
 
-	labels := make([]string, len(d.Options))
-	for i, o := range d.Options {
-		labels[i] = o.Label
+	// Suggested options are left out: they arrive from the model after the
+	// glasses first saw the session, and must not turn a tap on a fixed reply
+	// into a stale episode. The sender still requires the exact option ID in
+	// the rebuilt detail, and suggestions come only from the cache.
+	var labels []string
+	for _, o := range d.Options {
+		if !o.Suggested {
+			labels = append(labels, o.Label)
+		}
 	}
-	d.Episode = remoteEpisode(in.Sess.Since, d.Kind, d.Body, labels)
+	d.Episode = remoteEpisode(in.Sess.Since, d.Kind, full, labels)
 	return d
 }
 
@@ -113,12 +126,15 @@ func remoteTitle(s swSession) string {
 
 // fillAsk handles a single-select, single-question AskUserQuestion. Labels
 // come from the hook marker when it carries them, because the pane parse
-// drops wrapped continuation lines and so can truncate a long label.
-func fillAsk(d *remoteDetail, dlg paneDialog, in remoteInputs) {
-	desk := func() {
+// drops wrapped continuation lines and so can truncate a long label. It
+// returns the untrimmed question the episode covers.
+func fillAsk(d *remoteDetail, dlg paneDialog, in remoteInputs) string {
+	full := dlg.Prompt
+	desk := func() string {
 		d.Kind, d.Note = "desk", noteAtDesk
 		d.Body = headRunes(dlg.Prompt, remoteBodyRunes)
 		d.Options = []remoteOption{}
+		return dlg.Prompt
 	}
 	var rows []dialogRow
 	for _, r := range dlg.Rows {
@@ -136,41 +152,52 @@ func fillAsk(d *remoteDetail, dlg paneDialog, in remoteInputs) {
 	if in.MarkerOK && len(in.Marker.Questions) > 0 {
 		qs := in.Marker.Questions
 		if len(qs) != 1 || qs[0].MultiSelect || len(qs[0].Options) != len(rows) {
-			desk()
-			return
+			return desk()
 		}
 		q := qs[0]
 		for i, o := range q.Options {
 			if !strings.HasPrefix(o.Label, rows[i].Label) {
-				desk()
-				return
+				return desk()
 			}
 			labels[i] = o.Label
 		}
 		if q.Question != "" {
 			d.Body = headRunes(q.Question, remoteBodyRunes)
+			full = q.Question
 		}
 	}
 	if len(rows) == 0 {
-		desk()
-		return
+		return desk()
 	}
 	for i, r := range rows {
 		d.Options = append(d.Options, remoteOption{ID: "key:" + strconv.Itoa(r.N), Label: labels[i]})
 	}
+	return full
 }
 
-// keyOptions lists a permit or plan dialog's typeable-free rows as key options.
+// remoteBodyFitRunes is roughly what the glasses' three body lines show. A
+// permit prompt longer than this cannot have been read in full, so its plain
+// Yes takes a second tap too.
+const remoteBodyFitRunes = 130
+
+// keyOptions lists a permit or plan dialog's offerable rows as key options:
+// never a free-text row, and on a plan dialog only rows that say Yes. Each
+// option's digit is its row's number, not its position in the list.
 func keyOptions(dlg paneDialog) []remoteOption {
 	opts := []remoteOption{}
+	long := dlg.Kind == dialogPermit && utf8.RuneCountInString(dlg.Prompt) > remoteBodyFitRunes
 	for _, r := range dlg.Rows {
-		if r.FreeText {
+		if r.FreeText || (dlg.Kind == dialogPlan && !strings.HasPrefix(r.Label, "Yes")) {
 			continue
+		}
+		broad := broadChoice(dlg.Kind, r, len(opts) == 0)
+		if long && r.Label == "Yes" {
+			broad = true
 		}
 		opts = append(opts, remoteOption{
 			ID:    "key:" + strconv.Itoa(r.N),
 			Label: r.Label,
-			Broad: broadChoice(dlg.Kind, r, len(opts) == 0),
+			Broad: broad,
 		})
 	}
 	return opts
@@ -186,11 +213,13 @@ func fillIdle(d *remoteDetail, in remoteInputs) {
 		d.Note = noteDraft
 		return
 	}
-	for i, s := range in.Suggested {
-		d.Options = append(d.Options, remoteOption{ID: fmt.Sprintf("suggest:%d", i), Label: s, Suggested: true})
-	}
+	// Fixed replies first: suggestions arrive a poll or two later, and
+	// appended below they never move a row the cursor may be on.
 	for i, s := range in.Replies {
 		d.Options = append(d.Options, remoteOption{ID: fmt.Sprintf("reply:%d", i), Label: s})
+	}
+	for i, s := range in.Suggested {
+		d.Options = append(d.Options, remoteOption{ID: fmt.Sprintf("suggest:%d", i), Label: s, Suggested: true})
 	}
 }
 

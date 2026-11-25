@@ -158,16 +158,59 @@ func TestParsePaneDialogUnknown(t *testing.T) {
 	}
 }
 
-func TestParsePaneDialogPermitAmendedRowIsFreeText(t *testing.T) {
-	c := strings.Replace(readFixture(t, "dialog_permit_edit.txt"), "1. Yes\n", "1. Yes, and tell Claude what to do next\n", 1)
-	c = strings.Replace(c, "3. No\n", "3. No, and tell Claude what to do differently\n", 1)
-	c = strings.Replace(c, " Esc to cancel · Tab to amend", " Esc to cancel", 1)
-	d := parsePaneDialog(c)
-	if d.Kind != dialogPermit || len(d.Rows) != 3 {
-		t.Fatalf("got %+v", d)
+// A Tab-amended row (footer reduced to "Esc to cancel", the row reading
+// "..., and tell Claude ...") is a text field: the dialog is not answerable.
+func TestParsePaneDialogPermitAmendedIsUnknown(t *testing.T) {
+	edit := readFixture(t, "dialog_permit_edit.txt")
+	amended := strings.Replace(edit, "1. Yes\n", "1. Yes, and tell Claude what to do next\n", 1)
+	amended = strings.Replace(amended, "3. No\n", "3. No, and tell Claude what to do differently\n", 1)
+	for name, c := range map[string]string{
+		"amended rows and footer":   strings.Replace(amended, " Esc to cancel · Tab to amend", " Esc to cancel", 1),
+		"amended rows, old footer":  amended,
+		"plain rows, amend footer":  strings.Replace(edit, " Esc to cancel · Tab to amend", " Esc to cancel", 1),
+		"plain rows, footer + more": strings.Replace(edit, " Esc to cancel · Tab to amend", " Esc to cancel · ctrl+e to explain", 1),
+	} {
+		if d := parsePaneDialog(c); d.Kind != dialogUnknown || len(d.Rows) != 0 {
+			t.Errorf("%s: got %+v, want dialogUnknown", name, d)
+		}
 	}
-	if !d.Rows[0].FreeText || d.Rows[1].FreeText || !d.Rows[2].FreeText {
-		t.Errorf("free-text flags %+v", d.Rows)
+	for _, l := range []string{"Yes, and tell Claude what to do next", "No, and tell Claude what to do differently"} {
+		if !freeTextLabel(l) {
+			t.Errorf("%q is not read as free text", l)
+		}
+	}
+}
+
+// A permit dialog opens with a known title line; anything else (another
+// tool's layout, or a rule line inside a command hiding the real opener) is
+// not answerable.
+func TestParsePaneDialogPermitNeedsKnownTitle(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	tail := "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n"
+	for _, title := range []string{"Bash command", "Edit file", "Create file"} {
+		if d := parsePaneDialog("x\n" + rule + "\n " + title + "\n echo hi" + tail); d.Kind != dialogPermit {
+			t.Errorf("%s: got %+v, want dialogPermit", title, d)
+		}
+	}
+	for name, c := range map[string]string{
+		"unknown title":        "x\n" + rule + "\n Tool use\n echo hi" + tail,
+		"blank before title":   "x\n" + rule + "\n\n Bash command\n echo hi" + tail,
+		"rule inside command":  "x\n" + rule + "\n Bash command\n echo start\n" + rule + "\n echo end" + tail,
+		"title not first line": "x\n" + rule + "\n echo hi\n Bash command" + tail,
+	} {
+		if d := parsePaneDialog(c); d.Kind != dialogUnknown || len(d.Rows) != 0 {
+			t.Errorf("%s: got %+v, want dialogUnknown", name, d)
+		}
+	}
+}
+
+// The permit prompt is the whole parsed text, not trimmed, ordered title,
+// command, description, question.
+func TestParsePaneDialogPermitPromptOrder(t *testing.T) {
+	d := parsePaneDialog(readFixture(t, "dialog_permit_bash.txt"))
+	want := "Bash command\ntouch spike-marker.txt\nCreate empty marker file\nDo you want to proceed?"
+	if d.Prompt != want {
+		t.Errorf("prompt %q, want %q", d.Prompt, want)
 	}
 }
 

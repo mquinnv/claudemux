@@ -223,6 +223,7 @@ func TestRemoteRequiresToken(t *testing.T) {
 			"Access-Control-Allow-Origin":  "*",
 			"Access-Control-Allow-Headers": "Authorization, Content-Type",
 			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+			"Access-Control-Max-Age":       "600",
 		} {
 			if got := rec.Header().Get(k); got != v {
 				t.Errorf("OPTIONS %s: %s = %q, want %q", p, k, got, v)
@@ -661,16 +662,8 @@ func TestRemoteSuggestionsFillInBackground(t *testing.T) {
 		}
 	}
 	close(gate)
-	deadline := time.Now().Add(2 * time.Second)
-	var got remoteNextView
-	for time.Now().Before(deadline) {
-		got = getNext(t, h, "")
-		if len(got.Detail.Options) > 0 && got.Detail.Options[0].ID == "suggest:0" {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got.Detail.Options[0].ID != "suggest:0" || got.Detail.Options[0].Label != "Open the PR" {
+	got := waitForSuggestion(t, h)
+	if s := suggestedOption(got.Detail); s == nil || s.ID != "suggest:0" || s.Label != "Open the PR" {
 		t.Fatalf("suggestion never arrived: %+v", got.Detail.Options)
 	}
 	mu.Lock()
@@ -691,6 +684,273 @@ func TestRemoteSuggestionsFillInBackground(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 1 {
 		t.Errorf("answer path called the model: %d calls", calls)
+	}
+}
+
+func suggestedOption(d *remoteDetail) *remoteOption {
+	if d == nil {
+		return nil
+	}
+	for i := range d.Options {
+		if d.Options[i].Suggested {
+			return &d.Options[i]
+		}
+	}
+	return nil
+}
+
+func waitForSuggestion(t *testing.T, h http.Handler) remoteNextView {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var got remoteNextView
+	for time.Now().Before(deadline) {
+		got = getNext(t, h, "")
+		if suggestedOption(got.Detail) != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return got
+}
+
+// The cursor sits on a fixed reply when the model's suggestions arrive: the
+// reply keeps its row and the episode, so the tap the wearer aimed at it
+// still sends it.
+func TestRemoteReplySurvivesSuggestionsArriving(t *testing.T) {
+	f := newFakeRemote()
+	f.idlePane(t, "%1", "Tests pass.")
+	hub, h := remoteTestHub(t, []swSession{{Name: "a", State: "Idle", Since: remoteT0, ClaudePane: "%1", Context: -1}}, f)
+	hub.cfg.Suggest = true
+	hub.suggestFn = func(string) ([]string, error) { return []string{"Open the PR"}, nil }
+
+	before := getNext(t, h, "")
+	if before.Detail.Options[0].ID != "reply:0" {
+		t.Fatalf("options %+v", before.Detail.Options)
+	}
+	after := waitForSuggestion(t, h)
+	if suggestedOption(after.Detail) == nil {
+		t.Fatal("suggestion never arrived")
+	}
+	if after.Detail.Options[0].ID != "reply:0" || after.Detail.Options[0].Label != "Continue" {
+		t.Errorf("a suggestion took row 0: %+v", after.Detail.Options)
+	}
+	if after.Detail.Episode != before.Detail.Episode {
+		t.Errorf("episode changed when suggestions arrived: %q -> %q", before.Detail.Episode, after.Detail.Episode)
+	}
+	rec := serve(h, remoteReq("POST", "/remote/answer", answerBody("a", before.Detail.Episode, "reply:0"), remoteTestToken))
+	if rec.Code != 200 || resultOf(t, rec) != "sent" {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if _, nudges := f.sent(); !reflect.DeepEqual(nudges, []string{"%1 Continue"}) {
+		t.Errorf("nudges %v", nudges)
+	}
+}
+
+// After an answer goes out, the session keeps its idle state and Since for a
+// moment; the glasses must not be offered the same reply again.
+func TestRemoteAnsweredSessionOffersNothing(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		out      nudgeOutcome
+		remember bool
+	}{
+		{"sent", nudgeSent, true},
+		{"typed", nudgeTyped, true},
+		{"draft", nudgeRefused, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeRemote()
+			f.idlePane(t, "%1", "Done.")
+			f.nudgeOut = c.out
+			sess := swSession{Name: "a", State: "Idle", Since: remoteT0, ClaudePane: "%1", Context: -1}
+			hub, h := remoteTestHub(t, []swSession{sess}, f)
+			v := getNext(t, h, "")
+			body := answerBody("a", v.Detail.Episode, "reply:0")
+			serve(h, remoteReq("POST", "/remote/answer", body, remoteTestToken))
+
+			again := getNext(t, h, "")
+			if !c.remember {
+				if len(again.Detail.Options) == 0 || again.Detail.Note == noteSent {
+					t.Errorf("a refused answer hid the options: %+v", again.Detail)
+				}
+				return
+			}
+			if again.Detail == nil || again.Detail.Session != "a" || len(again.Detail.Options) != 0 || again.Detail.Note != noteSent {
+				t.Fatalf("after %s: %+v", c.name, again.Detail)
+			}
+			rec := serve(h, remoteReq("POST", "/remote/answer", body, remoteTestToken))
+			if rec.Code != 409 || resultOf(t, rec) != "changed" {
+				t.Errorf("second answer: %d %s", rec.Code, rec.Body)
+			}
+			if _, nudges := f.sent(); len(nudges) != 1 {
+				t.Errorf("nudges %v, want one", nudges)
+			}
+
+			// A new episode (Since moved) is offered again.
+			sess.Since = remoteT0.Add(time.Minute)
+			hub.fleet.publish(swSnapshot{Sessions: []swSession{sess}}, RateLimits{}, false, nil, remoteT0)
+			if v := getNext(t, h, ""); len(v.Detail.Options) == 0 || v.Detail.Note != "" {
+				t.Errorf("new episode: %+v", v.Detail)
+			}
+		})
+	}
+
+	t.Run("unverified key", func(t *testing.T) {
+		f := newFakeRemote()
+		f.permitPane(t, "%1")
+		f.keyErr = errors.New("tmux died")
+		_, h := remoteTestHub(t, []swSession{waitingSess("a", "%1", remoteT0)}, f)
+		v := getNext(t, h, "")
+		serve(h, remoteReq("POST", "/remote/answer", answerBody("a", v.Detail.Episode, "key:1"), remoteTestToken))
+		if again := getNext(t, h, ""); len(again.Detail.Options) != 0 || again.Detail.Note != noteSent {
+			t.Errorf("after unverified: %+v", again.Detail)
+		}
+	})
+
+	t.Run("session gone drops the memory", func(t *testing.T) {
+		f := newFakeRemote()
+		f.idlePane(t, "%1", "Done.")
+		sess := swSession{Name: "a", State: "Idle", Since: remoteT0, ClaudePane: "%1", Context: -1}
+		hub, h := remoteTestHub(t, []swSession{sess}, f)
+		v := getNext(t, h, "")
+		serve(h, remoteReq("POST", "/remote/answer", answerBody("a", v.Detail.Episode, "reply:0"), remoteTestToken))
+		hub.fleet.publish(swSnapshot{}, RateLimits{}, false, nil, remoteT0)
+		getNext(t, h, "")
+		hub.fleet.publish(swSnapshot{Sessions: []swSession{sess}}, RateLimits{}, false, nil, remoteT0)
+		if again := getNext(t, h, ""); len(again.Detail.Options) == 0 {
+			t.Errorf("memory survived the session leaving: %+v", again.Detail)
+		}
+	})
+}
+
+// A session opened from the fleet list is released once it is answered or
+// deferred, so the glasses go back to the queue.
+func TestRemoteOpenedPinReleased(t *testing.T) {
+	for _, action := range []string{"answer", "defer"} {
+		t.Run(action, func(t *testing.T) {
+			f := newFakeRemote()
+			f.permitPane(t, "%1")
+			f.permitPane(t, "%2")
+			_, h := remoteTestHub(t, []swSession{
+				waitingSess("head", "%1", remoteT0),
+				waitingSess("later", "%2", remoteT0.Add(time.Minute)),
+			}, f)
+			v := getNext(t, h, "?session=later")
+			if v.Detail.Session != "later" {
+				t.Fatalf("%+v", v.Detail)
+			}
+			var rec *httptest.ResponseRecorder
+			if action == "answer" {
+				rec = serve(h, remoteReq("POST", "/remote/answer", answerBody("later", v.Detail.Episode, "key:1"), remoteTestToken))
+			} else {
+				rec = serve(h, remoteReq("POST", "/remote/defer", `{"session":"later"}`, remoteTestToken))
+			}
+			if rec.Code != 200 {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if got := getNext(t, h, ""); got.Detail == nil || got.Detail.Session != "head" {
+				t.Errorf("still pinned after %s: %+v", action, got.Detail)
+			}
+		})
+	}
+
+	t.Run("a refused answer keeps the pin", func(t *testing.T) {
+		f := newFakeRemote()
+		f.permitPane(t, "%1")
+		f.permitPane(t, "%2")
+		delete(f.after, "%2") // the key does not take: stuck
+		_, h := remoteTestHub(t, []swSession{
+			waitingSess("head", "%1", remoteT0),
+			waitingSess("later", "%2", remoteT0.Add(time.Minute)),
+		}, f)
+		v := getNext(t, h, "?session=later")
+		serve(h, remoteReq("POST", "/remote/answer", answerBody("later", v.Detail.Episode, "key:1"), remoteTestToken))
+		if got := getNext(t, h, ""); got.Detail.Session != "later" {
+			t.Errorf("pin dropped after a stuck answer: %+v", got.Detail)
+		}
+	})
+}
+
+// A pane that cannot be captured still shows the session, at the desk, so the
+// wearer can skip it.
+func TestRemoteNextUnreadablePaneIsDesk(t *testing.T) {
+	f := newFakeRemote()
+	f.gatherErr = errors.New("capture failed")
+	_, h := remoteTestHub(t, []swSession{waitingSess("a", "%1", remoteT0)}, f)
+	v := getNext(t, h, "")
+	if v.Detail == nil || v.Detail.Session != "a" || v.Detail.Kind != "desk" || v.Detail.Note != noteCannotRead || len(v.Detail.Options) != 0 {
+		t.Fatalf("%+v", v.Detail)
+	}
+	if rec := serve(h, remoteReq("POST", "/remote/skip", `{"session":"a"}`, remoteTestToken)); rec.Code != 200 {
+		t.Errorf("skip: %d", rec.Code)
+	}
+}
+
+// The last assistant text is found through the session id, as the head does,
+// so a session that moved into a worktree is read from its live transcript.
+func TestRemoteTranscriptPathFollowsSession(t *testing.T) {
+	mapDir, projects := t.TempDir(), t.TempDir()
+	stale := filepath.Join(projects, "old-proj", "sess-1.jsonl")
+	live := filepath.Join(projects, "worktree-proj", "sess-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(live, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMap := func(id, path string) {
+		b, _ := json.Marshal(paneMap{SessionID: id, TranscriptPath: path})
+		if err := os.WriteFile(filepath.Join(mapDir, "5.json"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMap("sess-1", stale)
+	if got, ok := remoteTranscriptPath(mapDir, projects, "%5"); !ok || got != live {
+		t.Errorf("got %q %v, want %q", got, ok, live)
+	}
+
+	// No transcript under the projects dir for the id: the map's own path.
+	other := filepath.Join(t.TempDir(), "x.jsonl")
+	if err := os.WriteFile(other, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMap("sess-unknown", other)
+	if got, ok := remoteTranscriptPath(mapDir, projects, "%5"); !ok || got != other {
+		t.Errorf("fallback: got %q %v, want %q", got, ok, other)
+	}
+	if _, ok := remoteTranscriptPath(mapDir, projects, "%6"); ok {
+		t.Error("a pane with no map file found a transcript")
+	}
+}
+
+// The transcript is read again only when its size or mtime changes.
+func TestRemoteTextCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(path, []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	c := remoteTextCache{read: func(p string) string {
+		reads++
+		b, _ := os.ReadFile(p)
+		return string(b)
+	}}
+	for i := 0; i < 3; i++ {
+		if got := c.get(path); got != "one\n" {
+			t.Fatalf("got %q", got)
+		}
+	}
+	if reads != 1 {
+		t.Errorf("%d reads for an unchanged file, want 1", reads)
+	}
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.get(path); got != "one\ntwo\n" || reads != 2 {
+		t.Errorf("after a write: %q, %d reads", got, reads)
+	}
+	if got := c.get(filepath.Join(t.TempDir(), "missing")); got != "" || reads != 2 {
+		t.Errorf("missing file: %q, %d reads", got, reads)
 	}
 }
 

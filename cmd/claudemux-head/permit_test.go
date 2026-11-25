@@ -91,6 +91,24 @@ func TestPermissionDialogUpPlanNeedsBothRows(t *testing.T) {
 	}
 }
 
+// Row 1 of the plan dialog depends on the account and mode, so the dialog is
+// recognised by its question and the numbered block under it, not by labels.
+func TestPermissionDialogUpPlanOtherFirstRow(t *testing.T) {
+	plan := readFixture(t, "dialog_plan.txt")
+	other := strings.Replace(plan, "1. Yes, and use auto mode", "1. Yes, and auto-accept edits", 1)
+	if !permissionDialogUp(other) {
+		t.Error("a plan dialog with a different row 1 was not read as a dialog")
+	}
+	noBlock := strings.Replace(plan, "❯ 1. Yes, and use auto mode", "❯ Yes, and use auto mode", 1)
+	if permissionDialogUp(noBlock) {
+		t.Error("a question with no numbered block starting at 1 read as the plan dialog")
+	}
+	noQuestion := strings.Replace(plan, "Would you like to proceed?", "Shall we?", 1)
+	if permissionDialogUp(noQuestion) {
+		t.Error("numbered rows without the question read as the plan dialog")
+	}
+}
+
 func TestPermissionDialogUpFixtures(t *testing.T) {
 	for name, want := range map[string]bool{
 		"dialog_permit_bash.txt": true,

@@ -467,6 +467,10 @@ func (c Config) validate() error {
 			return fmt.Errorf("remote.replies[%d] is %d characters: each reply must be 1 to %d characters",
 				i, n, remoteReplyMaxRunes)
 		}
+		// The same rune test the sender applies before typing a reply.
+		if unsafeNudgeLabel(r, false) {
+			return fmt.Errorf("remote.replies[%d] contains a control or format character: a reply is typed into a live session as written", i)
+		}
 	}
 	return nil
 }

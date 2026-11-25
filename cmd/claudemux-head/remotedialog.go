@@ -29,7 +29,7 @@ type dialogRow struct {
 // dialogAsk, dialogPermit or dialogPlan.
 type paneDialog struct {
 	Kind   dialogKind
-	Prompt string // the question, or the tool line plus its description
+	Prompt string // the question; for a permit dialog title, command, description, question (see permitPrompt). Never trimmed.
 	Rows   []dialogRow
 }
 
@@ -66,7 +66,9 @@ func parsePaneDialog(capture string) paneDialog {
 		kind = dialogPlan
 	case strings.Contains(foot, "Esc to cancel") && strings.Contains(foot, "Enter to select"):
 		kind = dialogAsk
-	case strings.HasPrefix(foot, "Esc to cancel"):
+	case strings.HasPrefix(foot, "Esc to cancel") && strings.Contains(foot, "Tab to amend"):
+		// Without "· Tab to amend" a row has been Tab-amended into a text
+		// field, where what a digit does was never measured.
 		kind = dialogPermit
 	case strings.Contains(foot, "Esc to cancel"), strings.Contains(foot, "Enter to select"):
 		return paneDialog{Kind: dialogUnknown}
@@ -220,6 +222,12 @@ func parsePaneDialog(capture string) paneDialog {
 		return paneDialog{Kind: dialogAsk, Prompt: prompt, Rows: out}
 
 	case dialogPermit:
+		// The opener must be followed directly by a known title; a rule line
+		// inside a command would otherwise pass for the opener and hide
+		// everything above it.
+		if !permitTitles[strings.TrimSpace(lines[opener+1])] {
+			return unknown
+		}
 		q := -1
 		for k, h := range head {
 			if strings.HasPrefix(h, "Do you want") {
@@ -233,14 +241,12 @@ func parsePaneDialog(capture string) paneDialog {
 		if !strings.HasPrefix(out[0].Label, "Yes") || !strings.HasPrefix(out[len(out)-1].Label, "No") {
 			return unknown
 		}
-		var prompt []string
-		for _, h := range head {
-			if strings.HasPrefix(h, "Tip:") || strings.Trim(h, "╌") == "" {
-				continue
+		for _, r := range out {
+			if r.FreeText {
+				return unknown
 			}
-			prompt = append(prompt, h)
 		}
-		return paneDialog{Kind: dialogPermit, Prompt: strings.Join(prompt, "\n"), Rows: out}
+		return paneDialog{Kind: dialogPermit, Prompt: permitPrompt(head), Rows: out}
 
 	default: // dialogPlan
 		q := -1
@@ -255,6 +261,53 @@ func parsePaneDialog(capture string) paneDialog {
 		// The hint under the text row is a description, not a wrap.
 		return paneDialog{Kind: dialogPlan, Prompt: strings.Join(head[q:], " "), Rows: build(false)}
 	}
+}
+
+// permitTitles are the permission dialogs whose layout and keys the Even G2
+// spike recorded (Bash, Edit, Write). Any other title is answered at the desk.
+var permitTitles = map[string]bool{
+	"Bash command": true,
+	"Edit file":    true,
+	"Create file":  true,
+}
+
+// permitPrompt orders a permission dialog's head lines for a small screen:
+// the title, then the command or diff (between the dashed rules), then the
+// model-written description, then the question. Tip lines and the dashed
+// rules are dropped. head[0] is the title and the question is the last
+// "Do you want" line.
+func permitPrompt(head []string) string {
+	q := len(head) - 1
+	for k, h := range head {
+		if strings.HasPrefix(h, "Do you want") {
+			q = k
+		}
+	}
+	isDash := func(h string) bool { return strings.Trim(h, "╌") == "" }
+	mid := head[1:q]
+	first, last := -1, -1
+	for k, h := range mid {
+		if isDash(h) {
+			if first < 0 {
+				first = k
+			}
+			last = k
+		}
+	}
+	var command, desc []string
+	for k, h := range mid {
+		switch {
+		case isDash(h) || strings.HasPrefix(h, "Tip:"):
+		case first >= 0 && first < last && k > first && k < last:
+			command = append(command, h)
+		default:
+			desc = append(desc, h)
+		}
+	}
+	out := append([]string{head[0]}, command...)
+	out = append(out, desc...)
+	out = append(out, head[q:]...)
+	return strings.Join(out, "\n")
 }
 
 // freeTextLabel reports whether choosing a row means typing into it. The

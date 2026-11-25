@@ -9,7 +9,7 @@ import "time"
 type remoteCursor struct {
 	pinned string    // session currently shown, "" when none
 	since  time.Time // the pinned session's waiting episode when it was pinned
-	opened bool      // pinned from the fleet list: kept while the session exists
+	opened bool      // pinned from the fleet list: kept while the session exists, until answered or deferred
 	skips  map[string]swSnooze
 }
 
@@ -70,6 +70,14 @@ func (c *remoteCursor) skip(name string, since, now time.Time) {
 // open pins a session chosen from the fleet list, waiting or not.
 func (c *remoteCursor) open(name string) {
 	c.pinned, c.since, c.opened = name, time.Time{}, true
+}
+
+// release unpins name if it was opened from the fleet list, so the next pick
+// goes back to the queue. Called after an answer or a defer took effect.
+func (c *remoteCursor) release(name string) {
+	if c.opened && c.pinned == name {
+		c.pinned, c.since, c.opened = "", time.Time{}, false
+	}
 }
 
 // prune drops skips whose episode ended or whose TTL expired, as the

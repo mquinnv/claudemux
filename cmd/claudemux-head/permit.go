@@ -78,16 +78,20 @@ const permitDialogTailLines = 6
 // room for its choices to wrap. Its blank filler rows are not counted.
 const permitPlanTailLines = 10
 
+// permitPlanQuestion ends the plan-approval dialog's question line.
+const permitPlanQuestion = "Would you like to proceed?"
+
 // permissionDialogUp reports whether a capture of the claude pane ends in a
 // permission dialog. Bash, Edit and MCP dialogs close with an "Esc to cancel"
 // footer where the prompt box would otherwise be; the plan-approval dialog
-// has no such footer and is recognised by its two "Yes," rows instead. Only
-// the tail counts: the same words further up are conversation, not a dialog.
+// has no such footer and is recognised by its question line with a numbered
+// block starting at "1." directly under it. The row labels are not matched:
+// row 1 depends on the account and mode. Only the tail counts: the same words
+// further up are conversation, not a dialog.
 func permissionDialogUp(capture string) bool {
 	lines := strings.Split(capture, "\n")
 	seen := 0
-	planAuto := false // rows are met bottom-up: "2." first, then "1." above it
-	planManual := false
+	below := "" // the nearest non-blank line under the current one
 	for i := len(lines) - 1; i >= 0 && seen < permitPlanTailLines; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line == "" {
@@ -97,15 +101,15 @@ func permissionDialogUp(capture string) bool {
 		if seen <= permitDialogTailLines && strings.Contains(strings.ToLower(line), "esc to cancel") {
 			return true
 		}
-		row := strings.TrimSpace(strings.TrimPrefix(line, "\u276f"))
-		switch {
-		case row == "2. Yes, manually approve edits":
-			planManual = true
-		case row == "1. Yes, and use auto mode" && planManual:
-			planAuto = true
+		if strings.HasSuffix(line, permitPlanQuestion) {
+			row := strings.TrimSpace(strings.TrimPrefix(below, "\u276f"))
+			if strings.HasPrefix(row, "1. ") {
+				return true
+			}
 		}
+		below = line
 	}
-	return planAuto && planManual
+	return false
 }
 
 // permitWatch remembers what the pane has shown for the current marker.
