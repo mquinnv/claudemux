@@ -395,8 +395,74 @@ func TestRemoteDetailPermitBodyOrder(t *testing.T) {
 		t.Errorf("body %q, want %q", short.Body, want)
 	}
 	edit := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: readFixture(t, "dialog_permit_edit.txt")})
-	if !strings.HasPrefix(edit.Body, "Edit file\n1 -hello\n1 +goodbye\nnotes.txt\n") {
+	if !strings.HasPrefix(edit.Body, "Edit file\nnotes.txt\n1 -hello\n1 +goodbye\n") {
 		t.Errorf("edit body %q", edit.Body)
+	}
+}
+
+// bashWithCommand puts cmd (lines joined by \n) in the Bash fixture's dialog.
+func bashWithCommand(t *testing.T, cmd ...string) string {
+	t.Helper()
+	c := readFixture(t, "dialog_permit_bash.txt")
+	at := strings.LastIndex(c, "touch spike-marker.txt") // the dialog's copy
+	return c[:at] + strings.Join(cmd, "\n ") + c[at+len("touch spike-marker.txt"):]
+}
+
+// The glasses show three body lines, each \n a hard break. A plain Yes is a
+// single tap only when the title, file name and whole command or diff fit
+// in them, however few runes they are.
+func TestRemoteDetailPermitYesBroadUnlessCommandFits(t *testing.T) {
+	yesBroad := func(name, capture string) bool {
+		t.Helper()
+		d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: capture})
+		if d.Kind != "permit" || d.Options[0].Label != "Yes" {
+			t.Fatalf("%s: %+v", name, d)
+		}
+		return d.Options[0].Broad
+	}
+	if !yesBroad("3-line command", bashWithCommand(t, "cd /tmp", "ls", "rm -rf ~/x")) {
+		t.Error("3-line command: Yes is a single tap while its last line is never shown")
+	}
+	if yesBroad("1-line command", bashWithCommand(t, "ls -la")) {
+		t.Error("1-line command: Yes needs a second tap")
+	}
+	if yesBroad("2-line command", bashWithCommand(t, "cd /tmp", "ls")) {
+		t.Error("2-line command (title + 2 = 3 lines): Yes needs a second tap")
+	}
+	wrapped := "echo " + strings.Repeat("x", 60) // one line, three on the glasses: "echo", 46 x, 14 x
+	if !yesBroad("wrapping command", bashWithCommand(t, "cd /tmp", wrapped)) {
+		t.Error("a command that wraps past three lines: Yes is a single tap")
+	}
+	diff3 := strings.Replace(readFixture(t, "dialog_permit_edit.txt"), " 1 +goodbye\n", " 1 +goodbye\n 2 +again\n", 1)
+	if !yesBroad("3-line diff", diff3) {
+		t.Error("3-line diff: Yes is a single tap")
+	}
+	// The rune rule still applies: a short command with a long description.
+	long := strings.Replace(bashWithCommand(t, "ls"), " Create empty marker file\n", " "+strings.Repeat("Explains it. ", 12)+"\n", 1)
+	if !yesBroad("long description", long) {
+		t.Error("a prompt over remoteBodyFitRunes: Yes is a single tap")
+	}
+}
+
+// remoteWrapLines must count lines the way glasses/src/layout.ts wrap does.
+func TestRemoteWrapLines(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		cols int
+		want int
+	}{
+		{"aaa bbb ccc ddd", 7, 2},
+		{"aaa bbb", 7, 1},
+		{"abcdefghij", 4, 3},
+		{"one\ntwo", 10, 2},
+		{"one\n\ntwo", 10, 3},
+		{"", 10, 0},
+		{"  ", 10, 0},
+		{"aaa abcdefghij", 4, 4},
+	} {
+		if got := remoteWrapLines(c.text, c.cols); got != c.want {
+			t.Errorf("remoteWrapLines(%q, %d) = %d, want %d", c.text, c.cols, got, c.want)
+		}
 	}
 }
 
@@ -423,11 +489,11 @@ func TestRemoteDetailPermitEpisodeCoversWholePrompt(t *testing.T) {
 // A prompt longer than the glasses can show makes the plain Yes a second
 // tap too: the wearer cannot have read all of it.
 func TestRemoteDetailLongPermitYesIsBroad(t *testing.T) {
-	base := readFixture(t, "dialog_permit_edit.txt")
-	short := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: base})
+	short := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: readFixture(t, "dialog_permit_bash.txt")})
 	if short.Options[0].Label != "Yes" || short.Options[0].Broad {
 		t.Fatalf("short prompt: %+v", short.Options)
 	}
+	base := readFixture(t, "dialog_permit_edit.txt")
 	long := strings.Replace(base, " 1 +goodbye\n", " 1 +goodbye\n"+strings.Repeat(" 2 +more text in the diff\n", 6), 1)
 	d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: long})
 	if d.Kind != "permit" {

@@ -90,8 +90,9 @@ The page also shows the last ten log lines, which is where to look when the glas
 
 Once the token is saved, a header reading `bad token - open setup` means the lobby rejected it: re-enter it.
 `lobby not reachable` is shown for any failed poll other than a rejected token: no connection (tailnet down
-or the lobby not running), a timeout, or an error answer from the lobby. The log lines on the phone say
-which.
+or the lobby not running), a timeout, or an error answer from the lobby. The log on the phone says which
+kind, once each time it changes: `poll failed: unreachable` (no connection or a timeout) or
+`poll failed: failed` (the lobby answered with an error).
 
 ## 5. Use it
 
@@ -111,9 +112,11 @@ it, so the regular polls keep returning it. After an answer (even one shown as `
 
 What is offered, per kind of wait:
 
-- A question: its options. A permission prompt for Bash, Edit or Write: the dialog's rows, with the title
-  and command shown first; broad rows, and a plain `Yes` on a prompt too long to show whole, take a second
-  tap. Any other permission dialog, or one with a Tab-amended row, says `answer at the desk`.
+- A question: its options. A permission prompt for Bash, Edit or Write: the dialog's rows, with the title,
+  the file name (Edit, Write) and the command or diff shown first. Broad rows take a second tap, and so
+  does a plain `Yes` unless the title, file name and whole command or diff fit in the three body lines
+  (and the whole prompt is short). Any other permission dialog, or one with a Tab-amended row, says
+  `answer at the desk`.
 - A plan approval: the rows that start with `Yes`.
 - An idle session: the fixed replies first, then suggested replies (marked `*`) when they arrive. The body
   shows the end of the session's last message.

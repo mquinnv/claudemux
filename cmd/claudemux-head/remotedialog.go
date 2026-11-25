@@ -31,6 +31,9 @@ type paneDialog struct {
 	Kind   dialogKind
 	Prompt string // the question; for a permit dialog title, command, description, question (see permitPrompt). Never trimmed.
 	Rows   []dialogRow
+	// Essential is, for a permit dialog, the part of Prompt the wearer must
+	// see before a single-tap Yes: title, file name and command or diff.
+	Essential string
 }
 
 var dialogRowRe = regexp.MustCompile(`^\s*(?:\x{276f}\s*)?(\d+)\.\s+(\S.*)$`)
@@ -246,7 +249,8 @@ func parsePaneDialog(capture string) paneDialog {
 				return unknown
 			}
 		}
-		return paneDialog{Kind: dialogPermit, Prompt: permitPrompt(head), Rows: out}
+		prompt, essential := permitPrompt(head)
+		return paneDialog{Kind: dialogPermit, Prompt: prompt, Rows: out, Essential: essential}
 
 	default: // dialogPlan
 		q := -1
@@ -271,12 +275,18 @@ var permitTitles = map[string]bool{
 	"Create file":  true,
 }
 
+// permitFileTitles are the permit dialogs whose lines above the diff name the
+// file rather than describe the call.
+var permitFileTitles = map[string]bool{"Edit file": true, "Create file": true}
+
 // permitPrompt orders a permission dialog's head lines for a small screen:
-// the title, then the command or diff (between the dashed rules), then the
-// model-written description, then the question. Tip lines and the dashed
-// rules are dropped. head[0] is the title and the question is the last
-// "Do you want" line.
-func permitPrompt(head []string) string {
+// the title, then for Edit and Write the file name, then the command or diff
+// (between the dashed rules), then the model-written description, then the
+// question. Tip lines and the dashed rules are dropped. head[0] is the title
+// and the question is the last "Do you want" line. essential is the title,
+// file name and command or diff: what the wearer must see before a
+// single-tap Yes.
+func permitPrompt(head []string) (prompt, essential string) {
 	q := len(head) - 1
 	for k, h := range head {
 		if strings.HasPrefix(h, "Do you want") {
@@ -294,20 +304,24 @@ func permitPrompt(head []string) string {
 			last = k
 		}
 	}
-	var command, desc []string
+	fileTitle := permitFileTitles[head[0]]
+	var file, command, desc []string
 	for k, h := range mid {
 		switch {
 		case isDash(h) || strings.HasPrefix(h, "Tip:"):
 		case first >= 0 && first < last && k > first && k < last:
 			command = append(command, h)
+		case fileTitle && (first < 0 || k < first):
+			file = append(file, h)
 		default:
 			desc = append(desc, h)
 		}
 	}
-	out := append([]string{head[0]}, command...)
-	out = append(out, desc...)
+	ess := append([]string{head[0]}, file...)
+	ess = append(ess, command...)
+	out := append(append([]string{}, ess...), desc...)
 	out = append(out, head[q:]...)
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n"), strings.Join(ess, "\n")
 }
 
 // freeTextLabel reports whether choosing a row means typing into it. The

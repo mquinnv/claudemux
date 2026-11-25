@@ -212,6 +212,18 @@ func TestParsePaneDialogPermitPromptOrder(t *testing.T) {
 	if d.Prompt != want {
 		t.Errorf("prompt %q, want %q", d.Prompt, want)
 	}
+	if d.Essential != "Bash command\ntouch spike-marker.txt" {
+		t.Errorf("essential %q", d.Essential)
+	}
+	// Edit and Write: the file name goes right after the title, before the
+	// diff, so the wearer always sees which file.
+	e := parsePaneDialog(readFixture(t, "dialog_permit_edit.txt"))
+	if want := "Edit file\nnotes.txt\n1 -hello\n1 +goodbye\nDo you want to make this edit to notes.txt?"; e.Prompt != want {
+		t.Errorf("edit prompt %q, want %q", e.Prompt, want)
+	}
+	if e.Essential != "Edit file\nnotes.txt\n1 -hello\n1 +goodbye" {
+		t.Errorf("edit essential %q", e.Essential)
+	}
 }
 
 func TestParsePaneDialogIgnoresScrollback(t *testing.T) {

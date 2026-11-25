@@ -285,14 +285,10 @@ func (h *remoteHub) fillSuggestions(d remoteDetail, in remoteInputs) {
 	if _, ok := h.suggest.get(name, since); ok {
 		return
 	}
-	key := remoteSuggestKey(name, since)
-	h.mu.Lock()
-	if h.pending[key] {
-		h.mu.Unlock()
+	if !h.claimSuggest(name, since) {
 		return
 	}
-	h.pending[key] = true
-	h.mu.Unlock()
+	key := remoteSuggestKey(name, since)
 	last := strings.TrimSpace(in.LastText)
 	go func() {
 		var v []string
@@ -308,6 +304,22 @@ func (h *remoteHub) fillSuggestions(d remoteDetail, in remoteInputs) {
 		delete(h.pending, key)
 		h.mu.Unlock()
 	}()
+}
+
+// claimSuggest marks a generation for (name, since) pending, unless one is
+// already pending or its result is already cached. The cache is checked
+// again here, under mu: a generation fills the cache before it clears its
+// pending mark (both under mu at the clear), so a caller whose own unlocked
+// check missed cannot start a second generation for the same episode.
+func (h *remoteHub) claimSuggest(name string, since time.Time) bool {
+	key := remoteSuggestKey(name, since)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.suggest.get(name, since); ok || h.pending[key] {
+		return false
+	}
+	h.pending[key] = true
+	return true
 }
 
 func (h *remoteHub) serveNext(w http.ResponseWriter, r *http.Request) {

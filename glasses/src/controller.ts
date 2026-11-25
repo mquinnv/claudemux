@@ -26,6 +26,7 @@ export function createController(deps: Deps, initial: State) {
   let state = initial;
   let active = 0;
   let posting = false;
+  let lastPollFailure: string | null = null; // kind of the last failed poll, logged once per change
   let tail: Promise<void> = Promise.resolve();
 
   const log = (text: string) => deps.log?.(text);
@@ -69,9 +70,14 @@ export function createController(deps: Deps, initial: State) {
       resp = await api.next(session);
     } catch (e) {
       const kind = e instanceof ApiError ? e.kind : (e as { kind?: string }).kind;
+      // Only the kind is logged: the error's message may carry the URL.
+      const k = typeof kind === 'string' ? kind : 'failed';
+      if (k !== lastPollFailure) log(`poll failed: ${k}`);
+      lastPollFailure = k;
       set({ ...state, error: kind === 'unauthorized' ? BAD_TOKEN : 'unreachable' });
       return;
     }
+    lastPollFailure = null;
     set(applyNext(state, resp, deps.now()));
   }
 

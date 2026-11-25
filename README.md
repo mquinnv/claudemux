@@ -418,9 +418,11 @@ offers:
 - **A permission prompt** for Bash, Edit or Write (titled `Bash command`,
   `Edit file`, `Create file`): the dialog's own rows. Anything broader than a
   plain `Yes` or `No` — "always allow", "switch to auto mode" — takes a second
-  tap, and so does the plain `Yes` when the prompt is too long for the glasses
-  to show whole. The glasses show the title and the command (or diff) first,
-  then Claude's description. Any other permission dialog, and one where a row
+  tap, and so does the plain `Yes` unless the title, the file name and the
+  whole command or diff fit in the glasses' three body lines (a three-line
+  command does not) and the whole prompt is short. The glasses show the
+  title, the file name (Edit, Write), the command or diff, then Claude's
+  description. Any other permission dialog, and one where a row
   has been Tab-amended into a text field, says `answer at the desk`.
 - **A plan approval**: the rows that start with `Yes`; approving with the first
   row (auto mode, on accounts that have it) takes a second tap. Plan approvals

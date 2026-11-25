@@ -268,6 +268,29 @@ describe('polling', () => {
     expect(c.state().error).toBeNull();
   });
 
+  it('logs the kind of a failed poll once per change of kind, never the token or URL', async () => {
+    const f = fakeApi();
+    const logged: string[] = [];
+    const { c } = setup(f.api, () => {}, (s) => logged.push(s));
+    const fail = (kind: string) =>
+      f.setNext(async () => {
+        throw Object.assign(new Error('http://100.64.0.15:7474/remote/next?session=s secret-token'), { kind });
+      });
+    fail('unreachable');
+    await c.poll();
+    await c.poll();
+    expect(logged).toEqual(['poll failed: unreachable']);
+    fail('failed');
+    await c.poll();
+    expect(logged).toEqual(['poll failed: unreachable', 'poll failed: failed']);
+    f.setNext(async () => next());
+    await c.poll();
+    fail('failed');
+    await c.poll();
+    expect(logged).toEqual(['poll failed: unreachable', 'poll failed: failed', 'poll failed: failed']);
+    expect(logged.join()).not.toMatch(/token|http|session=/);
+  });
+
   it('an unauthorized poll shows the bad token error', async () => {
     const f = fakeApi();
     const { c } = setup(f.api);

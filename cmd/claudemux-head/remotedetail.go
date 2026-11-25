@@ -180,12 +180,63 @@ func fillAsk(d *remoteDetail, dlg paneDialog, in remoteInputs) string {
 // Yes takes a second tap too.
 const remoteBodyFitRunes = 130
 
+// The glasses' body region: remoteBodyCols must equal COLS in
+// glasses/src/layout.ts and remoteBodyLines the BODY_LINES the body is
+// wrapped to in glasses/src/view.ts. A permit dialog's title, file name and
+// command or diff must fit in them for its plain Yes to be a single tap.
+const (
+	remoteBodyCols  = 46
+	remoteBodyLines = 3
+)
+
+// remoteWrapLines counts the lines glasses/src/layout.ts wrap breaks text
+// into at cols columns, before its line cap: "\n" is a hard break, each
+// paragraph is word-wrapped (an empty one is one line), a word longer than
+// cols is split into cols-wide pieces. Blank text is no lines. Width is in
+// runes; layout.ts counts UTF-16 units, which only differ outside the BMP.
+func remoteWrapLines(text string, cols int) int {
+	if strings.TrimSpace(text) == "" || cols <= 0 {
+		return 0
+	}
+	n := 0
+	for _, par := range strings.Split(text, "\n") {
+		words := strings.Fields(par)
+		if len(words) == 0 {
+			n++
+			continue
+		}
+		cur := 0 // width of the line being built; 0 means empty
+		for _, w := range words {
+			wl := utf8.RuneCountInString(w)
+			if cur > 0 && cur+1+wl <= cols {
+				cur += 1 + wl
+				continue
+			}
+			if cur > 0 {
+				n++
+			}
+			if wl <= cols {
+				cur = wl
+				continue
+			}
+			pieces := (wl + cols - 1) / cols
+			n += pieces - 1 // all but the last piece are full lines
+			cur = wl - (pieces-1)*cols
+		}
+		if cur > 0 {
+			n++
+		}
+	}
+	return n
+}
+
 // keyOptions lists a permit or plan dialog's offerable rows as key options:
 // never a free-text row, and on a plan dialog only rows that say Yes. Each
 // option's digit is its row's number, not its position in the list.
 func keyOptions(dlg paneDialog) []remoteOption {
 	opts := []remoteOption{}
-	long := dlg.Kind == dialogPermit && utf8.RuneCountInString(dlg.Prompt) > remoteBodyFitRunes
+	long := dlg.Kind == dialogPermit && (utf8.RuneCountInString(dlg.Prompt) > remoteBodyFitRunes ||
+		remoteWrapLines(dlg.Essential, remoteBodyCols) > remoteBodyLines)
 	for _, r := range dlg.Rows {
 		if r.FreeText || (dlg.Kind == dialogPlan && !strings.HasPrefix(r.Label, "Yes")) {
 			continue

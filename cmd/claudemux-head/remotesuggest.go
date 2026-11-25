@@ -185,11 +185,17 @@ func (c *suggestCache) get(name string, since time.Time) ([]string, bool) {
 	return append([]string(nil), e.v...), true
 }
 
+// put stores v for the episode. The first write for an episode wins: the
+// idle episode does not hash suggestions, so replacing them would put text
+// under suggest:N that the wearer never saw.
 func (c *suggestCache) put(name string, since time.Time, v []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.m == nil {
 		c.m = map[string]suggestEntry{}
+	}
+	if e, ok := c.m[name]; ok && e.since.Equal(since) {
+		return
 	}
 	c.m[name] = suggestEntry{since: since, v: v}
 }

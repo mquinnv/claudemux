@@ -1,5 +1,6 @@
 // Width of the glasses text display in characters. Provisional: tune on the
-// device. Every width calculation in the app must use this constant.
+// device. Every width calculation in the app must use this constant, and the
+// lobby's remoteBodyCols (cmd/claudemux-head/remotedetail.go) must match it.
 export const COLS = 46;
 
 const ELLIPSIS = '…';

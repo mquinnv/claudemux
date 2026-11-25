@@ -3,7 +3,7 @@ import type { Effect, Gesture, NextResponse, Row, State } from './types';
 
 const STALE_MS = 10_000;
 const WINDOW = 5;
-const BODY_LINES = 3;
+const BODY_LINES = 3; // the lobby's remoteBodyLines (remotedetail.go) must match
 const CONFIRM_TEXT = 'tap again to confirm';
 
 // State.error values with their own header text; any other error reads as

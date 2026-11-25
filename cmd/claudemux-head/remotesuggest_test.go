@@ -124,6 +124,27 @@ func TestSuggestCache(t *testing.T) {
 	}
 }
 
+// The idle episode does not cover suggestions, so a second write for the
+// same episode would put text under suggest:0 the wearer never saw. The
+// first write wins; a new Since replaces it.
+func TestSuggestCacheFirstWriteWins(t *testing.T) {
+	var c suggestCache
+	t0 := time.Now()
+	c.put("api", t0, []string{"run the tests"})
+	c.put("api", t0, []string{"rm -rf the repo"})
+	if v, _ := c.get("api", t0); !reflect.DeepEqual(v, []string{"run the tests"}) {
+		t.Errorf("second write for the same episode replaced the first: %v", v)
+	}
+	c.put("api", t0, nil)
+	if v, _ := c.get("api", t0); !reflect.DeepEqual(v, []string{"run the tests"}) {
+		t.Errorf("a nil write replaced the first: %v", v)
+	}
+	c.put("api", t0.Add(time.Second), []string{"open the PR"})
+	if v, ok := c.get("api", t0.Add(time.Second)); !ok || !reflect.DeepEqual(v, []string{"open the PR"}) {
+		t.Errorf("new episode: %v %v", v, ok)
+	}
+}
+
 func TestSuggestRepliesParsesToolCall(t *testing.T) {
 	d := &fakeDoer{body: suggestResponse("1. run the tests again\n2. commit the fix\n\"push the branch\"")}
 	got, err := testSummarizer(d).SuggestReplies(context.Background(), "All done. Tests pass.")

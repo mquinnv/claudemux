@@ -954,6 +954,27 @@ func TestRemoteTextCache(t *testing.T) {
 	}
 }
 
+// A generation that finished between fillSuggestions' unlocked cache check
+// and taking mu has already cleared its pending mark; the claim re-checks the
+// cache under mu, so the model is not asked a second time for the episode.
+func TestRemoteClaimSuggestRechecksCache(t *testing.T) {
+	hub, _ := remoteTestHub(t, nil, newFakeRemote())
+	if !hub.claimSuggest("a", remoteT0) {
+		t.Fatal("first claim refused")
+	}
+	if hub.claimSuggest("a", remoteT0) {
+		t.Error("a second claim while one is pending")
+	}
+	// The generation finishes: it fills the cache, then clears pending.
+	hub.suggest.put("b", remoteT0, []string{"x"})
+	if hub.claimSuggest("b", remoteT0) {
+		t.Error("claimed an episode whose suggestions are already cached")
+	}
+	if !hub.claimSuggest("b", remoteT0.Add(time.Second)) {
+		t.Error("a new episode could not be claimed")
+	}
+}
+
 func TestRemoteSuggestionsOffDoesNotCallModel(t *testing.T) {
 	f := newFakeRemote()
 	f.idlePane(t, "%1", "Done.")
