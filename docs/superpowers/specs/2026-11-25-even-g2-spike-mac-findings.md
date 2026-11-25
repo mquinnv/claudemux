@@ -424,3 +424,23 @@ payloads have no `permission_mode` and no tool name.
 - The exact delay before `Notification` fires: not measured.
 - Behaviour with vim editing off: not tried (the user's config has it on).
 - Pane sizes other than 120x40: not tried.
+
+## Phone and glasses half (2026-11-25, iPhone, iOS 18.7, dev load by QR)
+
+Throwaway app: `scratchpad/g2hello/` of the session that ran the spike
+(`src/main.ts` is the reference for container layout and event handling;
+copy what is needed, the directory is not durable).
+
+- **Plain HTTP on the tailnet works from the dev WebView.** The app fetched
+  `http://100.64.0.15:7475/ping` every 2s; the request `Origin` was the dev
+  server's (`http://100.64.0.15:5173`). A packaged build's whitelist is not
+  yet tested (plan Task 0).
+- **Three text containers update in place with no flicker**
+  (`textContainerUpgrade` on header 0/32, body 32/96, options 128/160, all
+  576 wide, the options container capturing events).
+- **Ring input arrives:** swipe down and up moved an app-drawn cursor; tap,
+  double tap and long press each produced an event.
+- **Locked phone:** with the Even app in front and the phone locked,
+  `document.visibilityState` went to `hidden` and polling continued without
+  a gap for at least 97 seconds; ring events were still delivered. Longer
+  runs not yet measured.
