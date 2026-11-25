@@ -1,0 +1,40 @@
+
+
+❯ Ask the exact same AskUserQuestion again. Do nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which colour do you choose? (Red / Green / Blue)
+
+❯ Use AskUserQuestion to ask one question, header 'Toppings', multiSelect true, exactly two options: Cheese, Olives. Do
+  nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which toppings do you want? (Cheese / Olives)
+
+❯ Use AskUserQuestion once with two questions in the same call: header 'Size' options Small, Large; header 'Shape'
+  options Round, Square. Both single-select. Do nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which size do you want? (Small / Large)
+     · Which shape do you want? (Round / Square)
+
+❯ Run exactly this Bash command and nothing else: touch spike-marker.txt
+
+  Creating empty marker file
+  ⎿  $ touch spike-marker.txt
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Create empty marker file
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ touch spike-marker.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /private/tmp/sample-000/-home-user-Projects-examplexxxxxx/00000000-0000-4000-8000
+      -000000000000/scratchpad/g2spike/proj from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

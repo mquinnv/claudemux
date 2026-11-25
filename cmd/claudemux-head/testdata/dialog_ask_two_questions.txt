@@ -1,0 +1,40 @@
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which colour do you choose? (Red / Green / Blue)
+
+❯ Ask the exact same AskUserQuestion again. Do nothing else.
+
+⏺ Answered Claude's questions:
+  ⎿  · Which colour do you choose? → Blue
+
+⏺ You chose Blue this time. Before that you chose Green, and one attempt in between was rejected.
+
+✻ Churned for 4s · done 1:52 PM
+
+❯ Ask the exact same AskUserQuestion again. Do nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which colour do you choose? (Red / Green / Blue)
+
+❯ Use AskUserQuestion to ask one question, header 'Toppings', multiSelect true, exactly two options: Cheese, Olives. Do
+  nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which toppings do you want? (Cheese / Olives)
+
+❯ Use AskUserQuestion once with two questions in the same call: header 'Size' options Small, Large; header 'Shape'
+  options Round, Square. Both single-select. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Size  ☐ Shape  ✔ Submit  →
+
+Which size do you want?
+
+❯ 1. Small
+     Small size
+  2. Large
+     Large size
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

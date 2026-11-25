@@ -1,0 +1,40 @@
+
+[38;5;246m⏺[39m Declined to answer Claude's questions:
+[38;5;246m  ⎿  · Which colour do you choose? (Red / Green / Blue)[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mAsk the exact same AskUserQuestion again. Do nothing else.[39m
+
+[38;5;246m[49m⏺[39m Answered Claude's questions:
+[38;5;246m  ⎿  · Which colour do you choose? → Blue[39m
+
+[38;5;231m⏺[39m You chose [1mBlue[0m this time. Before that you chose Green, and one attempt in between was rejected.
+
+[38;5;246m✻[39m [38;5;246mChurned for 4s · done 1:52 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mAsk the exact same AskUserQuestion again. Do nothing else.[39m
+
+[38;5;246m[49m⏺[39m Declined to answer Claude's questions:
+[38;5;246m  ⎿  · Which colour do you choose? (Red / Green / Blue)[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse AskUserQuestion to ask one question, header 'Toppings', multiSelect true, exactly two options: Cheese, Olives. Do[39m
+  [38;5;231mnothing else.[39m
+
+[38;5;246m[49m⏺[39m Declined to answer Claude's questions:
+[38;5;246m  ⎿  · Which toppings do you want? (Cheese / Olives)[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse AskUserQuestion once with two questions in the same call: header 'Size' options Small, Large; header 'Shape' [39m
+  [38;5;231moptions Round, Square. Both single-select. Do nothing else.[39m
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+← [38;5;16m[48;5;153m ☐ Size [39m[49m ☐ Shape  ✔ Submit  →
+
+[1m[38;5;231mWhich size do you want?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mSmall[39m
+     [38;5;246mSmall size[39m
+  [38;5;246m2.[39m Large
+     [38;5;246mLarge size[39m
+  [38;5;246m3. Type something.[39m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  4. Chat about this
+
+[38;5;246mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[39m

@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.331
+▝▜██████▀  Opus 5.5 · Claude
+ ▝▝   ▝▝   ~/project · /rc
+
+⚠ 1 MCP server needs authentication · run /mcp
+  ⎿  SessionStart:startup says: ○○○ Semgrep Guardian : this session is protected, files are scanned as they
+     are written
+  ⎿  SessionStart:startup says: team-core: team - 14 prohibitions loaded
+
+❯ Use the AskUserQuestion tool to ask me one question with header 'Colour' and exactly three options: Red, Green, Blue.
+  Do nothing else first.
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Colour
+
+Which colour do you choose?
+
+❯ 1. Red
+     Choose red
+  2. Green
+     Choose green
+  3. Blue
+     Choose blue
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

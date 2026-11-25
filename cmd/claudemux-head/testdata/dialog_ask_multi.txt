@@ -1,0 +1,40 @@
+
+
+✻ Cogitated for 3s · done 1:51 PM
+
+❯ Ask the exact same AskUserQuestion again. Do nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which colour do you choose? (Red / Green / Blue)
+
+❯ Ask the exact same AskUserQuestion again. Do nothing else.
+
+⏺ Answered Claude's questions:
+  ⎿  · Which colour do you choose? → Blue
+
+⏺ You chose Blue this time. Before that you chose Green, and one attempt in between was rejected.
+
+✻ Churned for 4s · done 1:52 PM
+
+❯ Ask the exact same AskUserQuestion again. Do nothing else.
+
+⏺ Declined to answer Claude's questions:
+  ⎿  · Which colour do you choose? (Red / Green / Blue)
+
+❯ Use AskUserQuestion to ask one question, header 'Toppings', multiSelect true, exactly two options: Cheese, Olives. Do
+  nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Toppings  ✔ Submit  →
+
+Which toppings do you want?
+
+❯ 1. [ ] Cheese
+         Add cheese
+  2. [ ] Olives
+         Add olives
+  3. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
