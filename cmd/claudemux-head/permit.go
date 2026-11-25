@@ -74,24 +74,38 @@ const permitProbeWindow = 30 * time.Second
 // the slack is for a statusline or a wrapped hint below it.
 const permitDialogTailLines = 6
 
+// permitPlanTailLines is the same window for the plan-approval dialog, with
+// room for its choices to wrap. Its blank filler rows are not counted.
+const permitPlanTailLines = 10
+
 // permissionDialogUp reports whether a capture of the claude pane ends in a
-// permission dialog. Every such dialog — Bash, Edit, MCP — closes with an
-// "Esc to cancel" footer where the prompt box would otherwise be. Only the
-// tail counts: the same words further up are conversation, not a dialog.
+// permission dialog. Bash, Edit and MCP dialogs close with an "Esc to cancel"
+// footer where the prompt box would otherwise be; the plan-approval dialog
+// has no such footer and is recognised by its two "Yes," rows instead. Only
+// the tail counts: the same words further up are conversation, not a dialog.
 func permissionDialogUp(capture string) bool {
 	lines := strings.Split(capture, "\n")
 	seen := 0
-	for i := len(lines) - 1; i >= 0 && seen < permitDialogTailLines; i-- {
+	planAuto := false // rows are met bottom-up: "2." first, then "1." above it
+	planManual := false
+	for i := len(lines) - 1; i >= 0 && seen < permitPlanTailLines; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line == "" {
 			continue
 		}
 		seen++
-		if strings.Contains(strings.ToLower(line), "esc to cancel") {
+		if seen <= permitDialogTailLines && strings.Contains(strings.ToLower(line), "esc to cancel") {
 			return true
 		}
+		row := strings.TrimSpace(strings.TrimPrefix(line, "\u276f"))
+		switch {
+		case row == "2. Yes, manually approve edits":
+			planManual = true
+		case row == "1. Yes, and use auto mode" && planManual:
+			planAuto = true
+		}
 	}
-	return false
+	return planAuto && planManual
 }
 
 // permitWatch remembers what the pane has shown for the current marker.

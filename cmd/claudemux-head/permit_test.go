@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,40 @@ func TestPermissionDialogUpIgnoresScrollback(t *testing.T) {
 	capture := " Esc to cancel · Tab to amend\n" + permitRunningCapture
 	if permissionDialogUp(capture) {
 		t.Error("dialog footer in the scrollback read as a live dialog")
+	}
+}
+
+// The plan-approval dialog has no "Esc to cancel" footer, and it fills the
+// pane with blank rows between the plan and its choices.
+func TestPermissionDialogUpPlan(t *testing.T) {
+	if !permissionDialogUp(readFixture(t, "dialog_plan.txt")) {
+		t.Error("plan-approval dialog not read as a dialog")
+	}
+}
+
+func TestPermissionDialogUpPlanNeedsBothRows(t *testing.T) {
+	one := "  1. Yes, and use auto mode\n  2. Tell Claude what to change\n"
+	if permissionDialogUp(one) {
+		t.Error("a single Yes row read as the plan dialog")
+	}
+	scrolled := "  1. Yes, and use auto mode\n  2. Yes, manually approve edits\n" +
+		strings.Repeat("conversation line\n", permitPlanTailLines) + permitRunningCapture
+	if permissionDialogUp(scrolled) {
+		t.Error("plan rows in the scrollback read as a live dialog")
+	}
+}
+
+func TestPermissionDialogUpFixtures(t *testing.T) {
+	for name, want := range map[string]bool{
+		"dialog_permit_bash.txt": true,
+		"dialog_permit_edit.txt": true,
+		"prompt_empty.txt":       false,
+		// Its footer carries "Esc to cancel", so it already read as a dialog.
+		"dialog_ask_single.txt": true,
+	} {
+		if got := permissionDialogUp(readFixture(t, name)); got != want {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
 	}
 }
 
