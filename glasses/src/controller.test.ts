@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AnswerResult, ActionResult } from './api';
+import { GET_TIMEOUT_MS, POST_TIMEOUT_MS, client } from './api';
 import { createController, type Api } from './controller';
 import type { NextResponse, RemoteDetail, State } from './types';
 import { BAD_TOKEN } from './view';
@@ -83,11 +84,100 @@ function fakeApi() {
   };
 }
 
-function setup(api: Api | null) {
+function setup(api: Api | null, onChange: (s: State) => void = () => {}, log: (s: string) => void = () => {}) {
   let t = 1000;
-  const c = createController({ getApi: () => api, now: () => t, onChange: () => {} }, initial());
+  const c = createController({ getApi: () => api, now: () => t, onChange, log }, initial());
   return { c, tick: (ms: number) => (t += ms) };
 }
+
+describe('robustness', () => {
+  it('a stalled poll times out, sets the error, and a later poll runs', async () => {
+    vi.useFakeTimers();
+    try {
+      let hang = true;
+      const body = JSON.stringify(next());
+      const f = (() => (hang ? new Promise<Response>(() => {}) : Promise.resolve(new Response(body, { status: 200 })))) as typeof fetch;
+      const { c } = setup(client('http://h:1', 't', f));
+      const p = c.poll();
+      await vi.advanceTimersByTimeAsync(GET_TIMEOUT_MS);
+      await p;
+      expect(c.state().error).toBe('unreachable');
+      hang = false;
+      await c.poll();
+      expect(c.state().error).toBeNull();
+      expect(c.state().next?.detail?.session).toBe('alpha');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an answer timeout flashes sent? check desk and gestures work afterwards', async () => {
+    vi.useFakeTimers();
+    try {
+      let hang = true;
+      const body = JSON.stringify(next());
+      const f = ((u: string) =>
+        String(u).includes('/answer') && hang
+          ? new Promise<Response>(() => {})
+          : Promise.resolve(new Response(String(u).includes('/next') ? body : '{}', { status: 200 }))) as typeof fetch;
+      const { c } = setup(client('http://h:1', 't', f));
+      await c.poll();
+      const g = c.gesture('tap');
+      await vi.advanceTimersByTimeAsync(POST_TIMEOUT_MS);
+      await g;
+      expect(c.state().flash).toBe('sent? check desk');
+      hang = false;
+      await c.gesture('tap');
+      expect(c.state().flash).toBe('sent');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('survives a rejected task', async () => {
+    const f = fakeApi();
+    const logged: string[] = [];
+    const { c } = setup(f.api, () => {}, (s) => logged.push(s));
+    await c.poll();
+    f.log.length = 0;
+    const real = f.api.answer;
+    f.api.answer = async () => {
+      throw new Error('boom');
+    };
+    await c.gesture('tap');
+    expect(logged.join()).toContain('boom');
+    f.api.answer = real;
+    await c.gesture('tap');
+    expect(f.log).toContain('answer:alpha:ep1:key:1');
+  });
+
+  it('a throwing onChange is logged, not reported as unreachable', async () => {
+    const f = fakeApi();
+    const logged: string[] = [];
+    const { c } = setup(f.api, () => {
+      throw new Error('draw broke');
+    }, (s) => logged.push(s));
+    await c.poll();
+    expect(c.state().error).toBeNull();
+    expect(c.state().next?.detail?.session).toBe('alpha');
+    expect(logged.join()).toContain('draw broke');
+  });
+
+  it('a tap queued behind a poll that brings a new episode posts what was on screen', async () => {
+    const f = fakeApi();
+    const { c } = setup(f.api);
+    await c.poll();
+    f.log.length = 0;
+    f.holdOpen();
+    const p = c.poll();
+    const g = c.gesture('tap');
+    f.setNext(async () => next(detail({ session: 'beta', episode: 'ep2' })));
+    f.release();
+    await Promise.all([p, g]);
+    expect(f.log[0]).toBe('next');
+    expect(f.log[1]).toBe('answer:alpha:ep1:key:1');
+  });
+});
 
 describe('polling', () => {
   it('applies a successful poll', async () => {

@@ -16,6 +16,7 @@ export type Deps = {
   getApi: () => Api | null; // null when no token is stored
   now: () => number;
   onChange: (s: State) => void;
+  log?: (text: string) => void;
 };
 
 // Owns the app state and the sequencing rules: one task (poll or POST) runs
@@ -27,13 +28,29 @@ export function createController(deps: Deps, initial: State) {
   let posting = false;
   let tail: Promise<void> = Promise.resolve();
 
+  const log = (text: string) => deps.log?.(text);
+
+  // The state is committed before the callback runs, and a callback that
+  // throws (a draw failure) is logged: it says nothing about the lobby.
   const set = (s: State) => {
     state = s;
-    deps.onChange(s);
+    try {
+      deps.onChange(s);
+    } catch (e) {
+      log(`onChange failed: ${e}`);
+    }
   };
 
+  // A task that throws is logged and the queue carries on.
   function enqueue(task: () => Promise<void>): Promise<void> {
-    const start = active === 0 ? task() : tail.then(task);
+    const safe = async () => {
+      try {
+        await task();
+      } catch (e) {
+        log(`task failed: ${e}`);
+      }
+    };
+    const start = active === 0 ? safe() : tail.then(safe);
     active++;
     tail = start.finally(() => {
       active--;
@@ -47,12 +64,15 @@ export function createController(deps: Deps, initial: State) {
       set({ ...state, error: BAD_TOKEN });
       return;
     }
+    let resp: NextResponse;
     try {
-      set(applyNext(state, await api.next(session), deps.now()));
+      resp = await api.next(session);
     } catch (e) {
       const kind = e instanceof ApiError ? e.kind : (e as { kind?: string }).kind;
       set({ ...state, error: kind === 'unauthorized' ? BAD_TOKEN : 'unreachable' });
+      return;
     }
+    set(applyNext(state, resp, deps.now()));
   }
 
   function show(o: Outcome) {

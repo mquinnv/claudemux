@@ -1,5 +1,59 @@
-import { describe, expect, it } from 'vitest';
-import { ApiError, client } from './api';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, GET_TIMEOUT_MS, POST_TIMEOUT_MS, client } from './api';
+
+const hang: typeof fetch = (() => new Promise<Response>(() => {})) as typeof fetch;
+
+describe('timeouts', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('exports the durations', () => {
+    expect(GET_TIMEOUT_MS).toBe(5000);
+    expect(POST_TIMEOUT_MS).toBe(8000);
+  });
+
+  it('a stalled GET is unreachable after the GET timeout', async () => {
+    vi.useFakeTimers();
+    const c = client('http://h:1', 't', hang);
+    const p = c.next().catch((e) => e);
+    await vi.advanceTimersByTimeAsync(GET_TIMEOUT_MS - 1);
+    let settled = false;
+    void p.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await p).toMatchObject({ kind: 'unreachable' });
+  });
+
+  it('a stalled answer POST is unverified, never failed or sent', async () => {
+    vi.useFakeTimers();
+    const p = client('http://h:1', 't', hang).answer('s', 'e', 'o');
+    await vi.advanceTimersByTimeAsync(POST_TIMEOUT_MS);
+    expect(await p).toBe('unverified');
+  });
+
+  it('a stalled skip or defer is failed', async () => {
+    vi.useFakeTimers();
+    const c = client('http://h:1', 't', hang);
+    const a = c.skip('s');
+    const b = c.defer('s');
+    await vi.advanceTimersByTimeAsync(POST_TIMEOUT_MS);
+    expect(await a).toBe('failed');
+    expect(await b).toBe('failed');
+  });
+
+  it('aborts the request when it times out', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const f = ((_u: string, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as unknown as typeof fetch;
+    const p = client('http://h:1', 't', f).fleet().catch(() => {});
+    await vi.advanceTimersByTimeAsync(GET_TIMEOUT_MS);
+    await p;
+    expect(signal?.aborted).toBe(true);
+  });
+});
 
 type Call = { url: string; init: RequestInit };
 

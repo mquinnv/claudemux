@@ -95,6 +95,9 @@ Open the app from the glasses' app menu (a private or in-development build appea
 | Double-tap | Switch between the question and the session list |
 | Long press | Ignored |
 
+A session opened from the session list stays on screen: the lobby pins it until it is skipped, so the
+regular polls keep returning it.
+
 The last two rows of the options list are `defer` and `skip`. A short message replaces the title for one
 poll after an answer: `sent`, `not accepted - try again`, `prompt has a draft`, `sent? check desk` (the key
 went out but could not be confirmed), `typed, not sent`, `reply refused`, `gone` or `failed`. `sent` is shown

@@ -57,23 +57,27 @@ async function main(): Promise<void> {
   const origin = __REMOTE_ORIGIN__;
   if (!origin) log.add('built without a lobby origin');
 
-  let drawn: Drawn | null = null;
+  // What the glasses show now. A region is recorded only after its upgrade
+  // succeeds, so a failed one is retried by the next draw.
+  let shown: Drawn | null = null;
+  let latest: Drawn | null = null;
   let drawing: Promise<void> = Promise.resolve();
-  const draw = (s: State) => {
-    const next = render(s, Date.now());
-    const regions = changedRegions(drawn, next);
-    if (regions.length === 0) return;
-    drawn = next;
-    drawing = drawing.then(async () => {
-      for (const r of regions) {
-        try {
-          // textContainerUpgrade updates in place, with no flicker.
-          await bridge.textContainerUpgrade({ containerID: r.id, containerName: r.name, content: r.content } as never);
-        } catch (e) {
-          log.add(`upgrade ${r.name} failed: ${e}`);
-        }
+  const KEY = { hdr: 'header', body: 'body', opts: 'options' } as const;
+  const flush = async () => {
+    if (!latest) return;
+    for (const r of changedRegions(shown, latest)) {
+      try {
+        // textContainerUpgrade updates in place, with no flicker.
+        await bridge.textContainerUpgrade({ containerID: r.id, containerName: r.name, content: r.content } as never);
+        shown = { header: '', body: '', options: '', ...shown, [KEY[r.name as keyof typeof KEY]]: r.content };
+      } catch (e) {
+        log.add(`upgrade ${r.name} failed: ${e}`);
       }
-    });
+    }
+  };
+  const draw = (s: State) => {
+    latest = render(s, Date.now());
+    drawing = drawing.then(flush);
   };
 
   const ctl = createController(
@@ -81,6 +85,7 @@ async function main(): Promise<void> {
       getApi: () => (token && origin ? client(origin, token) : null),
       now: Date.now,
       onChange: draw,
+      log: log.add,
     },
     initialState,
   );
@@ -95,7 +100,7 @@ async function main(): Promise<void> {
     ],
   } as never);
   if (created !== StartUpPageCreateResult.success) log.add(`startup page failed: ${created}`);
-  drawn = first;
+  shown = first;
 
   // Mounted only now: saving a token polls, and a poll draws, which needs
   // the containers to exist.
