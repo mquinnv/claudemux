@@ -388,6 +388,54 @@ from Host names it doesn't recognize, whatever address it's actually bound to
 — so a stray port-forward, or a hostile page that rebinds its own DNS to the
 node's Tailscale address, gets a 403 rather than a look at your prompts.
 
+### Glasses remote
+
+With `remote.enabled`, the same web server also answers for a pair of Even G2
+glasses and their R1 ring: the glasses show the next session that is waiting on
+you, and a tap on the ring answers it — no keyboard, no voice. The app is in
+[`glasses/`](glasses/README.md), which covers packing and installing it.
+
+```yaml
+web:
+  listen: tailscale:7474
+remote:
+  enabled: true
+```
+
+The token goes in the env file `summary.api_key_file` points at (or the process
+environment), as `CLAUDEMUX_REMOTE_TOKEN`. The `/remote/` routes exist only when
+all three are set — `remote.enabled`, `web.listen` and a non-empty token — and
+the lobby's status line says which is missing. Unlike the status page, these
+routes act on sessions, so every request needs the token as a bearer header on
+top of the tailnet guard. Like the page, they are up exactly while the lobby is
+open, and the lobby reads the config at start: set it, then restart the lobby.
+
+The glasses walk the same queue the conductor does. What each kind of wait
+offers:
+
+- **A question** (`AskUserQuestion`, one question, single choice): its options.
+  Multi-select and multi-question dialogs say `answer at the desk`.
+- **A permission prompt**: the dialog's own rows. Anything broader than a plain
+  `Yes` or `No` — "always allow", "switch to auto mode" — takes a second tap.
+- **A plan approval**: the dialog's rows; approving with auto mode takes a second
+  tap. Plan approvals count as waiting everywhere now, the conductor included.
+- **An idle session**: up to three suggested replies (Haiku, from the session's
+  last message; `remote.suggest: false` turns them off) and the fixed
+  `remote.replies`.
+
+Every wait also offers **defer** (the lobby's defer, with a nudge when the
+blocker clears) and **skip** (someone else first, as in the conductor).
+Double-tap switches to a list of every session, and a tap there opens one.
+
+The lobby never types what the glasses send. A request names an option the lobby
+itself offered, and the lobby re-reads the pane first: if the dialog on screen is
+no longer the one the glasses showed — you answered at the desk, or it moved on —
+nothing is sent and the glasses redraw. A dialog is answered with its one digit
+key and no Enter; a reply is typed only into a provably empty prompt. Suggested
+replies are filtered in code before they are offered: nothing with control
+characters, nothing ending in a question mark, nothing starting with `!` or `/`,
+nothing granting standing permission.
+
 The headline is a billable call on your key, gated the way the per-session
 summary is: it only fires when a session's state, topic, summary or blocker
 changes, and never more often than `web.headline_interval` (default `2m`). Timers
@@ -954,6 +1002,14 @@ web:
   `claudemux fleet`.
 - `web.hide_private_orgs` — GitHub owners whose private repos' sessions are left
   off the web status page (see **Sharing the fleet on the tailnet** above).
+- `remote.enabled` — serve the token-protected `/remote/` routes for the glasses
+  (see **Glasses remote** above). Default `false`. Needs `web.listen` and
+  `CLAUDEMUX_REMOTE_TOKEN`.
+- `remote.replies` — the fixed replies offered on an idle session, each 1 to 80
+  characters. A list replaces the defaults (`Yes, go ahead`, `Continue`,
+  `No, stop and wait for me`); `[]` offers none.
+- `remote.suggest` — offer suggested replies on an idle session. Default `true`;
+  it uses the summaries' API key and is off without one.
   Default empty: every session shows.
 - `web.headline_interval` — the floor between fleet-headline calls, with
   `summary.min_interval`'s rules: it bounds what the page costs, `0` means no
