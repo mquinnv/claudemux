@@ -257,7 +257,9 @@ func nudgeClaudePaneOutcome(pane, text string) nudgeOutcome {
 	err = exec.CommandContext(litCtx, "tmux", literal...).Run()
 	cancelLit()
 	if err != nil {
-		return nudgeRefused
+		// The command was launched: tmux may have accepted the text before
+		// the call timed out, so it can be sitting in the prompt.
+		return nudgeTyped
 	}
 	time.Sleep(teardownKeyDelay) // see teardownKeyDelay; this runs off the Update loop
 	enter, ok := sendEnterArgs(pane)

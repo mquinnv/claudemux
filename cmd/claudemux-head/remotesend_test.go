@@ -133,6 +133,95 @@ func TestSendRemoteAnswerRejectsBadDigitEvenIfOffered(t *testing.T) {
 	}
 }
 
+func TestSendRemoteAnswerRefusesUnsafeLabels(t *testing.T) {
+	labels := []string{"a\nb", "a\x1bb", "a b", "a b", "a​b", ""}
+	for _, id := range []string{"reply:0", "suggest:0"} {
+		for _, l := range labels {
+			d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: id, Label: l}}}
+			f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeSent}
+			err := sendRemoteAnswer("%1", "a", id, f.io())
+			if !errors.Is(err, errRemoteUnsafe) || len(f.nudges) != 0 {
+				t.Fatalf("%s %q: err=%v nudges=%v", id, l, err, f.nudges)
+			}
+		}
+	}
+}
+
+func TestSendRemoteAnswerSuggestRefusesLeadingBang(t *testing.T) {
+	d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: "suggest:0", Label: "!rm x"}}}
+	f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeSent}
+	err := sendRemoteAnswer("%1", "a", "suggest:0", f.io())
+	if !errors.Is(err, errRemoteUnsafe) || len(f.nudges) != 0 {
+		t.Fatalf("err=%v nudges=%v", err, f.nudges)
+	}
+}
+
+func TestSendRemoteAnswerReplyMaySlash(t *testing.T) {
+	d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: "reply:0", Label: "/compact"}}}
+	f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeSent}
+	if err := sendRemoteAnswer("%1", "a", "reply:0", f.io()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.nudges) != 1 || f.nudges[0] != "%1:/compact" {
+		t.Fatalf("nudges=%v", f.nudges)
+	}
+}
+
+func TestSendRemoteAnswerNudgeOutcomeMapping(t *testing.T) {
+	d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: "reply:0", Label: "Continue"}}}
+	cases := []struct {
+		out  nudgeOutcome
+		want error
+	}{{nudgeSent, nil}, {nudgeTyped, errRemoteTyped}, {nudgeRefused, errRemoteDraft}}
+	for _, c := range cases {
+		f := &sendFake{details: []remoteDetail{d}, nudgeOut: c.out}
+		err := sendRemoteAnswer("%1", "a", "reply:0", f.io())
+		if c.want == nil && err != nil {
+			t.Fatalf("outcome %d: err=%v", c.out, err)
+		}
+		if c.want != nil && !errors.Is(err, c.want) {
+			t.Fatalf("outcome %d: err=%v want %v", c.out, err, c.want)
+		}
+		if errors.Is(err, errRemoteTyped) != (c.out == nudgeTyped) || errors.Is(err, errRemoteDraft) != (c.out == nudgeRefused) {
+			t.Fatalf("outcome %d: err=%v conflates sentinels", c.out, err)
+		}
+	}
+}
+
+func TestSendRemoteAnswerPostKeyRebuildUnverified(t *testing.T) {
+	boom := errors.New("capture failed")
+	f := &sendFake{details: []remoteDetail{threeRows("a")}, rebErrs: map[int]error{1: boom}}
+	err := sendRemoteAnswer("%1", "a", "key:2", f.io())
+	if !errors.Is(err, errRemoteUnverified) || !errors.Is(err, boom) || len(f.keys) != 1 {
+		t.Fatalf("err=%v keys=%v", err, f.keys)
+	}
+}
+
+func TestSendRemoteAnswerSendKeyErrorUnverified(t *testing.T) {
+	f := &sendFake{details: []remoteDetail{threeRows("a")}, keyErr: errors.New("x")}
+	err := sendRemoteAnswer("%1", "a", "key:1", f.io())
+	if !errors.Is(err, errRemoteUnverified) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSendRemoteAnswerPreSendRebuildNotUnverified(t *testing.T) {
+	f := &sendFake{rebErrs: map[int]error{0: errors.New("boom")}}
+	err := sendRemoteAnswer("%1", "a", "key:1", f.io())
+	if err == nil || errors.Is(err, errRemoteUnverified) || len(f.keys) != 0 {
+		t.Fatalf("err=%v keys=%v", err, f.keys)
+	}
+}
+
+func TestSendRemoteAnswerReplyChangedNoNudge(t *testing.T) {
+	d := remoteDetail{Episode: "other", Options: []remoteOption{{ID: "reply:0", Label: "Continue"}}}
+	f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeSent}
+	err := sendRemoteAnswer("%1", "a", "reply:0", f.io())
+	if !errors.Is(err, errRemoteChanged) || len(f.nudges) != 0 {
+		t.Fatalf("err=%v nudges=%v", err, f.nudges)
+	}
+}
+
 func TestSendRemoteAnswerNeverOffersFreeText(t *testing.T) {
 	// A free-text row 4 is never in Options, so its ID is refused.
 	f := &sendFake{details: []remoteDetail{threeRows("a")}}

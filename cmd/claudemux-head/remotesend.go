@@ -40,7 +40,7 @@ func unsafeNudgeLabel(label string, suggested bool) bool {
 		return true
 	}
 	for _, r := range label {
-		if unicode.IsControl(r) || r == ' ' || r == ' ' || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Cf, r) {
 			return true
 		}
 	}
