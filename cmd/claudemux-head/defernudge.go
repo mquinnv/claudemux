@@ -219,8 +219,23 @@ func nudgePane(selfPane, paneDir, text string) bool {
 // pane: the lobby reads it off the row, and the head's undefer uses the pane
 // its poll last bound to.
 func nudgeClaudePane(pane, text string) bool {
+	return nudgeClaudePaneOutcome(pane, text) == nudgeSent
+}
+
+// nudgeOutcome says how far a nudge got, because a bare false hides a
+// difference that matters: text typed but never submitted sits in the prompt.
+type nudgeOutcome int
+
+const (
+	nudgeRefused nudgeOutcome = iota // nothing typed
+	nudgeTyped                       // text typed, Enter not confirmed
+	nudgeSent                        // text typed and submitted
+)
+
+// nudgeClaudePaneOutcome is nudgeClaudePane reporting how far it got.
+func nudgeClaudePaneOutcome(pane, text string) nudgeOutcome {
 	if pane == "" {
-		return false
+		return nudgeRefused
 	}
 	home, _ := os.UserHomeDir()
 	vimOn := claudeVimMode(os.Getenv, home)
@@ -232,24 +247,27 @@ func nudgeClaudePane(pane, text string) bool {
 	// gap can still be typed over. The window is milliseconds and tmux has no
 	// way to close it.
 	if err != nil || !promptEmpty(string(out), vimOn) {
-		return false
+		return nudgeRefused
 	}
 	literal, ok := sendLiteralArgs(pane, text)
 	if !ok {
-		return false
+		return nudgeRefused
 	}
 	litCtx, cancelLit := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	err = exec.CommandContext(litCtx, "tmux", literal...).Run()
 	cancelLit()
 	if err != nil {
-		return false
+		return nudgeRefused
 	}
 	time.Sleep(teardownKeyDelay) // see teardownKeyDelay; this runs off the Update loop
 	enter, ok := sendEnterArgs(pane)
 	if !ok {
-		return false
+		return nudgeTyped
 	}
 	enterCtx, cancelEnter := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	defer cancelEnter()
-	return exec.CommandContext(enterCtx, "tmux", enter...).Run() == nil
+	if exec.CommandContext(enterCtx, "tmux", enter...).Run() != nil {
+		return nudgeTyped
+	}
+	return nudgeSent
 }

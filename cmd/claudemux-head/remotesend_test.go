@@ -11,7 +11,8 @@ type sendFake struct {
 	rebuilds int
 	keys     []string
 	nudges   []string
-	nudgeOK  bool
+	nudgeOut nudgeOutcome
+	rebErrs  map[int]error // per-call Rebuild errors, by zero-based call index
 	keyErr   error
 	rebErr   error
 	sleeps   []time.Duration
@@ -22,6 +23,9 @@ func (f *sendFake) io() remoteIO {
 		Rebuild: func() (remoteDetail, error) {
 			i := f.rebuilds
 			f.rebuilds++
+			if e := f.rebErrs[i]; e != nil {
+				return remoteDetail{}, e
+			}
 			if f.rebErr != nil {
 				return remoteDetail{}, f.rebErr
 			}
@@ -34,9 +38,9 @@ func (f *sendFake) io() remoteIO {
 			f.keys = append(f.keys, pane+":"+key)
 			return f.keyErr
 		},
-		Nudge: func(pane, text string) bool {
+		Nudge: func(pane, text string) nudgeOutcome {
 			f.nudges = append(f.nudges, pane+":"+text)
-			return f.nudgeOK
+			return f.nudgeOut
 		},
 		Sleep: func(d time.Duration) { f.sleeps = append(f.sleeps, d) },
 	}
@@ -79,7 +83,7 @@ func TestSendRemoteAnswerStuck(t *testing.T) {
 
 func TestSendRemoteAnswerReply(t *testing.T) {
 	d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: "reply:0", Label: "Yes, go ahead"}}}
-	f := &sendFake{details: []remoteDetail{d}, nudgeOK: true}
+	f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeSent}
 	if err := sendRemoteAnswer("%1", "a", "reply:0", f.io()); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +94,7 @@ func TestSendRemoteAnswerReply(t *testing.T) {
 
 func TestSendRemoteAnswerSuggest(t *testing.T) {
 	d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: "suggest:1", Label: "run it"}}}
-	f := &sendFake{details: []remoteDetail{d}, nudgeOK: true}
+	f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeSent}
 	if err := sendRemoteAnswer("%1", "a", "suggest:1", f.io()); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +105,7 @@ func TestSendRemoteAnswerSuggest(t *testing.T) {
 
 func TestSendRemoteAnswerDraft(t *testing.T) {
 	d := remoteDetail{Episode: "a", Options: []remoteOption{{ID: "reply:0", Label: "Continue"}}}
-	f := &sendFake{details: []remoteDetail{d}, nudgeOK: false}
+	f := &sendFake{details: []remoteDetail{d}, nudgeOut: nudgeRefused}
 	err := sendRemoteAnswer("%1", "a", "reply:0", f.io())
 	if !errors.Is(err, errRemoteDraft) {
 		t.Fatalf("err=%v", err)
