@@ -137,7 +137,9 @@ export function client(origin: string, token: string, f: typeof fetch = (...a) =
     },
     async answer(session: string, episode: string, option: string): Promise<AnswerResult> {
       const r = await post('/remote/answer', { session, episode, option });
-      if (r === 'timeout') return 'unverified'; // the key may have gone out
+      // A timeout or a dropped connection gives no status: the request may
+      // have reached the lobby and the key may have gone out.
+      if (r === 'timeout' || r === 'unreachable') return 'unverified';
       if (typeof r === 'string') return r;
       if (r.status === 200) return 'sent';
       if (r.status === 409) return refusal(r.text);

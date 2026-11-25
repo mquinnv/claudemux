@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { COLS } from './layout';
 import type { FleetResponse, NextResponse, RemoteDetail, RemoteOption, State } from './types';
-import { BAD_TOKEN, applyNext, reduce, render, rows, withFlash } from './view';
+import { BAD_TOKEN, TAP_GUARD_MS, applyNext, reduce, render, rows, withFlash } from './view';
 
 describe('bad token error', () => {
   it('shows the bad token text in the header', () => {
@@ -212,10 +212,16 @@ describe('applyNext', () => {
     expect(s.error).toBeNull();
   });
 
-  it('resets it when the episode changes', () => {
-    const s = applyNext(state({ cursor: 2, confirming: 'key:2' }), next(detail({ episode: 'ep2' })), 5000);
-    expect(s.cursor).toBe(0);
+  it('a new episode keeps the cursor on the same option id but drops a pending confirm', () => {
+    const s = applyNext(state({ cursor: 1, confirming: 'key:2' }), next(detail({ episode: 'ep2' })), 5000);
+    expect(s.cursor).toBe(1);
     expect(s.confirming).toBeNull();
+  });
+
+  it('a new episode without the option under the cursor resets it', () => {
+    const d = detail({ episode: 'ep2', options: [opt('key:1', 'Yes'), opt('key:2', 'No')] });
+    const s = applyNext(state({ cursor: 2 }), next(d), 5000);
+    expect(s.cursor).toBe(0);
   });
 
   it('resets it when the session changes', () => {
@@ -227,6 +233,79 @@ describe('applyNext', () => {
     const d = detail({ options: [opt('key:1', 'A')] });
     const s = applyNext(state({ cursor: 4 }), next(d), 5000);
     expect(s.cursor).toBe(2);
+  });
+
+  it('follows defer when options shrink above it', () => {
+    const d = detail({ options: [opt('key:1', 'A')] });
+    const s = applyNext(state({ cursor: 3 }), next(d), 5000);
+    expect(rows(s)[s.cursor]?.id).toBe('defer');
+  });
+
+  it('keeps the cursor on reply:0 when suggestions arrive below the replies', () => {
+    const replies = [opt('reply:0', 'Yes, go ahead'), opt('reply:1', 'Continue')];
+    const before = state({ next: next(detail({ kind: 'idle', options: replies })), cursor: 0 });
+    const withSuggestions = detail({ kind: 'idle', options: [...replies, opt('suggest:0', 'Open the PR', { suggested: true })] });
+    const s = applyNext(before, next(withSuggestions), 5000);
+    expect(rows(s)[s.cursor]?.id).toBe('reply:0');
+  });
+
+  it('keeps the cursor on defer when suggestions are inserted above it', () => {
+    const replies = [opt('reply:0', 'Yes, go ahead')];
+    const before = state({ next: next(detail({ kind: 'idle', options: replies })), cursor: 1 });
+    expect(rows(before)[1]?.id).toBe('defer');
+    const more = detail({ kind: 'idle', options: [...replies, opt('suggest:0', 'A', { suggested: true }), opt('suggest:1', 'B', { suggested: true })] });
+    const s = applyNext(before, next(more), 5000);
+    expect(rows(s)[s.cursor]?.id).toBe('defer');
+  });
+
+  it('leaves the fleet screen cursor alone', () => {
+    const s = applyNext(state({ screen: 'fleet', fleet, cursor: 1 }), next(detail({ session: 'beta' })), 5000);
+    expect(s.cursor).toBe(1);
+  });
+});
+
+describe('applyNext: tap guard', () => {
+  const guarded = (s: State, now: number) => now < (s.tapGuardUntil ?? 0);
+
+  it('is not set when the row under the cursor is unchanged', () => {
+    const s = applyNext(state({ cursor: 0 }), next(), 5000);
+    expect(guarded(s, 5000)).toBe(false);
+  });
+
+  it('is not set when suggestions arrive while the cursor is on reply:0', () => {
+    const replies = [opt('reply:0', 'Yes, go ahead')];
+    const before = state({ next: next(detail({ kind: 'idle', options: replies })) });
+    const s = applyNext(before, next(detail({ kind: 'idle', options: [...replies, opt('suggest:0', 'A', { suggested: true })] })), 5000);
+    expect(guarded(s, 5000)).toBe(false);
+  });
+
+  it('is set for TAP_GUARD_MS when a different row lands under the cursor', () => {
+    const d = detail({ options: [opt('key:1', 'Other'), opt('key:2', 'B', { broad: true }), opt('key:3', 'C')] });
+    const s = applyNext(state({ cursor: 0 }), next(d), 5000);
+    expect(guarded(s, 5000)).toBe(true);
+    expect(guarded(s, 5000 + TAP_GUARD_MS - 1)).toBe(true);
+    expect(guarded(s, 5000 + TAP_GUARD_MS)).toBe(false);
+  });
+
+  it('is set when a new dialog with the same rows replaces the old one', () => {
+    const s = applyNext(state({ cursor: 0 }), next(detail({ episode: 'ep2', body: 'a different command' })), 5000);
+    expect(guarded(s, 5000)).toBe(true);
+  });
+
+  it('is set when the session changes', () => {
+    const s = applyNext(state({ cursor: 0 }), next(detail({ session: 'beta' })), 5000);
+    expect(guarded(s, 5000)).toBe(true);
+  });
+
+  it('is set when rows first appear', () => {
+    const s = applyNext(state({ next: null }), next(), 5000);
+    expect(guarded(s, 5000)).toBe(true);
+  });
+
+  it('is not set for a new episode while the cursor is on defer or skip', () => {
+    const s = applyNext(state({ cursor: 4 }), next(detail({ episode: 'ep2' })), 5000);
+    expect(rows(s)[s.cursor]?.id).toBe('skip');
+    expect(guarded(s, 5000)).toBe(false);
   });
 
   it('clears a previous error', () => {
@@ -268,6 +347,23 @@ describe('render', () => {
     expect(lines.length).toBe(4);
     expect(lines[2]!.endsWith('…')).toBe(true);
     expect(lines[3]).toBe('careful');
+  });
+
+  it('an idle body shows its last three lines, marking the cut at the start', () => {
+    const long = 'START ' + 'word '.repeat(60) + 'the very end';
+    const out = render(state({ next: next(detail({ kind: 'idle', body: long, note: 'careful' })) }), 2000);
+    const lines = out.body.split('\n');
+    expect(lines.length).toBe(4);
+    expect(lines[0]!.startsWith('…')).toBe(true);
+    expect(lines.slice(0, 3).join(' ').endsWith('the very end')).toBe(true);
+    expect(out.body).not.toContain('START');
+    expect(lines[3]).toBe('careful');
+  });
+
+  it('a non-idle body still shows its first lines', () => {
+    const long = 'START ' + 'word '.repeat(60) + 'the very end';
+    const out = render(state({ next: next(detail({ kind: 'permit', body: long })) }), 2000);
+    expect(out.body.startsWith('START')).toBe(true);
   });
 
   it('shows all clear with the working count and no options', () => {

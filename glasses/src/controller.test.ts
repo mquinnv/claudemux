@@ -3,7 +3,7 @@ import type { AnswerResult, ActionResult } from './api';
 import { GET_TIMEOUT_MS, POST_TIMEOUT_MS, client } from './api';
 import { createController, type Api } from './controller';
 import type { NextResponse, RemoteDetail, State } from './types';
-import { BAD_TOKEN } from './view';
+import { BAD_TOKEN, TAP_GUARD_MS } from './view';
 
 function detail(over: Partial<RemoteDetail> = {}): RemoteDetail {
   return {
@@ -120,8 +120,9 @@ describe('robustness', () => {
         String(u).includes('/answer') && hang
           ? new Promise<Response>(() => {})
           : Promise.resolve(new Response(String(u).includes('/next') ? body : '{}', { status: 200 }))) as typeof fetch;
-      const { c } = setup(client('http://h:1', 't', f));
+      const { c, tick } = setup(client('http://h:1', 't', f));
       await c.poll();
+      tick(TAP_GUARD_MS);
       const g = c.gesture('tap');
       await vi.advanceTimersByTimeAsync(POST_TIMEOUT_MS);
       await g;
@@ -137,8 +138,9 @@ describe('robustness', () => {
   it('survives a rejected task', async () => {
     const f = fakeApi();
     const logged: string[] = [];
-    const { c } = setup(f.api, () => {}, (s) => logged.push(s));
+    const { c, tick } = setup(f.api, () => {}, (s) => logged.push(s));
     await c.poll();
+    tick(TAP_GUARD_MS);
     f.log.length = 0;
     const real = f.api.answer;
     f.api.answer = async () => {
@@ -165,8 +167,9 @@ describe('robustness', () => {
 
   it('a tap queued behind a poll that brings a new episode posts what was on screen', async () => {
     const f = fakeApi();
-    const { c } = setup(f.api);
+    const { c, tick } = setup(f.api);
     await c.poll();
+    tick(TAP_GUARD_MS);
     f.log.length = 0;
     f.holdOpen();
     const p = c.poll();
@@ -176,6 +179,69 @@ describe('robustness', () => {
     await Promise.all([p, g]);
     expect(f.log[0]).toBe('next');
     expect(f.log[1]).toBe('answer:alpha:ep1:key:1');
+  });
+});
+
+describe('tap guard', () => {
+  async function ready() {
+    const f = fakeApi();
+    const s = setup(f.api);
+    await s.c.poll();
+    s.tick(TAP_GUARD_MS);
+    f.log.length = 0;
+    return { f, ...s };
+  }
+
+  it('a new dialog replacing the old one just before a tap swallows the tap', async () => {
+    const { f, c, tick } = await ready();
+    f.setNext(async () => next(detail({ episode: 'ep2', options: [{ id: 'key:1', label: 'Yes, delete it' }] })));
+    await c.poll();
+    tick(200);
+    await c.gesture('tap');
+    expect(f.log).toEqual(['next']);
+    tick(TAP_GUARD_MS);
+    await c.gesture('tap');
+    expect(f.log).toEqual(['next', 'answer:alpha:ep2:key:1', 'next']);
+  });
+
+  it('suggestions arriving under the replies do not swallow a tap on reply:0', async () => {
+    const { f, c, tick } = await ready();
+    const replies = [{ id: 'reply:0', label: 'Yes, go ahead' }];
+    f.setNext(async () => next(detail({ kind: 'idle', episode: 'i1', options: replies })));
+    await c.poll();
+    tick(TAP_GUARD_MS);
+    f.setNext(async () =>
+      next(detail({ kind: 'idle', episode: 'i1', options: [...replies, { id: 'suggest:0', label: 'Open the PR', suggested: true }] })),
+    );
+    await c.poll();
+    await c.gesture('tap');
+    expect(f.log).toContain('answer:alpha:i1:reply:0');
+  });
+
+  it('suggestions arriving while the cursor is on defer keep it on defer', async () => {
+    const { f, c, tick } = await ready();
+    const replies = [{ id: 'reply:0', label: 'Yes, go ahead' }];
+    f.setNext(async () => next(detail({ kind: 'idle', episode: 'i1', options: replies })));
+    await c.poll();
+    tick(TAP_GUARD_MS);
+    await c.gesture('down'); // defer
+    f.setNext(async () =>
+      next(detail({ kind: 'idle', episode: 'i1', options: [...replies, { id: 'suggest:0', label: 'Open the PR', suggested: true }] })),
+    );
+    await c.poll();
+    await c.gesture('tap');
+    expect(f.log).toContain('defer:alpha');
+    expect(f.log.some((l) => l.startsWith('answer'))).toBe(false);
+  });
+
+  it('up, down and double are not guarded', async () => {
+    const { f, c } = await ready();
+    f.setNext(async () => next(detail({ session: 'beta', episode: 'b1' })));
+    await c.poll();
+    await c.gesture('down');
+    expect(c.state().cursor).toBe(1);
+    await c.gesture('double');
+    expect(c.state().screen).toBe('fleet');
   });
 });
 
@@ -236,6 +302,7 @@ describe('effects', () => {
     const f = fakeApi();
     const s = setup(f.api);
     await s.c.poll();
+    s.tick(TAP_GUARD_MS); // the first poll put rows under the cursor
     f.log.length = 0;
     return { f, ...s };
   }

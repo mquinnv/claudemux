@@ -130,8 +130,8 @@ describe('answer results', () => {
     expect(await client(O, 't', fake(500, '')).answer('s', 'e', 'o')).toBe('failed');
   });
 
-  it('a thrown fetch is unreachable', async () => {
-    expect(await client(O, 't', boom).answer('s', 'e', 'o')).toBe('unreachable');
+  it('a dropped connection on an answer is unverified: the key may have gone out', async () => {
+    expect(await client(O, 't', boom).answer('s', 'e', 'o')).toBe('unverified');
   });
 });
 

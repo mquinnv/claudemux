@@ -54,6 +54,9 @@ export type State = {
   lastOkAt: number;
   error: string | null;
   flash: string | null;
+  // Until this time (ms, the controller's clock) a tap is ignored: a poll
+  // just put a different row under the cursor. Absent means no guard.
+  tapGuardUntil?: number;
 };
 
 export type Gesture = 'up' | 'down' | 'tap' | 'double';

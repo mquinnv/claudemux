@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { COLS, fit, wrap } from './layout';
+import { COLS, fit, wrap, wrapTail } from './layout';
+
+describe('wrapTail', () => {
+  it('keeps the last lines and marks the cut at the start', () => {
+    // Wrapped: "aaa bbb" / "ccc ddd" / "eee fff"; "…ccc ddd" is too wide.
+    const out = wrapTail('aaa bbb ccc ddd eee fff', 7, 2);
+    expect(out).toBe('…ddd\neee fff');
+    expect(wrapTail('aaa bbb ccc ddd eee fff', 8, 2)).toBe('…ccc ddd\neee fff');
+  });
+
+  it('adds nothing when everything fits', () => {
+    expect(wrapTail('aaa bbb', 7, 2)).toBe('aaa bbb');
+  });
+
+  it('drops leading words to make room for the ellipsis', () => {
+    expect(wrapTail('aaa bbb ccc', 7, 1)).toBe('…ccc');
+  });
+
+  it('returns an empty string for empty text', () => {
+    expect(wrapTail('  ', 10, 3)).toBe('');
+  });
+});
 
 describe('wrap', () => {
   it('breaks at word boundaries within cols', () => {

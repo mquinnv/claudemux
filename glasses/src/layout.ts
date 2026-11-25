@@ -50,6 +50,23 @@ export function wrap(text: string, cols: number, maxLines: number): string {
   return kept.join('\n');
 }
 
+// Like wrap, but keeps the LAST maxLines lines: for text whose end matters
+// most, such as a session's last message. When text is cut, the first line
+// starts with an ellipsis, dropping whole words where it can.
+export function wrapTail(text: string, cols: number, maxLines: number): string {
+  if (text.trim() === '' || maxLines <= 0) return '';
+  const lines = text.split('\n').flatMap((p) => wrapParagraph(p, cols));
+  if (lines.length <= maxLines) return lines.join('\n');
+  const kept = lines.slice(lines.length - maxLines);
+  let first = kept[0] ?? '';
+  while (first.length + ELLIPSIS.length > cols && first.includes(' ')) {
+    first = first.slice(first.indexOf(' ') + 1);
+  }
+  if (first.length + ELLIPSIS.length > cols) first = first.slice(first.length - Math.max(0, cols - ELLIPSIS.length));
+  kept[0] = ELLIPSIS + first;
+  return kept.join('\n');
+}
+
 // Left text padded so right ends flush at the cols-th column. Left is cut
 // with an ellipsis when the two do not fit together.
 export function fit(left: string, right: string, cols: number): string {

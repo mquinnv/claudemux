@@ -1,4 +1,4 @@
-import { COLS, fit, wrap } from './layout';
+import { COLS, fit, wrap, wrapTail } from './layout';
 import type { Effect, Gesture, NextResponse, Row, State } from './types';
 
 const STALE_MS = 10_000;
@@ -9,6 +9,14 @@ const CONFIRM_TEXT = 'tap again to confirm';
 // State.error values with their own header text; any other error reads as
 // the lobby being unreachable.
 export const BAD_TOKEN = 'bad token - open setup';
+
+// How long a tap is ignored after a poll put a different row under the
+// cursor: a tap aimed at the old row must not answer the new one.
+export const TAP_GUARD_MS = 1000;
+
+// Option rows the guard watches for a new episode; defer and skip are the
+// same action whatever the episode.
+const NAV_ROWS = new Set(['defer', 'skip']);
 
 // Rows the cursor moves over: on the session screen the options, then defer
 // and skip; on the fleet screen the sessions.
@@ -74,15 +82,36 @@ export function reduce(s: State, g: Gesture): { state: State; effect: Effect } {
   };
 }
 
-// Folds a fresh /remote/next response in. A different session or episode is
-// a different question, so the cursor and any pending confirm reset.
+// Folds a fresh /remote/next response in. Within one session the cursor
+// stays on the row with the same id (rows inserted or removed above it must
+// not slide another option under it); otherwise it goes to the top. A pending
+// confirm survives only within the same episode. When the poll put a
+// different row under the cursor (another id or label, another session, or a
+// new episode under an answer row) taps are ignored for TAP_GUARD_MS.
 export function applyNext(s: State, n: NextResponse, now: number): State {
-  const prev = s.next?.detail;
+  const prev = s.next?.detail ?? null;
   const cur = n.detail;
-  const same = prev && cur && prev.session === cur.session && prev.episode === cur.episode;
+  const sameSession = (prev?.session ?? null) === (cur?.session ?? null);
+  const sameEpisode = sameSession && prev?.episode === cur?.episode;
+  const before = rows(s)[s.cursor];
   const merged: State = { ...s, next: n, lastOkAt: now, error: null, flash: null };
-  if (!same) return { ...merged, cursor: 0, confirming: null };
-  return { ...merged, cursor: clampCursor(s.cursor, rows(merged).length) };
+  const list = rows(merged);
+
+  let cursor = 0;
+  if (before && (s.screen === 'fleet' || sameSession)) {
+    const i = list.findIndex((r) => r.id === before.id);
+    if (i >= 0) cursor = i;
+    else if (s.screen === 'fleet') cursor = clampCursor(s.cursor, list.length);
+  }
+  const confirming = sameEpisode && s.confirming !== null && list.some((r) => r.id === s.confirming) ? s.confirming : null;
+
+  const after = list[cursor];
+  let changed = before?.id !== after?.id || before?.label !== after?.label;
+  if (s.screen === 'session' && after) {
+    changed ||= !sameSession || (!sameEpisode && !NAV_ROWS.has(after.id));
+  }
+  const tapGuardUntil = changed ? now + TAP_GUARD_MS : s.tapGuardUntil;
+  return { ...merged, cursor, confirming, tapGuardUntil };
 }
 
 // Shows text in place of the title until the next successful poll.
@@ -125,7 +154,10 @@ export function render(s: State, now: number): { header: string; body: string; o
   const age = now - s.lastOkAt;
   const { pos, total } = s.next.queue;
   const right = age > STALE_MS ? `${Math.floor(age / 1000)}s ago` : `${pos > 0 ? pos : '-'}/${total}`;
-  const body = [wrap(d.body, COLS, BODY_LINES), d.note ?? ''].filter((p) => p !== '').join('\n');
+  // An idle body is the end of the session's last message: its last lines
+  // are the ones that matter. Questions and prompts read from the top.
+  const text = d.kind === 'idle' ? wrapTail(d.body, COLS, BODY_LINES) : wrap(d.body, COLS, BODY_LINES);
+  const body = [text, d.note ?? ''].filter((p) => p !== '').join('\n');
   return {
     header: fit(s.flash ?? d.title, right, COLS),
     body,

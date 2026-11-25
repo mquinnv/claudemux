@@ -125,6 +125,9 @@ export function createController(deps: Deps, initial: State) {
     },
 
     gesture(g: Gesture): Promise<void> {
+      // A poll just changed the row under the cursor: the tap was aimed at
+      // what was there before. Ignored whole; up, down and double are not.
+      if (g === 'tap' && deps.now() < (state.tapGuardUntil ?? 0)) return Promise.resolve();
       const { state: next, effect } = reduce(state, g);
       if (effect && posting) return Promise.resolve(); // tap during a POST: ignored whole
       set(next);
