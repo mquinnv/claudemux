@@ -136,6 +136,9 @@ func TestTeardownGateOpen(t *testing.T) {
 		{"awaiting confirmation, worktree survives", StateAwaiting, true, false, false},
 		{"not a worktree, turn ended", StateIdle, false, false, true},
 		{"not a worktree, still working", StateThinking, false, false, false},
+		{"not a worktree, asking a question", StateAsking, false, false, false},
+		{"not a worktree, awaiting confirmation", StateAwaiting, false, false, false},
+		{"worktree gone while asking", StateAsking, true, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -418,6 +421,8 @@ func TestTeardownAutoGateOpen(t *testing.T) {
 		{"non-worktree no-upstream holds", StateIdle, false, false, "no upstream", false},
 		{"turn not ended holds even when clean", StateThinking, false, false, "", false},
 		{"pending tool holds even when clean", StateTool, false, false, "", false},
+		{"non-worktree asking holds even when clean", StateAsking, false, false, "", false},
+		{"non-worktree awaiting holds even when clean", StateAwaiting, false, false, "", false},
 	}
 	for _, c := range cases {
 		if got := teardownAutoGateOpen(c.kind, c.inWorktree, c.gone, c.cleanReason); got != c.want {
