@@ -170,7 +170,7 @@ func keyOptions(dlg paneDialog) []remoteOption {
 		opts = append(opts, remoteOption{
 			ID:    "key:" + strconv.Itoa(r.N),
 			Label: r.Label,
-			Broad: broadChoice(dlg.Kind, r, len(dlg.Rows)),
+			Broad: broadChoice(dlg.Kind, r, len(opts) == 0),
 		})
 	}
 	return opts
@@ -194,13 +194,19 @@ func fillIdle(d *remoteDetail, in remoteInputs) {
 	}
 }
 
-// broadChoice reports whether a row grants more than the one thing asked: on
-// a permit dialog anything between Yes and No, on a plan dialog row 1 (Yes,
-// and use auto mode). rowCount is the number of rows in the dialog.
-func broadChoice(kind dialogKind, row dialogRow, rowCount int) bool {
+// broadChoice reports whether a row grants more than the one thing asked. On
+// a permit dialog a row is narrow only when it is the first offered
+// (non-free-text) row and reads exactly "Yes", or reads exactly "No"; every
+// other offered row is broad. On a plan dialog row 1 (Yes, and use auto mode)
+// is broad. first says whether row is the first non-free-text row; it does not
+// depend on free-text rows elsewhere in the dialog.
+func broadChoice(kind dialogKind, row dialogRow, first bool) bool {
 	switch kind {
 	case dialogPermit:
-		return row.N != 1 && row.N != rowCount
+		if row.Label == "No" {
+			return false
+		}
+		return !(first && row.Label == "Yes")
 	case dialogPlan:
 		return row.N == 1
 	}

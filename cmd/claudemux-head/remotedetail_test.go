@@ -279,25 +279,68 @@ func TestRemoteEpisodeChangesWithLabels(t *testing.T) {
 }
 
 func TestBroadChoice(t *testing.T) {
+	firstOf := func(d paneDialog, i int) bool {
+		for j := 0; j < i; j++ {
+			if !d.Rows[j].FreeText {
+				return false
+			}
+		}
+		return true
+	}
 	bash := parsePaneDialog(readFixture(t, "dialog_permit_bash.txt"))
 	for i, want := range []bool{false, true, true, false} {
-		if got := broadChoice(dialogPermit, bash.Rows[i], len(bash.Rows)); got != want {
+		if got := broadChoice(dialogPermit, bash.Rows[i], firstOf(bash, i)); got != want {
 			t.Errorf("bash row %d: got %v want %v", i+1, got, want)
 		}
 	}
 	edit := parsePaneDialog(readFixture(t, "dialog_permit_edit.txt"))
 	for i, want := range []bool{false, true, false} {
-		if got := broadChoice(dialogPermit, edit.Rows[i], len(edit.Rows)); got != want {
+		if got := broadChoice(dialogPermit, edit.Rows[i], firstOf(edit, i)); got != want {
 			t.Errorf("edit row %d: got %v want %v", i+1, got, want)
 		}
 	}
 	plan := parsePaneDialog(readFixture(t, "dialog_plan.txt"))
 	for i, want := range []bool{true, false} {
-		if got := broadChoice(dialogPlan, plan.Rows[i], len(plan.Rows)); got != want {
+		if got := broadChoice(dialogPlan, plan.Rows[i], firstOf(plan, i)); got != want {
 			t.Errorf("plan row %d: got %v want %v", i+1, got, want)
 		}
 	}
-	if broadChoice(dialogAsk, dialogRow{N: 2}, 3) {
+	if broadChoice(dialogAsk, dialogRow{N: 2, Label: "x"}, false) {
 		t.Error("ask rows are never broad")
+	}
+}
+
+// A free-text row ahead of the selectable ones must not shift the digit that
+// an option presses, and a free-text row after No must not make No broad.
+func TestRemoteDetailPermitIDsUseRowNumbers(t *testing.T) {
+	c := strings.Replace(readFixture(t, "dialog_permit_edit.txt"), "1. Yes\n", "1. Yes, and tell Claude what to do next\n", 1)
+	c = strings.Replace(c, " Esc to cancel · Tab to amend", " Esc to cancel", 1)
+	d := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: c})
+	if d.Kind != "permit" {
+		t.Fatalf("kind %q", d.Kind)
+	}
+	if got, want := optionIDs(d), []string{"key:2", "key:3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("options %v, want %v", got, want)
+	}
+	if !d.Options[0].Broad || d.Options[1].Broad {
+		t.Errorf("broad flags %+v", d.Options)
+	}
+}
+
+func TestRemoteDetailNoStaysNarrowBeforeFreeTextRow(t *testing.T) {
+	c := strings.Replace(readFixture(t, "dialog_permit_edit.txt"), " 3. No\n", " 3. No\n   4. No, and tell Claude what to do differently\n", 1)
+	c = strings.Replace(c, " Esc to cancel · Tab to amend", " Esc to cancel", 1)
+	d := parsePaneDialog(c)
+	if d.Kind != dialogPermit || len(d.Rows) != 4 || !d.Rows[3].FreeText {
+		t.Fatalf("parse %+v", d)
+	}
+	det := buildRemoteDetail(remoteInputs{Sess: detailSess("Awaiting"), Capture: c})
+	if got, want := optionIDs(det), []string{"key:1", "key:2", "key:3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("options %v, want %v", got, want)
+	}
+	for i, want := range []bool{false, true, false} {
+		if det.Options[i].Broad != want {
+			t.Errorf("option %d broad %v, want %v", i+1, det.Options[i].Broad, want)
+		}
 	}
 }
