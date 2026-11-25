@@ -180,10 +180,13 @@ func fillAsk(d *remoteDetail, dlg paneDialog, in remoteInputs) string {
 // Yes takes a second tap too.
 const remoteBodyFitRunes = 130
 
-// The glasses' body region: remoteBodyCols must equal COLS in
-// glasses/src/layout.ts and remoteBodyLines the BODY_LINES the body is
-// wrapped to in glasses/src/view.ts. A permit dialog's title, file name and
-// command or diff must fit in them for its plain Yes to be a single tap.
+// The lobby's estimate of the glasses' body region. The glasses lay text out
+// in pixels with the firmware's font metrics (glasses/src/layout.ts) and ask
+// for a second tap themselves when a permit body was cut; this 46-column,
+// three-line count (remoteBodyLines matches BODY_LINES in glasses/src/view.ts)
+// is only a backstop for a client that does not. A permit dialog's title,
+// file name and command or diff must fit in it for its plain Yes to be a
+// single tap.
 const (
 	remoteBodyCols  = 46
 	remoteBodyLines = 3
