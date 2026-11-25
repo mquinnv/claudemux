@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -51,6 +52,7 @@ type Config struct {
 	Teardown    TeardownConfig    `yaml:"teardown"`
 	Defer       DeferConfig       `yaml:"defer"`
 	Web         WebConfig         `yaml:"web"`
+	Remote      RemoteConfig      `yaml:"remote"`
 }
 
 // HeadConfig picks which context rows the status pane draws under its state and
@@ -247,6 +249,30 @@ type WebConfig struct {
 	HidePrivateOrgs  []string `yaml:"hide_private_orgs"`
 }
 
+// remoteTokenKey is the env-file key holding the shared secret for the /remote/
+// routes. Like the API key it lives in the env file, never in config.yml.
+const remoteTokenKey = "CLAUDEMUX_REMOTE_TOKEN"
+
+// remoteReplyMaxRunes caps one fixed reply: the glasses display is tiny.
+const remoteReplyMaxRunes = 80
+
+// RemoteConfig is the Even G2 / R1 ring remote (the /remote/ routes on the web
+// server). Enabled is off by default; turning it on without a token or without
+// web.listen is not a load error, the lobby status line reports it. Replies are
+// the fixed free-text answers the glasses can send; a YAML list REPLACES the
+// defaults. Suggest turns on the suggested-reply row.
+type RemoteConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Replies []string `yaml:"replies"`
+	Suggest bool     `yaml:"suggest"`
+}
+
+// remoteToken returns the remote's shared secret: the process environment wins,
+// then the env file, as configValue does for every other secret.
+func remoteToken(cfg Config) string {
+	return strings.TrimSpace(configValue(cfg.Summary.APIKeyFile, remoteTokenKey))
+}
+
 func defaultConfig() Config {
 	return Config{
 		Summary: SummaryConfig{
@@ -266,6 +292,10 @@ func defaultConfig() Config {
 		},
 		Web: WebConfig{
 			HeadlineInterval: Duration{2 * time.Minute},
+		},
+		Remote: RemoteConfig{
+			Suggest: true,
+			Replies: []string{"Yes, go ahead", "Continue", "No, stop and wait for me"},
 		},
 	}
 }
@@ -431,6 +461,12 @@ func (c Config) validate() error {
 	}
 	if _, _, err := parseWebListen(c.Web.Listen); err != nil {
 		return err
+	}
+	for i, r := range c.Remote.Replies {
+		if n := utf8.RuneCountInString(r); n == 0 || n > remoteReplyMaxRunes {
+			return fmt.Errorf("remote.replies[%d] is %d characters: each reply must be 1 to %d characters",
+				i, n, remoteReplyMaxRunes)
+		}
 	}
 	return nil
 }

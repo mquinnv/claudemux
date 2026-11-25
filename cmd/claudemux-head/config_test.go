@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -713,5 +714,70 @@ func TestLoadConfigWebZeroHeadlineIntervalIsAllowed(t *testing.T) {
 	writeConfig(t, "web:\n  headline_interval: 0s\n")
 	if _, err := loadConfig(); err != nil {
 		t.Fatalf("loadConfig() err = %v, want nil — zero is the documented opt-out", err)
+	}
+}
+
+var wantDefaultReplies = []string{"Yes, go ahead", "Continue", "No, stop and wait for me"}
+
+func TestRemoteConfigDefaults(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.Remote.Enabled {
+		t.Error("Remote.Enabled = true, want false by default")
+	}
+	if !cfg.Remote.Suggest {
+		t.Error("Remote.Suggest = false, want true by default")
+	}
+	if !slices.Equal(cfg.Remote.Replies, wantDefaultReplies) {
+		t.Errorf("Remote.Replies = %q, want %q", cfg.Remote.Replies, wantDefaultReplies)
+	}
+}
+
+func TestRemoteConfigRejectsEmptyReply(t *testing.T) {
+	long := strings.Repeat("x", 81)
+	for name, yml := range map[string]string{
+		"empty":    "remote:\n  replies: [\"Continue\", \"\"]\n",
+		"too long": "remote:\n  replies: [\"" + long + "\"]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeConfig(t, yml)
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatal("loadConfig() error = nil, want a validation error")
+			}
+			if !strings.Contains(err.Error(), "remote.replies") {
+				t.Errorf("error = %q, want it to name remote.replies", err)
+			}
+		})
+	}
+}
+
+func TestRemoteConfigRepliesOverride(t *testing.T) {
+	writeConfig(t, "remote:\n  replies: [\"Ship it\"]\n")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if want := []string{"Ship it"}; !slices.Equal(cfg.Remote.Replies, want) {
+		t.Errorf("Remote.Replies = %q, want %q (a list replaces the defaults, it does not append)", cfg.Remote.Replies, want)
+	}
+}
+
+func TestRemoteTokenReadsEnvFile(t *testing.T) {
+	t.Setenv(remoteTokenKey, "")
+	t.Setenv("CLAUDEMUX_ENV", "") // an inherited override would redirect the read
+	f := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(f, []byte(remoteTokenKey+"=  tok123 \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.Summary.APIKeyFile = f
+	if got := remoteToken(cfg); got != "tok123" {
+		t.Errorf("remoteToken = %q, want tok123", got)
 	}
 }
