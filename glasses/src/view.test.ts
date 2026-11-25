@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { COLS } from './layout';
 import type { FleetResponse, NextResponse, RemoteDetail, RemoteOption, State } from './types';
-import { applyNext, reduce, render, rows, withFlash } from './view';
+import { BAD_TOKEN, applyNext, reduce, render, rows, withFlash } from './view';
+
+describe('bad token error', () => {
+  it('shows the bad token text in the header', () => {
+    const s = { screen: 'session', next: null, fleet: null, cursor: 0, confirming: null, lastOkAt: 0, error: BAD_TOKEN, flash: null } as State;
+    expect(render(s, 0).header).toBe('bad token - open setup');
+  });
+});
 
 const opt = (id: string, label: string, extra: Partial<RemoteOption> = {}): RemoteOption => ({
   id,

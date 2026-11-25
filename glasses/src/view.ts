@@ -6,6 +6,10 @@ const WINDOW = 5;
 const BODY_LINES = 3;
 const CONFIRM_TEXT = 'tap again to confirm';
 
+// State.error values with their own header text; any other error reads as
+// the lobby being unreachable.
+export const BAD_TOKEN = 'bad token - open setup';
+
 // Rows the cursor moves over: on the session screen the options, then defer
 // and skip; on the fleet screen the sessions.
 export function rows(s: State): Row[] {
@@ -100,7 +104,8 @@ function optionWindow(list: Row[], cursor: number, confirming: string | null): s
 
 export function render(s: State, now: number): { header: string; body: string; options: string } {
   if (s.error) {
-    return { header: 'lobby not reachable', body: '', options: '' };
+    const header = s.error === BAD_TOKEN ? BAD_TOKEN : 'lobby not reachable';
+    return { header, body: '', options: '' };
   }
 
   if (s.screen === 'fleet') {
