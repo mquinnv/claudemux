@@ -155,6 +155,47 @@ func askMarkerTime(dir, sessionID string) time.Time {
 	return fi.ModTime()
 }
 
+// askOption is one choice of an AskUserQuestion question. The JSON keys mirror
+// the hook payload's tool_input, so one type decodes the payload and encodes
+// the marker.
+type askOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// askQuestion is one question of an AskUserQuestion call.
+type askQuestion struct {
+	Question    string      `json:"question"`
+	Header      string      `json:"header,omitempty"`
+	Options     []askOption `json:"options,omitempty"`
+	MultiSelect bool        `json:"multiSelect,omitempty"`
+}
+
+// askMarker is the content of an ask marker: which session is asking and,
+// when the PreToolUse payload carried them, what it asks.
+type askMarker struct {
+	SessionID string        `json:"session_id"`
+	Questions []askQuestion `json:"questions,omitempty"`
+}
+
+// readAskMarker reads the ask marker for sessionID. ok is false when there is
+// no marker or it does not parse; a marker written without questions reads as
+// ok with no Questions.
+func readAskMarker(dir, sessionID string) (askMarker, bool) {
+	if dir == "" || sessionID == "" {
+		return askMarker{}, false
+	}
+	blob, err := os.ReadFile(filepath.Join(dir, sessionID+".json"))
+	if err != nil {
+		return askMarker{}, false
+	}
+	var m askMarker
+	if err := json.Unmarshal(blob, &m); err != nil {
+		return askMarker{}, false
+	}
+	return m, true
+}
+
 // claudeProjectsPath is the dir under which Claude Code writes per-project
 // transcript folders. Empty when the home dir can't be resolved.
 func claudeProjectsPath() string {

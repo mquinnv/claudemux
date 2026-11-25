@@ -378,9 +378,7 @@ func runHookAsk(stdin io.Reader, _, stderr io.Writer, getenv func(string) string
 		if tool != "AskUserQuestion" {
 			return 0
 		}
-		if rc := writeMarker(marker, struct {
-			SessionID string `json:"session_id"`
-		}{sid}); rc != 0 {
+		if rc := writeMarker(marker, askMarker{SessionID: sid, Questions: askQuestions(obj)}); rc != 0 {
 			return rc
 		}
 	case "PostToolUse":
@@ -408,6 +406,20 @@ func runHookAsk(stdin io.Reader, _, stderr io.Writer, getenv func(string) string
 	// sessions that stopped writing long ago, same policy as the pane map.
 	pruneStale(dir, jsonFileName)
 	return 0
+}
+
+// askQuestions reads tool_input.questions from an AskUserQuestion payload.
+// Tolerant by design: a missing or wrongly typed tool_input means "no
+// questions", never an error, because the marker's main job (the state
+// override) does not depend on them.
+func askQuestions(obj map[string]json.RawMessage) []askQuestion {
+	var input struct {
+		Questions []askQuestion `json:"questions"`
+	}
+	if err := json.Unmarshal(obj["tool_input"], &input); err != nil {
+		return nil
+	}
+	return input.Questions
 }
 
 // worktreeAskCap is how many times one session is told about its pending

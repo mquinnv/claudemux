@@ -81,6 +81,49 @@ func TestAskHookRemovesMarkerOnPostToolUse(t *testing.T) {
 	}
 }
 
+func TestAskHookStoresQuestions(t *testing.T) {
+	home := t.TempDir()
+	runAskHook(t, home, `{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"sess-1",
+"tool_input":{"questions":[{"question":"Which colour do you choose?","header":"Colour","options":[
+{"label":"Red","description":"warm"},{"label":"Green","description":"calm"},{"label":"Blue","description":"cool"}],"multiSelect":false}]}}`)
+	m, ok := readAskMarker(filepath.Dir(askMarkerPath(home, "sess-1")), "sess-1")
+	if !ok || m.SessionID != "sess-1" || len(m.Questions) != 1 {
+		t.Fatalf("marker = %+v, ok %v", m, ok)
+	}
+	q := m.Questions[0]
+	if q.Question != "Which colour do you choose?" || q.Header != "Colour" || q.MultiSelect {
+		t.Errorf("question = %+v", q)
+	}
+	var labels []string
+	for _, o := range q.Options {
+		labels = append(labels, o.Label)
+	}
+	if strings.Join(labels, ",") != "Red,Green,Blue" || q.Options[0].Description != "warm" {
+		t.Errorf("options = %+v", q.Options)
+	}
+}
+
+func TestAskHookMarkerWithoutToolInput(t *testing.T) {
+	home := t.TempDir()
+	for _, payload := range []string{
+		`{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"sess-1"}`,
+		`{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"sess-1","tool_input":"oops"}`,
+		`{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","session_id":"sess-1","tool_input":{"questions":"oops"}}`,
+	} {
+		runAskHook(t, home, payload)
+		m, ok := readAskMarker(filepath.Dir(askMarkerPath(home, "sess-1")), "sess-1")
+		if !ok || len(m.Questions) != 0 {
+			t.Errorf("payload %s: marker = %+v, ok %v", payload, m, ok)
+		}
+	}
+}
+
+func TestReadAskMarkerMissing(t *testing.T) {
+	if _, ok := readAskMarker(t.TempDir(), "nope"); ok {
+		t.Error("ok for a missing marker")
+	}
+}
+
 // A PostToolUse for some OTHER tool must not clear the marker: with parallel
 // background tool results arriving, only the question's own completion, or a
 // new prompt, means the question is gone.
