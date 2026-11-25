@@ -26,7 +26,8 @@ type webHeadline struct {
 type webFleet struct {
 	mu       sync.RWMutex
 	snap     swSnapshot
-	rl       RateLimits
+	raw      []swSession // the snapshot's sessions before the privacy filter; remote routes only
+	rl      RateLimits
 	rlOK     bool
 	windows  []ModelWindow
 	taken    time.Time
@@ -46,9 +47,11 @@ func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []
 	// Filtered here, before anything reads it, so hidden sessions reach
 	// neither the page, its counts, nor the headline model's prompt. snap is
 	// a copy; reassigning its slice leaves the lobby's own untouched.
+	raw := append([]swSession(nil), snap.Sessions...)
 	snap.Sessions = w.privacy.visible(snap.Sessions)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.raw = raw
 	w.snap = snap
 	w.rl = rl
 	w.rlOK = rlOK
@@ -68,6 +71,15 @@ func (w *webFleet) sessions() []swSession {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return append([]swSession(nil), w.snap.Sessions...)
+}
+
+// rawSessions is a copy of the current fleet before the privacy filter. The
+// token-protected remote is the owner's own view and needs every session;
+// nothing on the public page may call this.
+func (w *webFleet) rawSessions() []swSession {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return append([]swSession(nil), w.raw...)
 }
 
 // view is the JSON shape of the current facts, built under the read lock so

@@ -236,3 +236,29 @@ func TestWebFleetViewFamilies(t *testing.T) {
 		t.Errorf("usm json = %s", raw)
 	}
 }
+
+func TestWebFleetRawSessionsUnfiltered(t *testing.T) {
+	p, _ := fakePrivacy([]string{"mquinnv"},
+		map[string]string{"secret": "/m", "open": "/c"},
+		map[string]string{"/m": "git@github.com:mquinnv/menuops.git", "/c": "git@github.com:mquinnv/claudemux.git"},
+		map[string]bool{"mquinnv/menuops": true}, nil)
+	p.pass()
+	f := newWebFleet()
+	f.privacy = p
+	f.publish(swSnapshot{Sessions: []swSession{{Name: "secret", Context: -1}, {Name: "open", Context: -1}}}, RateLimits{}, false, nil, time.Now())
+	if got := names(f.sessions()); got != "open" {
+		t.Fatalf("sessions = %q, want only open", got)
+	}
+	raw := f.rawSessions()
+	if got := names(raw); got != "secret,open" {
+		t.Fatalf("rawSessions = %q, want secret,open", got)
+	}
+	if v := f.view(); v.Counts.Sessions != 1 || len(v.Sessions) != 1 || v.Sessions[0].Name != "open" {
+		t.Fatalf("view = %+v, want only open", v)
+	}
+	// The returned slice is a copy: scribbling on it must not reach the store.
+	raw[0].Name = "mutated"
+	if got := names(f.rawSessions()); got != "secret,open" {
+		t.Fatalf("rawSessions after caller mutation = %q", got)
+	}
+}
