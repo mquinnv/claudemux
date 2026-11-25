@@ -20,7 +20,7 @@ func webTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	f := newWebFleet()
 	f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
-	return webHandler(f, webAllow{Suffix: webTestAllowSuffix})
+	return webHandler(f, webAllow{Suffix: webTestAllowSuffix}, nil)
 }
 
 // webTestRequest builds a request that passes webGuard by default (loopback
@@ -205,7 +205,9 @@ func TestStartSwitchboardWebMagicDNSFailureIsNotFatal(t *testing.T) {
 	cfg.Summary.Enabled = false
 	w, err := startSwitchboardWeb(cfg,
 		func() (string, error) { return "100.64.0.15", nil },
-		func() (webAllow, error) { return webAllow{}, errors.New("tailscale status --json: exec: \"tailscale\": not found") })
+		func() (webAllow, error) {
+			return webAllow{}, errors.New("tailscale status --json: exec: \"tailscale\": not found")
+		})
 	if err != nil || w == nil {
 		t.Fatalf("a MagicDNS lookup failure must not be fatal: got %+v, %v", w, err)
 	}
@@ -242,7 +244,7 @@ func TestWebGuard(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newWebFleet()
 			f.publish(webTestSnapshot(), RateLimits{}, false, nil, time.Now())
-			h := webHandler(f, c.allow)
+			h := webHandler(f, c.allow, nil)
 			req := httptest.NewRequest("GET", "/api/fleet", nil)
 			req.RemoteAddr = c.remoteAddr
 			req.Host = c.host
@@ -306,7 +308,7 @@ func TestWebAllowedHost(t *testing.T) {
 		{"MICHAELS-CLAUDES:7474", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, true},
 		{"other-node", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, false},
 		{"michaels-claudes", webAllow{Suffix: "nodes.headscale.mage.net"}, false}, // ShortName empty
-		{"michaels-claudes", webAllow{}, false},                                  // ShortName empty, no suffix either
+		{"michaels-claudes", webAllow{}, false},                                   // ShortName empty, no suffix either
 		{"michaels-claudes.nodes.headscale.mage.net", webAllow{Suffix: "nodes.headscale.mage.net", ShortName: "michaels-claudes"}, true},
 	}
 	for _, c := range cases {

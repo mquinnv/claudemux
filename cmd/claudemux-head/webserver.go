@@ -38,8 +38,9 @@ const (
 // for a POST to a known path and 404 for everything else; "/{$}" matches
 // the root only, so "/index.html" is not quietly the page. allow is the
 // tailnet's MagicDNS suffix and this node's own short name (weblisten.go);
-// see webGuard.
-func webHandler(f *webFleet, allow webAllow) http.Handler {
+// see webGuard. remote is the glasses' hub (remoteroutes.go); nil leaves
+// /remote/ unrouted, so every path under it is a plain 404.
+func webHandler(f *webFleet, allow webAllow, remote *remoteHub) http.Handler {
 	page := renderWebPage(f.title)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +65,9 @@ func webHandler(f *webFleet, allow webAllow) http.Handler {
 		}
 		_, _ = w.Write(body)
 	})
+	if remote != nil {
+		mux.Handle("/remote/", remoteHandler(remote))
+	}
 	return webRecover(webGuard(mux, allow))
 }
 
@@ -251,6 +255,11 @@ type swWeb struct {
 	fleet  *webFleet
 	worker *webHeadlineWorker
 	server *webServer
+	// remote is the glasses' hub, nil unless remote.enabled and a token is
+	// set; remoteErr says why it is off when it was asked for, for the
+	// status line.
+	remote    *remoteHub
+	remoteErr string
 }
 
 // startSwitchboardWeb reads web.listen and stands the page up. nil, nil
@@ -259,9 +268,14 @@ type swWeb struct {
 // tailnet's MagicDNS suffix and this node's own short name for webGuard's
 // host check (weblisten.go); its own failure is not fatal to the page —
 // the guard just falls back to IP literals and localhost, same as a node
-// with no tailscale at all.
+// with no tailscale at all. remote.enabled adds the glasses' routes when
+// CLAUDEMUX_REMOTE_TOKEN is set; without the token the page still starts
+// and remoteErr says why the remote did not.
 func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusAllow func() (webAllow, error)) (*swWeb, error) {
 	l, on, err := parseWebListen(cfg.Web.Listen)
+	if err == nil && !on && cfg.Remote.Enabled {
+		return nil, errors.New("remote.enabled needs web.listen")
+	}
 	if err != nil || !on {
 		return nil, err
 	}
@@ -279,13 +293,23 @@ func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusA
 		fleet.title = t
 	}
 	fleet.privacy = newWebPrivacy(cfg.Web.HidePrivateOrgs)
-	server, err := startWebServer(addr, webHandler(fleet, allow))
+	sum := newSummarizer(cfg.Summary)
+	var hub *remoteHub
+	remoteErr := ""
+	if cfg.Remote.Enabled {
+		if token := remoteToken(cfg); token != "" {
+			hub = newRemoteHub(fleet, cfg.Remote, token, sum)
+		} else {
+			remoteErr = "remote: " + remoteTokenKey + " is not set"
+		}
+	}
+	server, err := startWebServer(addr, webHandler(fleet, allow, hub))
 	if err != nil {
 		return nil, err
 	}
 	fleet.privacy.start()
-	worker := startHeadlineWorker(fleet, newSummarizer(cfg.Summary), cfg.Web.HeadlineInterval.Duration)
-	return &swWeb{fleet: fleet, worker: worker, server: server}, nil
+	worker := startHeadlineWorker(fleet, sum, cfg.Web.HeadlineInterval.Duration)
+	return &swWeb{fleet: fleet, worker: worker, server: server, remote: hub, remoteErr: remoteErr}, nil
 }
 
 func (w *swWeb) addr() string {

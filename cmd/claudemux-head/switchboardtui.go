@@ -435,6 +435,9 @@ type swModel struct {
 	headliner *webHeadlineWorker
 	webAddr   string
 	webErr    string
+	// remoteErr is why the glasses' remote is off although remote.enabled
+	// asked for it (no token); shown beside the page's address.
+	remoteErr string
 }
 
 func newSwModel(selfPane string) swModel {
@@ -744,6 +747,8 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.followSelection()
+	case remoteDeferMsg:
+		return m, remoteDeferCmd(msg)
 	case swTickMsg:
 		// Re-resolved every tick while the lobby is still on abtop's file, for
 		// the reason the head does it — see refreshedRateLimitsPath.
@@ -1426,6 +1431,9 @@ func (m swModel) View() string {
 	case m.webErr != "":
 		title += "  " + swWaitStyle.Render("web: "+m.webErr)
 	}
+	if m.remoteErr != "" {
+		title += "  " + swWaitStyle.Render(m.remoteErr)
+	}
 	if m.width > 0 {
 		title = clipLine(title, m.width)
 	}
@@ -1910,6 +1918,7 @@ func runSwitchboard(stderr io.Writer) int {
 		m.webErr = werr.Error()
 	} else if web != nil {
 		m.web, m.headliner, m.webAddr = web.fleet, web.worker, web.addr()
+		m.remoteErr = web.remoteErr
 	}
 	// The quit path stops the page here; the restart path below stops it
 	// explicitly before exec, since a deferred call never runs past one.
@@ -1922,6 +1931,11 @@ func runSwitchboard(stderr io.Writer) int {
 		m.cond = c
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
+	// A defer from the glasses goes through Update like the lobby's own key;
+	// answers do not (they run in the request goroutine, see serveAnswer).
+	if web != nil {
+		web.remote.setDeferFn(remoteDeferVia(p.Send, remoteDeferTimeout))
+	}
 	final, runErr := p.Run()
 	if runErr != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", runErr)
