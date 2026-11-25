@@ -27,7 +27,7 @@ type webFleet struct {
 	mu       sync.RWMutex
 	snap     swSnapshot
 	raw      []swSession // the snapshot's sessions before the privacy filter; remote routes only
-	rl      RateLimits
+	rl       RateLimits
 	rlOK     bool
 	windows  []ModelWindow
 	taken    time.Time
