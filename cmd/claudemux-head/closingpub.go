@@ -115,6 +115,41 @@ func closingText(v string) string {
 	return "⏻ closing"
 }
 
+// swCloseAsking reports a closing row that is resting on a question. The head
+// publishes "blocked" as soon as a wrap-up turn rests with the worktree still
+// there, and a pending question counts as resting, so a wrap-up asking its
+// confirmation arrives as "blocked" — only the row's state says it is really
+// waiting on an answer. Only the two phases a wrap-up turn can be in qualify:
+// a question under any other phase (or none) is not about the teardown.
+func swCloseAsking(closing, state string) bool {
+	if closing != "wrapup" && closing != "blocked" {
+		return false
+	}
+	return state == "Asking" || state == "Awaiting" || state == "Tool:AskUserQuestion"
+}
+
+// swCloseTier ranks a closing row for the conductor: 0 is one key from done
+// (the gate is open, or X armed the kill), 1 is a wrap-up that needs an
+// answer, 2 is everything else, including a phase from a newer head.
+func swCloseTier(closing, state string) int {
+	switch {
+	case closing == "ready" || closing == "direct":
+		return 0
+	case swCloseAsking(closing, state):
+		return 1
+	}
+	return 2
+}
+
+// swClosingText is closingText with the row's state folded in, so a wrap-up
+// that is asking its question does not read as blocked.
+func swClosingText(closing, state string) string {
+	if swCloseAsking(closing, state) {
+		return "⏻ wrap-up needs an answer"
+	}
+	return closingText(closing)
+}
+
 // swCloseStyle is the closing hue — ANSI 256 "204", a rose that is none of
 // the lobby's other signals: waiting orange (214), busy blue (39), deferred
 // cyan (45), conducting green (35).
@@ -125,9 +160,11 @@ var swCloseStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("204"))
 //
 //   - running: the wrap-up is still working (or claude is exiting). Rose
 //     text on a dark chip — on its way, nothing to do.
-//   - waiting: the wrap-up stopped to ask (its single confirmation) or
-//     ended with the gate still shut. The waiting orange, filled, because
-//     the session is waiting on the human exactly as an Idle row is.
+//   - waiting: the wrap-up stopped to ask (its single confirmation), in
+//     either phase, or ended with the gate still shut. The waiting orange,
+//     filled, because the session is waiting on the human exactly as an
+//     Idle row is. CONFIRM is the question; BLOCKED means the wrap-up
+//     stopped with the gate shut and nothing pending to answer.
 //   - ready: the gate is open (or `X` armed the direct kill); one more key
 //     in the head ends the session. Filled rose.
 var (
@@ -145,8 +182,14 @@ const swCloseBadgeLabelW = 7
 // its published state. The phase alone cannot say whether a wrap-up is still
 // running or has stopped to ask for its confirmation — the head publishes
 // "wrapup" for both — but the row's state can: a wrap-up turn that is
-// waiting is waiting on the human.
+// waiting is waiting on the human. The head publishes "blocked" for a wrap-up
+// that rests with the worktree still there, a pending question included, so a
+// question in either phase is CONFIRM and BLOCKED is left for a wrap-up that
+// stopped without one.
 func swCloseBadgeLabel(closing, state string) (string, lipgloss.Style) {
+	if swCloseAsking(closing, state) {
+		return "CONFIRM", swBadgeCloseWaitStyle
+	}
 	switch closing {
 	case "wrapup":
 		if isWaiting(state) {

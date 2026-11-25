@@ -381,6 +381,8 @@ func TestSwCloseBadgeByPhase(t *testing.T) {
 		{"wrapup", "Awaiting", "CONFIRM", swBadgeCloseWaitStyle},
 		{"wrapup", "Tool:AskUserQuestion", "CONFIRM", swBadgeCloseWaitStyle},
 		{"blocked", "Idle", "BLOCKED", swBadgeCloseWaitStyle},
+		{"blocked", "Asking", "CONFIRM", swBadgeCloseWaitStyle},
+		{"blocked", "Awaiting", "CONFIRM", swBadgeCloseWaitStyle},
 		{"ready", "Idle", "READY", swBadgeCloseReadyStyle},
 		{"direct", "Busy", "KILL?", swBadgeCloseReadyStyle},
 		{"exiting", "Idle", "EXITING", swBadgeCloseRunStyle},
@@ -394,5 +396,61 @@ func TestSwCloseBadgeByPhase(t *testing.T) {
 		if w := lipgloss.Width(swCloseBadgeText(c.closing, c.state)); w != swCloseBadgeW {
 			t.Errorf("badge for %q/%q is %d wide, want %d", c.closing, c.state, w, swCloseBadgeW)
 		}
+	}
+}
+
+func TestSwCloseTier(t *testing.T) {
+	cases := []struct {
+		closing, state string
+		tier           int
+		asking         bool
+	}{
+		{"ready", "Idle", 0, false},
+		{"direct", "Idle", 0, false},
+		{"wrapup", "Asking", 1, true},
+		{"wrapup", "Awaiting", 1, true},
+		{"blocked", "Asking", 1, true},
+		{"blocked", "Tool:AskUserQuestion", 1, true},
+		{"blocked", "Idle", 2, false},
+		{"wrapup", "Idle", 2, false},
+		{"wrapup", "Thinking", 2, false},
+		{"exiting", "Idle", 2, false},
+		{"from-a-newer-head", "Asking", 2, false},
+		{"", "Asking", 2, false},
+		{"", "Idle", 2, false},
+	}
+	for _, c := range cases {
+		if got := swCloseTier(c.closing, c.state); got != c.tier {
+			t.Errorf("swCloseTier(%q, %q) = %d, want %d", c.closing, c.state, got, c.tier)
+		}
+		if got := swCloseAsking(c.closing, c.state); got != c.asking {
+			t.Errorf("swCloseAsking(%q, %q) = %v, want %v", c.closing, c.state, got, c.asking)
+		}
+	}
+}
+
+func TestSwClosingText(t *testing.T) {
+	if got := swClosingText("blocked", "Asking"); got != "⏻ wrap-up needs an answer" {
+		t.Errorf("blocked+Asking = %q", got)
+	}
+	if got := swClosingText("wrapup", "Awaiting"); got != "⏻ wrap-up needs an answer" {
+		t.Errorf("wrapup+Awaiting = %q", got)
+	}
+	for _, c := range [][2]string{{"blocked", "Idle"}, {"wrapup", "Thinking"}, {"ready", "Idle"}, {"", "Asking"}} {
+		if got, want := swClosingText(c[0], c[1]), closingText(c[0]); got != want {
+			t.Errorf("swClosingText(%q, %q) = %q, want %q", c[0], c[1], got, want)
+		}
+	}
+}
+
+// A wrap-up resting on its question reads as asking on the web page too, not
+// as blocked.
+func TestBuildWebFleetViewClosingAskingLabel(t *testing.T) {
+	snap := webTestSnapshot()
+	snap.Sessions[1].Closing = "blocked"
+	snap.Sessions[1].State = "Asking"
+	v := buildWebFleetView(snap, RateLimits{}, false, nil, time.Now(), webHeadline{})
+	if got := v.Sessions[1].ClosingLabel; got != "wrap-up needs an answer" {
+		t.Errorf("ClosingLabel = %q, want the asking label", got)
 	}
 }

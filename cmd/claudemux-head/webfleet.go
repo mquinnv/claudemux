@@ -224,7 +224,7 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 			From:        s.From,
 			// The lobby's wording without its ⏻ glyph: the page's closing
 			// section already carries one in its heading.
-			ClosingLabel: strings.TrimPrefix(closingText(s.Closing), "⏻ "),
+			ClosingLabel: strings.TrimPrefix(swClosingText(s.Closing, s.State), "⏻ "),
 		}
 		if isHex6(s.Color) {
 			ws.Color = "#" + s.Color

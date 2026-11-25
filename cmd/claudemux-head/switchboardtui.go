@@ -1313,7 +1313,7 @@ func swDetailLine(sess swSession, reasonInline bool) string {
 	if sess.From != "" {
 		parts = append(parts, swStatusStyle.Render("← "+sess.From))
 	}
-	if phase := closingText(sess.Closing); phase != "" {
+	if phase := swClosingText(sess.Closing, sess.State); phase != "" {
 		parts = append(parts, swCloseStyle.Render(phase))
 	}
 	// The blocker is in the defer hue, loud like the badge it explains, but
