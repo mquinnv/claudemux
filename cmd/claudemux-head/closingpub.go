@@ -19,10 +19,12 @@ import (
 // survive a head restart), so the head clears it at start and republishes
 // whenever its phase moves. A killed session takes the option with it.
 //
-// The mark changes where a session is listed and nothing else. The conductor
-// ignores it on purpose — a closing session that is waiting is waiting on the
-// human (the wrap-up's confirmation, the final x, a blocked gate), which is
-// exactly what the conductor exists to bring them to.
+// The mark changes where a session is listed and, for the conductor, where it
+// stands in the queue. The conductor never excludes a closing session on
+// purpose — one that is waiting is waiting on the human (the wrap-up's
+// confirmation, the final x, a blocked gate), which is exactly what the
+// conductor exists to bring them to. It does visit the ones closest to done
+// first (swCloseTier), since each of those is a row off the list.
 const closingOption = "@claudemux_closing"
 
 // closingPublishValue is the machine form of a teardown phase, "" when none

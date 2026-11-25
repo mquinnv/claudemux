@@ -50,7 +50,7 @@ const (
 // whole lobby: every index the model holds — the selection, the scroll
 // window, the row the keys act on — means the same session as the row on
 // screen. The conductor is indifferent to it (waitingQueue sorts its own
-// queue by Since), so this is a display order only.
+// queue by closing tier, then Since), so this is a display order only.
 //
 // It returns a new slice and leaves the input alone.
 func swArrangeFamilies(sessions []swSession) []swSession {

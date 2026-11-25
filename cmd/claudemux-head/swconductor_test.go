@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -17,6 +18,10 @@ func snapAt(at string, sessions ...swSession) swSnapshot {
 
 func waiting(name string, since int64) swSession {
 	return swSession{Name: name, State: "Idle", Since: time.Unix(since, 0)}
+}
+
+func closingWaiting(name, closing, state string, since int64) swSession {
+	return swSession{Name: name, State: state, Since: time.Unix(since, 0), Closing: closing}
 }
 
 func busy(name string) swSession {
@@ -1002,5 +1007,58 @@ func TestPausedHandBackSurvivesStartingTick(t *testing.T) {
 	act, ok := c.step(snapAt("b", busy("b"), waiting("a", 100)), now.Add(2*time.Second))
 	if !ok || act.Target != "a" {
 		t.Fatalf("hand-back must dispatch to a, got %+v ok=%v", act, ok)
+	}
+}
+
+// Rows one keystroke or one answer from closing go first, so the lobby list
+// shrinks fastest; within a tier it is still oldest first. A closing row that
+// is not waiting is not queued at all, and a bailed wrap-up (blocked, no
+// question) or an exiting one needs nothing from the human, so it ranks with
+// the plain waiters.
+func TestWaitingQueuePrefersClosing(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	s := snapAt("switchboard",
+		waiting("old", 100),
+		closingWaiting("bailed", "blocked", "Idle", 150),
+		closingWaiting("confirm-young", "blocked", "Asking", 400),
+		closingWaiting("confirm-old", "wrapup", "Awaiting", 300),
+		closingWaiting("ready-young", "ready", "Idle", 600),
+		closingWaiting("kill-old", "direct", "Idle", 500),
+		closingWaiting("exiting", "exiting", "Idle", 50),
+		swSession{Name: "kill-busy", State: "Thinking", Closing: "direct", Since: time.Unix(10, 0)},
+	)
+	want := []string{"kill-old", "ready-young", "confirm-old", "confirm-young", "exiting", "old", "bailed"}
+	var got []string
+	for _, sess := range s.waitingQueue(nil, now) {
+		got = append(got, sess.Name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("queue = %v, want %v", got, want)
+	}
+}
+
+// Closing buys an earlier place in the queue, never a way around the
+// exclusions: a snoozed or deferred closing row stays out.
+func TestWaitingQueueClosingStillSnoozedAndDeferred(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	deferred := closingWaiting("ready-deferred", "ready", "Idle", 150)
+	deferred.Deferred = true
+	s := snapAt("switchboard",
+		closingWaiting("ready", "ready", "Idle", 100),
+		deferred,
+		waiting("plain", 200),
+	)
+	q := s.waitingQueue(map[string]swSnooze{"ready": {since: time.Unix(100, 0), at: now}}, now)
+	if len(q) != 1 || q[0].Name != "plain" {
+		t.Errorf("queue = %v, want only plain", q)
+	}
+}
+
+func TestConductorParkedDispatchesClosingFirst(t *testing.T) {
+	now := time.Unix(1_754_700_000, 0)
+	c := newConductor()
+	act, ok := c.step(snapAt("switchboard", waiting("old", 100), closingWaiting("ready", "ready", "Idle", 900)), now)
+	if !ok || act.Target != "ready" || act.Client != "/dev/ttys001" {
+		t.Fatalf("act = %+v ok=%v", act, ok)
 	}
 }

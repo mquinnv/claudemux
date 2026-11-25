@@ -80,9 +80,18 @@ func newConductor() conductor {
 	return conductor{snoozed: map[string]swSnooze{}}
 }
 
-// waitingQueue lists the waiting sessions that may collect the human,
-// oldest Since first (name as tiebreak so equal timestamps still order
-// deterministically).
+// waitingQueue lists the waiting sessions that may collect the human. Rows
+// about to close come first (swCloseTier: one keystroke from done, then a
+// wrap-up that needs one answer), then everything else; within a tier it is
+// oldest Since first, with name as tiebreak so equal timestamps still order
+// deterministically.
+//
+// Closing goes first because the user wants the lobby list to get shorter.
+// A row that costs one keystroke or one answer is the cheapest way to shrink
+// it, and a list that visibly shrinks reads better than strict oldest-first,
+// which can spend the early visits on long sessions that stay on the list
+// afterwards. The mark only reorders: a closing row still has to be waiting,
+// not deferred and not snoozed to be queued at all.
 //
 // Deferred sessions are not among them at all. "Last in line" turned out to
 // be no protection: the queue's other exclusion — snooze — is a filter, not
@@ -104,6 +113,9 @@ func (s swSnapshot) waitingQueue(snoozed map[string]swSnooze, now time.Time) []s
 		q = append(q, sess)
 	}
 	sort.SliceStable(q, func(i, j int) bool {
+		if ti, tj := swCloseTier(q[i].Closing, q[i].State), swCloseTier(q[j].Closing, q[j].State); ti != tj {
+			return ti < tj
+		}
 		if !q[i].Since.Equal(q[j].Since) {
 			return q[i].Since.Before(q[j].Since)
 		}
