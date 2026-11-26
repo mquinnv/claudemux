@@ -245,6 +245,15 @@ type WebConfig struct {
 	HeadlineInterval Duration `yaml:"headline_interval"`
 	Title            string   `yaml:"title"`
 	HidePrivateOrgs  []string `yaml:"hide_private_orgs"`
+	// Control turns on the phone remote at /remote (webremote.go): a page
+	// that can TYPE INTO your sessions, so it is off by default and, once on,
+	// still refuses every request without the CLAUDEMUX_REMOTE_TOKEN secret
+	// (read like the API key: environment first, then summary.api_key_file).
+	// The status page is for teammates; the remote is for you.
+	Control bool `yaml:"control"`
+	// Replies are the canned answers the remote offers next to Haiku's
+	// suggestions, in order. Empty keeps defaultRemoteReplies.
+	Replies []string `yaml:"replies"`
 }
 
 func defaultConfig() Config {
@@ -431,6 +440,14 @@ func (c Config) validate() error {
 	}
 	if _, _, err := parseWebListen(c.Web.Listen); err != nil {
 		return err
+	}
+	if len(c.Web.Replies) > remoteMaxReplies {
+		return fmt.Errorf("web.replies has %d entries: at most %d fit on the remote's reply row", len(c.Web.Replies), remoteMaxReplies)
+	}
+	for i, r := range c.Web.Replies {
+		if n := len([]rune(strings.TrimSpace(r))); n == 0 || n > remoteReplyMaxRunes {
+			return fmt.Errorf("web.replies[%d] is %q: each reply must be 1-%d characters", i, r, remoteReplyMaxRunes)
+		}
 	}
 	return nil
 }

@@ -381,7 +381,8 @@ no authentication: reachability is the tailnet's job, which is why the
 off the tailnet can reach it. `web.listen: ":7474"` would bind every interface,
 including whatever Wi-Fi the laptop is on; don't. The page is plain HTTP over
 the tailnet's WireGuard tunnel, and never acts on a session — nothing on it can
-defer, jump, or type.
+defer, jump, or type. (The phone remote below can, which is why it is off by
+default and needs a token on top of the tailnet.)
 
 The lobby also refuses requests from outside the tailnet's address ranges and
 from Host names it doesn't recognize, whatever address it's actually bound to
@@ -399,6 +400,67 @@ If the address can't be bound — the port is taken, or `tailscale ip -4` has
 nothing to say because tailscale is down — the lobby starts anyway and puts the
 reason in its title row where the URL would be. Fix it and restart the lobby
 (`R`).
+
+### Answering from your phone
+
+The same server can also serve a **phone remote** at `/remote`: the
+switchboard's conductor, on your phone. It walks the sessions waiting on you
+in the lobby's own order (sessions about to close first, then oldest first,
+deferred ones never), shows one at a time, and moves to the next once you've
+answered. It's laid out for a phone held in one hand (sized for the iPhone Air,
+fine on any phone), and it can be added to the home screen.
+
+For each waiting session it shows:
+
+- **Suggested replies from Haiku.** These come from the bottom of the session's
+  screen, with the same key and model as the summaries. On a question or a
+  permission prompt, they're the options to pick, by number. At an empty
+  prompt, they're the next things you'd likely type. Tap one to send it.
+  You get about two seconds to undo it, since a mis-tap on a phone is easy.
+  Tap ✎ to load it into the keyboard and edit it first. There's one call per
+  waiting spell, and the next session in the queue is drafted while you
+  read this one.
+- **Quick replies**, the canned answers in `web.replies` (default
+  `yes, go ahead`, `continue`, `commit and push`). Long-press one to edit it
+  before sending.
+- **Answer keys** when a question is open: `1`–`4`, the arrows, Enter and Esc.
+- **The keyboard**, which is always there at the bottom, on every session.
+  Return sends, and multi-line text goes in as one paste. If a question is
+  open, the remote offers to dismiss it and send your text as a normal
+  prompt. If there's a draft in the session's input box, it asks before
+  replacing it. It never types over one silently.
+- **Skip**, **Defer** (anything typed becomes the blocker) and **Esc**. Skip only
+  affects the phone: the session comes back on its next waiting spell, or
+  when nothing else is waiting. Defer is the lobby's `d`, so a session you
+  defer leaves both queues.
+
+Every send carries the waiting spell it was meant for. If the session has
+moved on by the time the request arrives (someone answered it at the desk,
+say), the send is refused rather than landing on the next question. Tap
+**☰** to open any session, including busy ones, where a message queues
+behind the running turn. **Conduct** pauses and resumes the walk.
+
+Because it types into your sessions, the remote is off unless you turn it on,
+and every request also needs a token, on top of the tailnet-only guard:
+
+```yaml
+web:
+  listen: tailscale:7474
+  control: true
+  replies: [yes, go ahead, continue, commit and push]   # optional
+```
+
+```sh
+# in the lobby's environment, or in summary.api_key_file next to the API key
+CLAUDEMUX_REMOTE_TOKEN=<at least 16 random characters>
+```
+
+Open `http://<node>:7474/remote#token=<token>` on the phone once. The token is
+taken from the fragment (which never reaches the server), kept in the phone's
+browser storage, and stripped from the address bar. Without a token set, the
+page loads and says what's missing. Teammates who can see the status page
+can't drive anything without it. The remote shows *all* your sessions, including
+any that `hide_private_orgs` keeps off the status page.
 
 Under the title, the lobby shows the same account budget meters as the head:
 the 5-hour and weekly rate-limit gauges with their reset times (and an
@@ -811,6 +873,8 @@ defer:
 web:
   listen: ""
   headline_interval: 2m
+  control: false
+  replies: []
 ```
 
 - `summary.enabled` — turn the LLM summary off entirely (see **Billing** below).
@@ -955,6 +1019,11 @@ web:
 - `web.hide_private_orgs` — GitHub owners whose private repos' sessions are left
   off the web status page (see **Sharing the fleet on the tailnet** above).
   Default empty: every session shows.
+- `web.control` — serve the phone remote at `/remote` (see **Answering from your
+  phone** above). Default `false`. Also needs `CLAUDEMUX_REMOTE_TOKEN` (16+
+  characters) in the lobby's environment or `summary.api_key_file`.
+- `web.replies` — the remote's quick replies, in order. Empty keeps the defaults
+  (`yes, go ahead`, `continue`, `commit and push`). Up to 6, each 1–200 characters.
 - `web.headline_interval` — the floor between fleet-headline calls, with
   `summary.min_interval`'s rules: it bounds what the page costs, `0` means no
   floor, negative is rejected. A call only fires when the fleet's topics,

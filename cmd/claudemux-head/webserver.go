@@ -40,8 +40,17 @@ const (
 // tailnet's MagicDNS suffix and this node's own short name (weblisten.go);
 // see webGuard.
 func webHandler(f *webFleet, allow webAllow) http.Handler {
+	return webHandlerWith(f, allow, nil)
+}
+
+// webHandlerWith is webHandler plus extra routes (the phone remote,
+// webremote.go), registered on the same mux behind the same guard.
+func webHandlerWith(f *webFleet, allow webAllow, extra func(*http.ServeMux)) http.Handler {
 	page := renderWebPage(f.title)
 	mux := http.NewServeMux()
+	if extra != nil {
+		extra(mux)
+	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -279,12 +288,28 @@ func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusA
 		fleet.title = t
 	}
 	fleet.privacy = newWebPrivacy(cfg.Web.HidePrivateOrgs)
-	server, err := startWebServer(addr, webHandler(fleet, allow))
+	summarizer := newSummarizer(cfg.Summary)
+	var extra func(*http.ServeMux)
+	if cfg.Web.Control {
+		token, tokenErr := remoteToken(cfg)
+		if tokenErr != nil {
+			teardownLogf("web: remote control: %v", tokenErr)
+		}
+		// A nil *Summarizer must stay a nil interface, or the remote would
+		// think suggestions are on and call through a nil client.
+		var gen remoteSuggester
+		if summarizer != nil {
+			gen = summarizer
+		}
+		remote := newWebRemote(fleet, cfg, token, gen)
+		extra = func(mux *http.ServeMux) { remote.register(mux, tokenErr) }
+	}
+	server, err := startWebServer(addr, webHandlerWith(fleet, allow, extra))
 	if err != nil {
 		return nil, err
 	}
 	fleet.privacy.start()
-	worker := startHeadlineWorker(fleet, newSummarizer(cfg.Summary), cfg.Web.HeadlineInterval.Duration)
+	worker := startHeadlineWorker(fleet, summarizer, cfg.Web.HeadlineInterval.Duration)
 	return &swWeb{fleet: fleet, worker: worker, server: server}, nil
 }
 

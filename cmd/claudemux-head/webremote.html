@@ -1,0 +1,874 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="claudemux">
+<meta name="theme-color" content="#0e1116">
+<meta name="referrer" content="no-referrer">
+<title>claudemux remote</title>
+<style>
+:root {
+  --bg: #0e1116; --panel: #161b22; --panel2: #1c232d; --line: #2a3340;
+  --text: #e6edf3; --dim: #8b98a8; --faint: #5c6876;
+  --accent: #d97757; --accent-ink: #1a0f0a;
+  --wait: #f2c14e; --busy: #58a6ff; --ok: #3fb950; --bad: #f85149; --defer: #39c5cf; --close: #e58fb4;
+  --chip: #212a35; --chip-line: #334050;
+  --radius: 14px;
+  --kb: 0px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f6f7f9; --panel: #ffffff; --panel2: #f0f2f5; --line: #dde2e8;
+    --text: #1b2129; --dim: #5b6775; --faint: #8b96a3;
+    --accent: #c4623f; --accent-ink: #ffffff;
+    --wait: #a87400; --busy: #0969da; --ok: #1a7f37; --bad: #cf222e; --defer: #0b8a93; --close: #b3477a;
+    --chip: #eef1f5; --chip-line: #d3dae2;
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+}
+button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.hidden { display: none !important; }
+
+/* ---------- header ---------- */
+header {
+  position: sticky; top: 0; z-index: 20;
+  padding: calc(var(--safe-t) + 6px) 16px 10px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px;
+}
+.brand { font-weight: 700; letter-spacing: -.01em; font-size: 17px; }
+.count {
+  font-size: 13px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+  background: var(--chip); color: var(--dim);
+}
+.count.hot { background: color-mix(in srgb, var(--wait) 22%, transparent); color: var(--wait); }
+.spacer { flex: 1; }
+.hbtn {
+  height: 36px; min-width: 36px; padding: 0 12px; border-radius: 999px;
+  background: var(--chip); border: 1px solid var(--chip-line);
+  font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px;
+}
+.hbtn.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.conn { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.conn.off { background: var(--bad); }
+
+/* ---------- main ---------- */
+main {
+  padding: 12px 16px calc(var(--composer-h, 140px) + var(--kb) + 16px);
+  max-width: 640px; margin: 0 auto;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden;
+}
+.sess-head { display: flex; gap: 10px; padding: 14px 14px 10px; align-items: flex-start; }
+.swatch { width: 4px; align-self: stretch; border-radius: 4px; background: var(--faint); flex: none; }
+.sess-title { flex: 1; min-width: 0; }
+.sess-name { font-weight: 700; font-size: 18px; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-desc { color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill {
+  font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+  background: var(--chip); color: var(--dim); flex: none;
+}
+.pill.wait { background: color-mix(in srgb, var(--wait) 20%, transparent); color: var(--wait); }
+.pill.busy { background: color-mix(in srgb, var(--busy) 18%, transparent); color: var(--busy); }
+.pill.defer { background: color-mix(in srgb, var(--defer) 18%, transparent); color: var(--defer); }
+.meta { padding: 0 14px 12px 28px; }
+.topic { font-weight: 600; }
+.summary { color: var(--dim); font-size: 14px; }
+.facts { color: var(--faint); font-size: 12px; margin-top: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
+
+.screen-card { margin-top: 18px; background: var(--panel2); }
+.screen-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line);
+  font-size: 12px; font-weight: 700; color: var(--dim); text-transform: uppercase; letter-spacing: .06em;
+}
+.screen {
+  margin: 0; padding: 10px 12px; font-size: 11px; line-height: 1.35;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 30vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  color: var(--text);
+}
+.screen.tall { max-height: 70vh; }
+.screen-toggle {
+  font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0;
+  padding: 5px 11px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--dim);
+}
+
+/* ---------- replies ---------- */
+.section-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 700; color: var(--dim); text-transform: uppercase; letter-spacing: .06em;
+  margin: 18px 2px 8px;
+}
+.spark { color: var(--accent); }
+.suggestions { display: flex; flex-direction: column; gap: 8px; }
+.sugg {
+  display: flex; align-items: stretch; border-radius: 12px; overflow: hidden;
+  background: var(--chip); border: 1px solid var(--chip-line);
+}
+.sugg-send { flex: 1; text-align: left; padding: 13px 14px; min-height: 52px; }
+.sugg-send:active, .fixed:active, .key:active, .hbtn:active { filter: brightness(1.25); }
+.sugg-label { font-weight: 650; }
+.sugg-text { color: var(--dim); font-size: 13px; margin-top: 2px; }
+.sugg-edit {
+  width: 52px; flex: none; border-left: 1px solid var(--chip-line); color: var(--dim);
+  display: flex; align-items: center; justify-content: center; font-size: 18px;
+}
+.sugg.key-sugg .sugg-send { display: flex; gap: 12px; align-items: center; }
+.keynum {
+  width: 30px; height: 30px; border-radius: 8px; flex: none; display: flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--accent-ink); font-weight: 800;
+}
+.shimmer {
+  height: 52px; border-radius: 12px; background: linear-gradient(90deg, var(--chip) 0%, var(--panel2) 50%, var(--chip) 100%);
+  background-size: 200% 100%; animation: sh 1.2s linear infinite;
+}
+@keyframes sh { to { background-position: -200% 0; } }
+.note { color: var(--faint); font-size: 13px; padding: 4px 2px; }
+.fixed-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.fixed {
+  padding: 10px 14px; border-radius: 999px; background: var(--chip); border: 1px solid var(--chip-line);
+  font-weight: 600; font-size: 14px; min-height: 42px;
+}
+.keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.key {
+  height: 48px; border-radius: 12px; background: var(--chip); border: 1px solid var(--chip-line);
+  font-weight: 700; font-size: 17px;
+}
+.key.small { font-size: 14px; }
+
+/* ---------- empty ---------- */
+.empty { text-align: center; padding: 40px 12px 12px; }
+.empty-big { font-size: 44px; }
+.empty-title { font-weight: 700; font-size: 20px; margin-top: 8px; }
+.empty-sub { color: var(--dim); margin-top: 4px; }
+.mini-list { margin-top: 22px; text-align: left; }
+
+/* ---------- list sheet ---------- */
+.row {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 8px;
+}
+.row .swatch { align-self: stretch; }
+.row-main { flex: 1; min-width: 0; }
+.row-name { font-weight: 650; }
+.row-sub { color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-label { font-size: 12px; font-weight: 700; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin: 16px 2px 8px; }
+.sheet {
+  position: fixed; inset: 0; z-index: 40; background: var(--bg);
+  padding: calc(var(--safe-t) + 8px) 16px calc(var(--safe-b) + 16px);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.sheet-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; position: sticky; top: 0; background: var(--bg); padding: 6px 0; z-index: 1; }
+.sheet-title { font-weight: 700; font-size: 20px; flex: 1; }
+
+/* ---------- composer ---------- */
+.composer {
+  position: fixed; left: 0; right: 0; bottom: var(--kb); z-index: 30;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid var(--line);
+  padding: 8px 12px calc(8px + var(--safe-b));
+}
+body.kb-open .composer { padding-bottom: 8px; }
+.composer-inner { max-width: 640px; margin: 0 auto; }
+.actions { display: flex; gap: 8px; margin-bottom: 8px; overflow-x: auto; scrollbar-width: none; }
+.actions::-webkit-scrollbar { display: none; }
+.act {
+  flex: none; height: 34px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 650;
+  background: var(--chip); border: 1px solid var(--chip-line); color: var(--dim);
+}
+.act.primary { color: var(--text); }
+.inputrow { display: flex; gap: 8px; align-items: flex-end; }
+textarea {
+  flex: 1; resize: none; min-height: 44px; max-height: 160px;
+  font: 16px/1.35 -apple-system, system-ui, sans-serif; /* 16px: iOS won't zoom */
+  color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 22px;
+  padding: 11px 16px; outline: none;
+}
+textarea:focus { border-color: color-mix(in srgb, var(--accent) 70%, var(--line)); }
+.send {
+  height: 44px; min-width: 44px; padding: 0 16px; border-radius: 22px; flex: none;
+  background: var(--accent); color: var(--accent-ink); font-weight: 750;
+}
+.target { font-size: 12px; color: var(--faint); margin: 0 4px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.target b { color: var(--dim); }
+
+/* ---------- toast / confirm ---------- */
+.toast {
+  position: fixed; left: 12px; right: 12px; z-index: 50;
+  bottom: calc(var(--composer-h, 140px) + var(--kb) + 10px);
+  max-width: 616px; margin: 0 auto;
+  background: var(--text); color: var(--bg); border-radius: 14px; padding: 12px 14px;
+  display: flex; align-items: center; gap: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  font-weight: 600; font-size: 14px;
+}
+.toast.err { background: var(--bad); color: #fff; }
+.toast-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.toast button { font-weight: 800; padding: 6px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bg) 18%, transparent); }
+.toast-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); border-radius: 0 0 14px 14px; }
+.confirm-back { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; }
+.confirm {
+  width: 100%; background: var(--panel); border-radius: 20px 20px 0 0; padding: 20px 16px calc(16px + var(--safe-b));
+  border-top: 1px solid var(--line);
+}
+.confirm-title { font-weight: 700; font-size: 17px; }
+.confirm-body { color: var(--dim); margin: 6px 0 16px; }
+.confirm-btns { display: flex; flex-direction: column; gap: 8px; }
+.cbtn { height: 50px; border-radius: 14px; font-weight: 700; background: var(--chip); border: 1px solid var(--chip-line); }
+.cbtn.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+
+/* ---------- setup ---------- */
+.setup { padding: 40px 4px; }
+.setup h1 { font-size: 24px; margin: 0 0 6px; }
+.setup p { color: var(--dim); }
+.setup input {
+  width: 100%; font: 16px ui-monospace, Menlo, monospace; padding: 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); margin: 10px 0;
+}
+</style>
+</head>
+<body>
+<header>
+  <span class="conn" id="conn" title="connection"></span>
+  <span class="brand">claudemux</span>
+  <span class="count" id="count">…</span>
+  <span class="spacer"></span>
+  <button class="hbtn on" id="conductBtn" aria-pressed="true" title="Walk the waiting queue">▶ Conduct</button>
+  <button class="hbtn" id="listBtn" aria-label="All sessions">☰</button>
+</header>
+
+<main id="main"></main>
+
+<div class="composer hidden" id="composer">
+  <div class="composer-inner">
+    <div class="actions" id="actions">
+      <button class="act primary" id="skipBtn">Skip ⏭</button>
+      <button class="act" id="deferBtn">Defer</button>
+      <button class="act" id="escBtn">Esc</button>
+      <button class="act hidden" id="queueBtn">Back to queue</button>
+    </div>
+    <div class="target" id="target"></div>
+    <div class="inputrow">
+      <textarea id="input" rows="1" placeholder="Message…" enterkeyhint="send" autocapitalize="sentences" autocomplete="off"></textarea>
+      <button class="send" id="sendBtn" aria-label="Send">↑</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet hidden" id="sheet">
+  <div class="sheet-head">
+    <span class="sheet-title">Sessions</span>
+    <button class="hbtn" id="sheetClose">Done</button>
+  </div>
+  <div id="sheetList"></div>
+</div>
+
+<div id="toastHost"></div>
+<div id="confirmHost"></div>
+
+<script>
+(() => {
+'use strict';
+
+// ---------- small helpers ----------
+const $ = id => document.getElementById(id);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
+  del(k) { try { localStorage.removeItem(k); } catch (_) {} },
+};
+const TOKEN_KEY = 'claudemux.remote.token';
+
+// A token in the URL fragment (#token=...) is taken once and stripped, so
+// the link can be opened from a password manager or a QR code without
+// leaving the secret in history. Fragments never reach the server.
+(function adoptHashToken() {
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) {
+    store.set(TOKEN_KEY, decodeURIComponent(m[1]));
+    history.replaceState(null, '', location.pathname);
+  }
+})();
+
+let token = store.get(TOKEN_KEY) || '';
+
+// ---------- state ----------
+const S = {
+  sessions: [], queue: [], replies: [], suggestOn: true,
+  conduct: true,
+  current: null,      // name of the session on screen
+  pinned: null,       // name opened from the list (conduct holds on it)
+  skipped: new Map(), // name -> episode walked away from
+  answered: new Map(),// name -> episode we just answered
+  detail: null,       // last /session payload for current
+  online: true,
+  setupError: '',
+  screenTall: false,
+};
+
+// ---------- API ----------
+class ApiError extends Error {
+  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+}
+async function api(path, body) {
+  const opts = { headers: { 'Authorization': 'Bearer ' + token } };
+  if (body !== undefined) {
+    opts.method = 'POST';
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  let res;
+  try { res = await fetch(path, opts); }
+  catch (e) { throw new ApiError(0, 'offline', 'lobby not reachable'); }
+  let data = null;
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) throw new ApiError(res.status, (data && data.code) || 'http', (data && data.message) || ('HTTP ' + res.status));
+  return data;
+}
+
+// ---------- conduction ----------
+const byName = name => S.sessions.find(s => s.name === name);
+const isHeld = s => (S.skipped.get(s.name) === s.episode) || (S.answered.get(s.name) === s.episode);
+
+// The phone's conductor, a sibling of the lobby's: stay on the session
+// being answered while it still waits; once it is answered, skipped or
+// stops waiting, move to the next one in the lobby's own queue order.
+// A draft in the composer holds the current session — it never yanks the
+// screen out from under your thumbs.
+function pickCurrent() {
+  if (S.pinned) {
+    if (byName(S.pinned)) return S.pinned;
+    S.pinned = null;
+  }
+  if (!S.conduct) return S.current && byName(S.current) ? S.current : null;
+  const cur = S.current && byName(S.current);
+  const typing = $('input').value.trim() !== '';
+  if (cur && typing) return cur.name;
+  if (cur && cur.waiting && !cur.deferred && !isHeld(cur)) return cur.name;
+  for (const name of S.queue) {
+    const s = byName(name);
+    if (s && !isHeld(s)) return name;
+  }
+  // Everything waiting was skipped: like the lobby's releaseSnoozes, a
+  // dry queue lets the skips go rather than show nothing forever.
+  if (S.queue.length && [...S.skipped.keys()].length) {
+    for (const name of S.queue) {
+      const s = byName(name);
+      if (s && S.answered.get(s.name) !== s.episode) { S.skipped.clear(); return name; }
+    }
+  }
+  return null;
+}
+
+function forgetStale() {
+  for (const [name, ep] of [...S.skipped]) { const s = byName(name); if (!s || s.episode !== ep) S.skipped.delete(name); }
+  for (const [name, ep] of [...S.answered]) { const s = byName(name); if (!s || s.episode !== ep) S.answered.delete(name); }
+}
+
+// ---------- polling ----------
+let queueTimer = null, detailTimer = null, detailSeq = 0;
+
+async function pollQueue() {
+  clearTimeout(queueTimer);
+  if (!token) return;
+  try {
+    const q = await api('/api/remote/queue');
+    S.sessions = q.sessions; S.queue = q.queue; S.replies = q.replies || []; S.suggestOn = !!q.suggest;
+    S.online = true; S.setupError = '';
+    forgetStale();
+    const next = pickCurrent();
+    if (next !== S.current) { S.current = next; S.detail = null; S.screenTall = false; pollDetail(); }
+    render();
+  } catch (e) {
+    handleApiFailure(e);
+  }
+  queueTimer = setTimeout(pollQueue, document.hidden ? 15000 : 2000);
+}
+
+async function pollDetail() {
+  clearTimeout(detailTimer);
+  const name = S.current;
+  if (!name || !token) { S.detail = null; render(); return; }
+  const seq = ++detailSeq;
+  try {
+    const d = await api('/api/remote/session?name=' + encodeURIComponent(name));
+    if (seq !== detailSeq || name !== S.current) return;
+    S.detail = d;
+    renderDetail();
+  } catch (e) {
+    if (e.code === 'gone') { S.current = null; pollQueue(); return; }
+    handleApiFailure(e);
+  }
+  // Faster while Haiku is still drafting, so chips appear as they land.
+  const pending = S.detail && S.detail.suggestions && S.detail.suggestions.status === 'pending';
+  detailTimer = setTimeout(pollDetail, document.hidden ? 15000 : (pending ? 1000 : 2000));
+}
+
+function handleApiFailure(e) {
+  if (e.code === 'token') { token = ''; store.del(TOKEN_KEY); S.setupError = 'That token was refused.'; render(); return; }
+  if (e.code === 'setup') { S.setupError = e.message; token = token || ''; renderSetup(true); return; }
+  S.online = false; render();
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollQueue(); pollDetail(); } });
+
+// ---------- sending ----------
+let pendingSend = null;
+
+// Every one-tap send waits out a short undo window first: a mis-tap on a
+// phone is cheap to make and expensive to land in a session.
+function sendWithUndo(label, fn) {
+  if (pendingSend) { clearTimeout(pendingSend.timer); pendingSend = null; }
+  const delay = 1800;
+  const t = toast(label, { action: 'Undo', onAction: () => { clearTimeout(pendingSend.timer); pendingSend = null; }, duration: delay, bar: true });
+  pendingSend = { timer: setTimeout(async () => { pendingSend = null; t.close(); await fn(); }, delay) };
+}
+
+async function doSend(name, episode, text, opts = {}) {
+  try {
+    await api('/api/remote/send', { name, episode, text, replace: !!opts.replace, escape: !!opts.escape });
+    afterAnswer(name, episode);
+    if (opts.clearInput) { $('input').value = ''; autosize(); }
+    toast('Sent to ' + name, { duration: 1400 });
+  } catch (e) {
+    if (e.code === 'draft') {
+      confirmSheet('The prompt in ' + name + ' isn’t empty', 'There’s a draft in its input box, or a screen the remote doesn’t recognise. Replace the draft with your message?',
+        'Replace and send', () => doSend(name, episode, text, { ...opts, replace: true }));
+    } else if (e.code === 'dialog') {
+      confirmSheet('A question is open in ' + name, 'Dismiss it with Esc and send your message as a normal prompt instead?',
+        'Dismiss and send', () => doSend(name, episode, text, { ...opts, escape: true }));
+    } else if (e.code === 'moved') {
+      toast(e.message, { err: true }); pollQueue();
+    } else {
+      toast(e.message, { err: true });
+    }
+  }
+}
+
+async function doKey(name, episode, key, advance) {
+  try {
+    await api('/api/remote/key', { name, episode, key });
+    if (advance) afterAnswer(name, episode);
+    pollDetail();
+  } catch (e) {
+    toast(e.message, { err: true });
+    if (e.code === 'moved') pollQueue();
+  }
+}
+
+function afterAnswer(name, episode) {
+  S.answered.set(name, episode);
+  if (S.pinned === name) { /* stay pinned: you chose this one */ }
+  pollQueue();
+}
+
+// ---------- rendering ----------
+function stateClass(s) {
+  if (s.deferred) return 'defer';
+  if (s.waiting) return 'wait';
+  return 'busy';
+}
+function swatch(color) { const d = el('div', 'swatch'); if (color) d.style.background = color; return d; }
+function stateText(s) { return (s.state_emoji ? s.state_emoji + ' ' : '') + s.state; }
+
+function render() {
+  $('conn').classList.toggle('off', !S.online);
+  const waiting = S.queue.length;
+  const c = $('count');
+  c.textContent = S.online ? (waiting ? waiting + ' waiting' : 'all clear') : 'offline';
+  c.classList.toggle('hot', S.online && waiting > 0);
+  document.title = (waiting ? '(' + waiting + ') ' : '') + 'claudemux';
+  const cb = $('conductBtn');
+  cb.classList.toggle('on', S.conduct);
+  cb.setAttribute('aria-pressed', String(S.conduct));
+  cb.textContent = S.conduct ? '▶ Conduct' : '❚❚ Paused';
+  if (!token) { renderSetup(false); return; }
+  if (!$('sheet').classList.contains('hidden')) renderSheet();
+  if (!S.current) { renderEmpty(); return; }
+  renderDetail();
+}
+
+function renderSetup(isSetupErr) {
+  $('composer').classList.add('hidden');
+  const m = $('main'); m.textContent = '';
+  const box = el('div', 'setup');
+  box.append(el('h1', null, 'Connect your phone'));
+  if (isSetupErr) {
+    box.append(el('p', null, 'The lobby isn’t ready for remote control yet:'));
+    box.append(el('p', 'mono', S.setupError));
+    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ characters) in the lobby’s environment or in its api_key_file, then restart the lobby.'));
+    m.append(box); return;
+  }
+  box.append(el('p', null, 'Paste the CLAUDEMUX_REMOTE_TOKEN you set for the lobby. It is kept on this phone only.'));
+  if (S.setupError) box.append(el('p', null, S.setupError));
+  const input = el('input'); input.type = 'password'; input.placeholder = 'token'; input.autocomplete = 'current-password';
+  const go = el('button', 'cbtn go', 'Connect'); go.style.width = '100%';
+  go.onclick = () => { const v = input.value.trim(); if (!v) return; token = v; store.set(TOKEN_KEY, v); S.setupError = ''; pollQueue(); };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') go.click(); });
+  box.append(input, go);
+  m.append(box);
+}
+
+function renderEmpty() {
+  $('composer').classList.add('hidden');
+  setComposerHeight();
+  const m = $('main'); m.textContent = '';
+  const box = el('div', 'empty');
+  box.append(el('div', 'empty-big', S.online ? '✨' : '⚡'));
+  box.append(el('div', 'empty-title', S.online ? 'Nothing is waiting on you' : 'Lobby not reachable'));
+  const busy = S.sessions.filter(s => !s.waiting);
+  box.append(el('div', 'empty-sub', S.online
+    ? (S.sessions.length ? busy.length + ' session' + (busy.length === 1 ? '' : 's') + ' working. This screen moves to the next one that needs you.' : 'No sessions are running.')
+    : 'Retrying…'));
+  if (S.online && S.sessions.length) {
+    const list = el('div', 'mini-list');
+    S.sessions.forEach(s => list.append(sessionRow(s)));
+    box.append(list);
+  }
+  m.append(box);
+}
+
+function sessionRow(s) {
+  const r = el('button', 'row');
+  r.append(swatch(s.color));
+  const mid = el('div', 'row-main');
+  mid.append(el('div', 'row-name', (s.emoji ? s.emoji + ' ' : '') + s.name));
+  mid.append(el('div', 'row-sub', s.deferred && s.defer_reason ? '⏸ ' + s.defer_reason : (s.summary || s.topic || s.prompt || '')));
+  r.append(mid);
+  r.append(el('span', 'pill ' + stateClass(s), s.queue ? '#' + s.queue + ' ' + stateText(s) : stateText(s)));
+  r.onclick = () => openSession(s.name);
+  return r;
+}
+
+function openSession(name) {
+  S.pinned = name; S.current = name; S.detail = null; S.screenTall = false;
+  closeSheet(); render(); pollDetail();
+  window.scrollTo(0, 0);
+}
+
+function renderDetail() {
+  const s = byName(S.current);
+  if (!s) { renderEmpty(); return; }
+  const d = S.detail && S.detail.session.name === s.name ? S.detail : null;
+  const ds = d ? d.session : s;
+  const m = $('main');
+  const keepScroll = m.querySelector('.screen');
+  const prevScroll = keepScroll ? { top: keepScroll.scrollTop, atBottom: keepScroll.scrollTop + keepScroll.clientHeight >= keepScroll.scrollHeight - 8 } : null;
+  m.textContent = '';
+
+  const card = el('div', 'card');
+  const head = el('div', 'sess-head');
+  head.append(swatch(ds.color));
+  const t = el('div', 'sess-title');
+  t.append(el('div', 'sess-name', (ds.emoji ? ds.emoji + ' ' : '') + ds.name));
+  if (ds.description) t.append(el('div', 'sess-desc', ds.description));
+  head.append(t);
+  head.append(el('span', 'pill ' + stateClass(ds), stateText(ds)));
+  card.append(head);
+
+  const meta = el('div', 'meta');
+  if (ds.topic) meta.append(el('div', 'topic', ds.topic));
+  if (ds.summary) meta.append(el('div', 'summary', ds.summary));
+  const facts = el('div', 'facts');
+  if (ds.queue) facts.append(el('span', null, ds.queue + ' of ' + S.queue.length + ' in queue'));
+  if (ds.since) facts.append(el('span', null, ago(ds.since)));
+  if (ds.context_pct != null) facts.append(el('span', null, 'ctx ' + ds.context_pct + '%'));
+  if (ds.model) facts.append(el('span', null, ds.model));
+  if (ds.deferred) facts.append(el('span', null, '⏸ deferred' + (ds.defer_reason ? ': ' + ds.defer_reason : '')));
+  if (S.pinned) facts.append(el('span', null, '📌 opened from list'));
+  if (facts.childNodes.length) meta.append(facts);
+  card.append(meta);
+
+  m.append(card);
+
+  // Haiku suggestions.
+  if (ds.waiting) {
+    const lab = el('div', 'section-label');
+    lab.append(el('span', 'spark', '✦'), document.createTextNode(' Suggested'));
+    m.append(lab);
+    const box = el('div', 'suggestions');
+    const sg = d ? d.suggestions : { status: 'pending' };
+    if (!S.suggestOn || sg.status === 'off') {
+      box.append(el('div', 'note', 'Suggestions are off (no API key, or summary.enabled is false).'));
+    } else if (sg.status === 'pending') {
+      box.append(el('div', 'shimmer'), el('div', 'shimmer'));
+    } else if (sg.status === 'error' || !sg.items || !sg.items.length) {
+      box.append(el('div', 'note', 'Haiku had nothing to suggest for this one.'));
+    } else {
+      sg.items.forEach(it => box.append(suggestionChip(ds, it)));
+    }
+    m.append(box);
+  }
+
+  // Dialog: the raw keys, under Haiku's labelled picks.
+  if (ds.dialog) {
+    m.append(el('div', 'section-label', 'Answer'));
+    const keys = el('div', 'keys');
+    ['1', '2', '3', '4'].forEach(k => {
+      const b = el('button', 'key', k);
+      b.onclick = () => sendWithUndo('Pressing ' + k + ' in ' + ds.name, () => doKey(ds.name, ds.episode, k, true));
+      keys.append(b);
+    });
+    [['↑', 'Up'], ['↓', 'Down'], ['⏎', 'Enter'], ['Esc', 'Escape']].forEach(([label, k]) => {
+      const b = el('button', 'key small', label);
+      b.onclick = () => doKey(ds.name, ds.episode, k, k === 'Enter');
+      keys.append(b);
+    });
+    m.append(keys);
+  }
+
+  // Fixed replies: always available while waiting at a prompt.
+  if (ds.waiting && !ds.dialog && S.replies.length) {
+    m.append(el('div', 'section-label', 'Quick replies'));
+    const row = el('div', 'fixed-row');
+    S.replies.forEach(r => {
+      const b = el('button', 'fixed', r);
+      b.onclick = () => sendWithUndo('Sending “' + r + '” to ' + ds.name, () => doSend(ds.name, ds.episode, r));
+      attachLongPress(b, () => loadIntoComposer(r));
+      row.append(b);
+    });
+    m.append(row);
+  }
+
+  // The terminal itself goes last: the replies above are what you came
+  // for, and the screen is there to check them against.
+  if (d && d.screen) {
+    const sc = el('div', 'card screen-card');
+    const bar = el('div', 'screen-bar');
+    bar.append(el('span', null, 'Screen'));
+    const tog = el('button', 'screen-toggle', S.screenTall ? 'Less' : 'More');
+    tog.onclick = () => { S.screenTall = !S.screenTall; renderDetail(); };
+    bar.append(tog);
+    const pre = el('pre', 'screen mono' + (S.screenTall ? ' tall' : ''), d.screen);
+    sc.append(bar, pre);
+    m.append(sc);
+    requestAnimationFrame(() => {
+      if (!prevScroll || prevScroll.atBottom) pre.scrollTop = pre.scrollHeight;
+      else pre.scrollTop = prevScroll.top;
+    });
+  }
+
+  renderComposer(ds);
+}
+
+function suggestionChip(s, it) {
+  const wrap = el('div', 'sugg' + (it.key ? ' key-sugg' : ''));
+  const send = el('button', 'sugg-send');
+  if (it.key) {
+    send.append(el('span', 'keynum', it.key), el('span', 'sugg-label', it.label));
+    send.onclick = () => sendWithUndo('Choosing ' + it.key + ' · ' + it.label, () => doKey(s.name, s.episode, it.key, true));
+    wrap.append(send);
+  } else {
+    send.append(el('div', 'sugg-label', it.label));
+    if (it.text && it.text !== it.label) send.append(el('div', 'sugg-text', it.text));
+    send.onclick = () => sendWithUndo('Sending “' + it.label + '” to ' + s.name, () => doSend(s.name, s.episode, it.text));
+    const edit = el('button', 'sugg-edit', '✎');
+    edit.setAttribute('aria-label', 'Edit before sending');
+    edit.onclick = () => loadIntoComposer(it.text);
+    wrap.append(send, edit);
+  }
+  return wrap;
+}
+
+function loadIntoComposer(text) {
+  const i = $('input');
+  i.value = text; autosize();
+  i.focus();
+  try { i.setSelectionRange(text.length, text.length); } catch (_) {}
+}
+
+function attachLongPress(node, fn) {
+  let t = null, fired = false;
+  node.addEventListener('touchstart', () => { fired = false; t = setTimeout(() => { fired = true; fn(); }, 500); }, { passive: true });
+  ['touchend', 'touchmove', 'touchcancel'].forEach(ev => node.addEventListener(ev, () => clearTimeout(t), { passive: true }));
+  node.addEventListener('click', e => { if (fired) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+}
+
+function renderComposer(s) {
+  const c = $('composer');
+  c.classList.remove('hidden');
+  const tgt = $('target'); tgt.textContent = '';
+  tgt.append(document.createTextNode('to '), el('b', null, s.name));
+  if (s.dialog) tgt.append(document.createTextNode(' · question open: typing dismisses it'));
+  else if (!s.waiting) tgt.append(document.createTextNode(' · busy: your message queues behind the turn'));
+  $('skipBtn').classList.toggle('hidden', !!S.pinned || !s.waiting);
+  $('queueBtn').classList.toggle('hidden', !S.pinned);
+  $('deferBtn').textContent = s.deferred ? 'Undefer' : 'Defer';
+  $('escBtn').classList.toggle('hidden', s.waiting && !s.dialog);
+  $('escBtn').textContent = s.waiting ? 'Esc' : 'Interrupt';
+  setComposerHeight();
+}
+
+function setComposerHeight() {
+  const c = $('composer');
+  const h = c.classList.contains('hidden') ? 0 : c.offsetHeight;
+  document.documentElement.style.setProperty('--composer-h', h + 'px');
+}
+
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h' + String(Math.floor(s % 3600 / 60)).padStart(2, '0');
+}
+
+// ---------- list sheet ----------
+function renderSheet() {
+  const list = $('sheetList'); list.textContent = '';
+  const groups = [
+    ['Waiting', S.queue.map(byName).filter(Boolean)],
+    ['Working', S.sessions.filter(s => !s.waiting && !s.deferred && !s.closing)],
+    ['Deferred', S.sessions.filter(s => s.deferred)],
+    ['Closing', S.sessions.filter(s => s.closing && !s.deferred && !s.queue)],
+  ];
+  groups.forEach(([label, rows]) => {
+    if (!rows.length) return;
+    list.append(el('div', 'group-label', label + ' · ' + rows.length));
+    rows.forEach(s => list.append(sessionRow(s)));
+  });
+  if (!S.sessions.length) list.append(el('div', 'note', 'No sessions.'));
+}
+function closeSheet() { $('sheet').classList.add('hidden'); }
+$('listBtn').onclick = () => { renderSheet(); $('sheet').classList.remove('hidden'); };
+$('sheetClose').onclick = closeSheet;
+
+// ---------- toast & confirm ----------
+function toast(msg, o = {}) {
+  const host = $('toastHost'); host.textContent = '';
+  const t = el('div', 'toast' + (o.err ? ' err' : ''));
+  t.append(el('span', 'toast-msg', msg));
+  let closed = false;
+  const close = () => { if (!closed) { closed = true; t.remove(); } };
+  if (o.action) {
+    const b = el('button', null, o.action);
+    b.onclick = () => { o.onAction && o.onAction(); close(); };
+    t.append(b);
+  }
+  if (o.bar) {
+    const bar = el('div', 'toast-bar');
+    bar.style.width = '100%';
+    bar.style.transition = 'width ' + (o.duration || 1800) + 'ms linear';
+    t.append(bar);
+    requestAnimationFrame(() => requestAnimationFrame(() => { bar.style.width = '0%'; }));
+  }
+  host.append(t);
+  setTimeout(close, (o.duration || 3200) + (o.bar ? 200 : 0));
+  return { close };
+}
+
+function confirmSheet(title, body, goLabel, onGo) {
+  const host = $('confirmHost'); host.textContent = '';
+  const back = el('div', 'confirm-back');
+  const c = el('div', 'confirm');
+  c.append(el('div', 'confirm-title', title), el('div', 'confirm-body', body));
+  const btns = el('div', 'confirm-btns');
+  const go = el('button', 'cbtn go', goLabel);
+  const no = el('button', 'cbtn', 'Cancel');
+  go.onclick = () => { host.textContent = ''; onGo(); };
+  no.onclick = () => { host.textContent = ''; };
+  back.onclick = e => { if (e.target === back) host.textContent = ''; };
+  btns.append(go, no); c.append(btns); back.append(c); host.append(back);
+}
+
+// ---------- composer wiring ----------
+const input = $('input');
+function autosize() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  setComposerHeight();
+}
+input.addEventListener('input', autosize);
+// Return sends on the phone keyboard (enterkeyhint=send); a hardware
+// keyboard's Shift+Return makes a newline.
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendTyped(); }
+});
+$('sendBtn').onclick = sendTyped;
+// Keep focus in the textarea when the send button is tapped, so the
+// keyboard stays up for the next message.
+$('sendBtn').addEventListener('mousedown', e => e.preventDefault());
+$('sendBtn').addEventListener('touchstart', e => { e.preventDefault(); sendTyped(); }, { passive: false });
+
+function sendTyped() {
+  const s = byName(S.current);
+  const text = input.value.trim();
+  if (!s || !text) return;
+  // Typed text has already been read and edited: no undo window.
+  doSend(s.name, s.episode, text, { clearInput: true, escape: false });
+}
+
+$('skipBtn').onclick = () => {
+  const s = byName(S.current); if (!s) return;
+  S.skipped.set(s.name, s.episode);
+  input.value = ''; autosize();
+  pollQueue();
+};
+$('queueBtn').onclick = () => { S.pinned = null; S.current = null; pollQueue(); };
+$('escBtn').onclick = () => {
+  const s = byName(S.current); if (!s) return;
+  doKey(s.name, '', 'Escape', false);
+};
+$('deferBtn').onclick = async () => {
+  const s = byName(S.current); if (!s) return;
+  const on = !s.deferred;
+  const reason = on ? input.value.trim() : '';
+  try {
+    await api('/api/remote/defer', { name: s.name, on, reason });
+    if (on) { input.value = ''; autosize(); toast('Deferred ' + s.name + (reason ? ': ' + reason : ''), { duration: 1600 }); }
+    else toast('Undeferred ' + s.name, { duration: 1400 });
+    pollQueue();
+  } catch (e) { toast(e.message, { err: true }); }
+};
+$('conductBtn').onclick = () => { S.conduct = !S.conduct; if (S.conduct) S.pinned = null; pollQueue(); render(); };
+
+// ---------- keyboard / viewport (iOS) ----------
+// iOS Safari doesn't resize the layout viewport for the keyboard, so the
+// composer is lifted by however much of the window the visual viewport
+// lost. That keeps the input glued to the top of the keyboard.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const onVV = () => {
+    const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    document.documentElement.style.setProperty('--kb', kb + 'px');
+    document.body.classList.toggle('kb-open', kb > 80);
+    setComposerHeight();
+  };
+  vv.addEventListener('resize', onVV);
+  vv.addEventListener('scroll', onVV);
+  onVV();
+}
+
+render();
+pollQueue();
+})();
+</script>
+</body>
+</html>
