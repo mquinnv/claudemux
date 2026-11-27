@@ -39,6 +39,11 @@
   #headline-meta.stale { color: var(--wait); }
   .gauges { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
   .gauge { flex: 1 1 200px; }
+  /* Multi-account: one row of gauges per account, led by its badge. */
+  .acct-row { flex: 1 1 100%; display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; }
+  .acct { font-size: 12px; font-weight: 600; }
+  .acct-row > .acct { flex: 0 0 7em; overflow: hidden; text-overflow: ellipsis; }
+  .fleet .acct { margin-left: 6px; }
   .gauge .label { font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; }
   .bar { height: 6px; background: var(--bar); border-radius: 3px; overflow: hidden; margin-top: 3px; }
   .bar > div { height: 100%; background: var(--fill); }
@@ -201,6 +206,12 @@
       var pr = el(s.pr_url ? 'a' : 'span', 'pr', s.pr);
       if (s.pr_url) { pr.href = s.pr_url; pr.target = '_blank'; pr.rel = 'noopener'; }
       c.appendChild(pr);
+    }
+    // The account badge, sent only when several accounts are configured.
+    if (s.account) {
+      var ac = el('span', 'acct', s.account);
+      if (s.account_color) ac.style.color = s.account_color;
+      c.appendChild(ac);
     }
     // Family members indent by depth; the web draws no tree glyphs.
     if (s.depth) c.style.paddingLeft = 'calc(8px + 1.1em * ' + s.depth + ')';
@@ -377,10 +388,26 @@
     meta.className = (headlineStale || pollStale) ? 'stale' : '';
 
     var gaugesFrag = document.createDocumentFragment();
-    if (v.budget) {
-      gaugesFrag.appendChild(gauge('5h', v.budget.five_hour, now));
-      gaugesFrag.appendChild(gauge('week', v.budget.weekly, now));
-      (v.budget.models || []).forEach(function (m) { gaugesFrag.appendChild(gauge(m.name, m, now)); });
+    function budgetGauges(parent, b) {
+      parent.appendChild(gauge('5h', b.five_hour, now));
+      parent.appendChild(gauge('week', b.weekly, now));
+      (b.models || []).forEach(function (m) { parent.appendChild(gauge(m.name, m, now)); });
+    }
+    if (v.accounts && v.accounts.length) {
+      // Several accounts: a row per account with a live session, as the
+      // lobby draws them. The top-level budget is the default account's,
+      // kept for older pages, and would repeat the first row here.
+      v.accounts.forEach(function (a) {
+        if (!a.five_hour) return;
+        var row = el('div', 'acct-row');
+        var badge = el('span', 'acct', a.name);
+        if (a.color) badge.style.color = a.color;
+        row.appendChild(badge);
+        budgetGauges(row, a);
+        gaugesFrag.appendChild(row);
+      });
+    } else if (v.budget) {
+      budgetGauges(gaugesFrag, v.budget);
     }
     // Built off-DOM and swapped in with one replaceChildren call each, so a
     // scrolled viewer never sees the list empty out and refill on a poll —

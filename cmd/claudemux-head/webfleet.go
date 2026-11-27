@@ -30,6 +30,7 @@ type webFleet struct {
 	rl       RateLimits
 	rlOK     bool
 	windows  []ModelWindow
+	accounts []webAccountFacts
 	taken    time.Time
 	headline webHeadline
 
@@ -42,8 +43,20 @@ type webFleet struct {
 
 func newWebFleet() *webFleet { return &webFleet{title: defaultWebTitle} }
 
-// publish replaces the fleet facts. Only the lobby's Update calls it.
-func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time) {
+// webAccountFacts is one account's meter row for the page (multi mode only):
+// the account, its badge colour as "#rrggbb", and its own budget facts.
+type webAccountFacts struct {
+	Name    string
+	Color   string
+	RL      RateLimits
+	RLOK    bool
+	Windows []ModelWindow
+}
+
+// publish replaces the fleet facts. Only the lobby's Update calls it. rl,
+// rlOK and windows are the default account's, the page's legacy budget;
+// accounts is the per-account rows, none in single mode.
+func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time, accounts ...webAccountFacts) {
 	// Filtered here, before anything reads it, so hidden sessions reach
 	// neither the page, its counts, nor the headline model's prompt. snap is
 	// a copy; reassigning its slice leaves the lobby's own untouched.
@@ -56,6 +69,11 @@ func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []
 	w.rl = rl
 	w.rlOK = rlOK
 	w.windows = append([]ModelWindow(nil), windows...)
+	w.accounts = nil
+	for _, a := range accounts {
+		a.Windows = append([]ModelWindow(nil), a.Windows...)
+		w.accounts = append(w.accounts, a)
+	}
 	w.taken = taken
 }
 
@@ -87,7 +105,7 @@ func (w *webFleet) rawSessions() []swSession {
 func (w *webFleet) view() webFleetView {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return buildWebFleetView(w.snap, w.rl, w.rlOK, w.windows, w.taken, w.headline)
+	return buildWebFleetView(w.snap, w.rl, w.rlOK, w.windows, w.taken, w.headline, w.accounts...)
 }
 
 // The wire shape of GET /api/fleet. Times are RFC 3339 strings, "" (and
@@ -97,7 +115,19 @@ type webFleetView struct {
 	Headline *webHeadlineView `json:"headline,omitempty"`
 	Counts   webCounts        `json:"counts"`
 	Budget   *webBudget       `json:"budget,omitempty"`
+	// Accounts is one meter row per shown account, present only when more
+	// than one account is configured. Budget stays alongside it (the default
+	// account's), so a page that predates accounts keeps working.
+	Accounts []webAccountView `json:"accounts,omitempty"`
 	Sessions []webSession     `json:"sessions"`
+}
+
+// webAccountView is one account's row: its badge and, when its rate-limit
+// cache is readable, the same budget fields as the legacy top-level budget.
+type webAccountView struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+	*webBudget
 }
 
 type webHeadlineView struct {
@@ -147,6 +177,10 @@ type webSession struct {
 	ContextPct  *int   `json:"context_pct,omitempty"`
 	CtxColor    string `json:"context_color,omitempty"`
 	Model       string `json:"model,omitempty"`
+	// Account / AccountColor are the session's account badge, omitted in
+	// single mode and for a session that publishes no known account.
+	Account      string `json:"account,omitempty"`
+	AccountColor string `json:"account_color,omitempty"`
 	// PR is the session's active pull request as "#N" and PRURL its GitHub
 	// page, both omitted when the session has linked none.
 	PR          string `json:"pr,omitempty"`
@@ -211,8 +245,21 @@ func webStateWord(raw string) string {
 	return raw
 }
 
-func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time, h webHeadline) webFleetView {
+func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time, h webHeadline, accounts ...webAccountFacts) webFleetView {
 	v := webFleetView{TakenAt: webTime(taken), Sessions: []webSession{}}
+	now := taken
+	if now.IsZero() {
+		now = time.Now()
+	}
+	acctColor := map[string]string{}
+	for _, a := range accounts {
+		acctColor[a.Name] = a.Color
+		av := webAccountView{Name: a.Name, Color: a.Color}
+		if a.RLOK {
+			av.webBudget = webBudgetFor(a.RL, a.Windows, now)
+		}
+		v.Accounts = append(v.Accounts, av)
+	}
 	for _, s := range snap.Sessions {
 		ws := webSession{
 			Name:        s.Name,
@@ -241,6 +288,9 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 		if isHex6(s.Color) {
 			ws.Color = "#" + s.Color
 		}
+		if c, ok := acctColor[s.Account]; ok && s.Account != "" {
+			ws.Account, ws.AccountColor = s.Account, c
+		}
 		// The lobby row's action symbol (bell, brain, wrench...), unpadded.
 		if k, ok := publishedStateKind(s.State); ok {
 			ws.StateEmoji = strings.TrimSpace(stateEmoji(k))
@@ -268,21 +318,7 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 		}
 	}
 	if rlOK {
-		now := taken
-		if now.IsZero() {
-			now = time.Now()
-		}
-		b := &webBudget{
-			FiveHour: webWindow{UsedPct: rl.FiveHour.UsedPercent, ResetsAt: webTime(rl.FiveHour.ResetsAt),
-				Color: paceColor(rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt, fiveHourWindow, now)},
-			Weekly: webWindow{UsedPct: rl.SevenDay.UsedPercent, ResetsAt: webTime(rl.SevenDay.ResetsAt),
-				Color: paceColor(rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt, weekWindow, now)},
-		}
-		for _, mw := range windows {
-			b.Models = append(b.Models, webModelWindow{Name: mw.Name, UsedPct: mw.UsedPercent, ResetsAt: webTime(mw.ResetsAt),
-				Color: paceColor(mw.UsedPercent, mw.ResetsAt, weekWindow, now)})
-		}
-		v.Budget = b
+		v.Budget = webBudgetFor(rl, windows, now)
 	}
 	if h.Text != "" {
 		v.Headline = &webHeadlineView{
@@ -292,6 +328,21 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 		}
 	}
 	return v
+}
+
+// webBudgetFor is one account's budget facts as the page draws them.
+func webBudgetFor(rl RateLimits, windows []ModelWindow, now time.Time) *webBudget {
+	b := &webBudget{
+		FiveHour: webWindow{UsedPct: rl.FiveHour.UsedPercent, ResetsAt: webTime(rl.FiveHour.ResetsAt),
+			Color: paceColor(rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt, fiveHourWindow, now)},
+		Weekly: webWindow{UsedPct: rl.SevenDay.UsedPercent, ResetsAt: webTime(rl.SevenDay.ResetsAt),
+			Color: paceColor(rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt, weekWindow, now)},
+	}
+	for _, mw := range windows {
+		b.Models = append(b.Models, webModelWindow{Name: mw.Name, UsedPct: mw.UsedPercent, ResetsAt: webTime(mw.ResetsAt),
+			Color: paceColor(mw.UsedPercent, mw.ResetsAt, weekWindow, now)})
+	}
+	return b
 }
 
 // webFingerprint hashes what the headline is written from — the facts that

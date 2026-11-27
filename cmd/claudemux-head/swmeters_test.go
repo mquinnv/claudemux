@@ -16,14 +16,16 @@ func swRateModel(now time.Time, width int) swModel {
 	return swModel{
 		width:  width,
 		height: 40,
-		rateOK: true,
-		rateLimits: RateLimits{
-			FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
-			SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(3 * 24 * time.Hour)},
-		},
-		pctSamples: []pctSample{
-			{at: now.Add(-10 * time.Minute), pct: 10},
-			{at: now, pct: 20},
+		swAccountMeters: swAccountMeters{
+			rateOK: true,
+			rateLimits: RateLimits{
+				FiveHour: Window{UsedPercent: 20, ResetsAt: now.Add(5 * time.Hour)},
+				SevenDay: Window{UsedPercent: 30, ResetsAt: now.Add(3 * 24 * time.Hour)},
+			},
+			pctSamples: []pctSample{
+				{at: now.Add(-10 * time.Minute), pct: 10},
+				{at: now, pct: 20},
+			},
 		},
 	}
 }
@@ -116,7 +118,7 @@ func TestSwUpdateStoresRateLimits(t *testing.T) {
 	}
 	m := newSwModel("%1")
 
-	next, _ := m.Update(swSnapshotMsg{at: now, rl: rl})
+	next, _ := m.Update(swSnapshotMsg{at: now, rl: map[string]RateLimits{implicitAccount: rl}})
 	m = next.(swModel)
 	if !m.rateOK || m.rateLimits.FiveHour.UsedPercent != 42 {
 		t.Fatalf("after good poll: rateOK=%v fiveHour=%d, want true/42", m.rateOK, m.rateLimits.FiveHour.UsedPercent)
@@ -126,7 +128,7 @@ func TestSwUpdateStoresRateLimits(t *testing.T) {
 	}
 
 	// Same percentage again: no duplicate sample.
-	next, _ = m.Update(swSnapshotMsg{at: now.Add(time.Second), rl: rl})
+	next, _ = m.Update(swSnapshotMsg{at: now.Add(time.Second), rl: map[string]RateLimits{implicitAccount: rl}})
 	m = next.(swModel)
 	if len(m.pctSamples) != 1 {
 		t.Fatalf("unchanged pct grew samples: %+v", m.pctSamples)
@@ -134,14 +136,14 @@ func TestSwUpdateStoresRateLimits(t *testing.T) {
 
 	// tmux failed but the cache read worked: meters still update.
 	rl.FiveHour.UsedPercent = 50
-	next, _ = m.Update(swSnapshotMsg{at: now.Add(2 * time.Second), rl: rl, err: errors.New("tmux wedged")})
+	next, _ = m.Update(swSnapshotMsg{at: now.Add(2 * time.Second), rl: map[string]RateLimits{implicitAccount: rl}, err: errors.New("tmux wedged")})
 	m = next.(swModel)
 	if m.rateLimits.FiveHour.UsedPercent != 50 || len(m.pctSamples) != 2 {
 		t.Fatalf("tmux-error poll dropped rate limits: fiveHour=%d samples=%+v", m.rateLimits.FiveHour.UsedPercent, m.pctSamples)
 	}
 
 	// Cache read failed: meters hide, samples stay for the next good read.
-	next, _ = m.Update(swSnapshotMsg{at: now.Add(3 * time.Second), rlErr: errors.New("no such file")})
+	next, _ = m.Update(swSnapshotMsg{at: now.Add(3 * time.Second), rlErr: map[string]error{implicitAccount: errors.New("no such file")}})
 	m = next.(swModel)
 	if m.rateOK {
 		t.Fatal("rateOK still true after a failed cache read")

@@ -249,14 +249,14 @@ type model struct {
 	// Re-resolved on every tick while it holds the fallback — see
 	// refreshedRateLimitsPath.
 	rateLimitsPath  string
-	claudeConfigDir string      // CLAUDE_CONFIG_DIR of this pane's account; "" = ~/.claude
-	usageCachePath  string      // ~/.claude/claudemux/usage.json or override
+	claudeConfigDir string // CLAUDE_CONFIG_DIR of this pane's account; "" = ~/.claude
+	usageCachePath  string // ~/.claude/claudemux/usage.json or override
 	// account / accountColor label the meters line with this head's Claude
 	// account. Both are empty unless more than one account is configured, so
 	// single mode renders exactly as before.
 	account      string
 	accountColor string
-	pctSamples      []pctSample // 5h-window snapshots over time, for burn-rate
+	pctSamples   []pctSample // 5h-window snapshots over time, for burn-rate
 
 	// Latest snapshot
 	state       State
@@ -2807,6 +2807,16 @@ func renderStateLine(m model, now time.Time) string {
 	return statusbarStyle.Width(m.width).Render(clipLine(" "+left+sep+chips+" ", m.width))
 }
 
+// accountBadge is the account name in its colour plus one space: the badge
+// the head's meters line and the lobby's meter rows and session rows share,
+// so all of them look alike. "" for no account (single-account mode).
+func accountBadge(name, hex string) string {
+	if name == "" {
+		return ""
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Render(name) + " "
+}
+
 // renderMetersLine renders the second line of the new split layout: the ctx
 // bar followed by the same right-group budget gauges renderStatusbar packs
 // on the right (5h, wk, per-model rows, eta), here joined left-to-right with
@@ -2815,9 +2825,8 @@ func renderStateLine(m model, now time.Time) string {
 // Surviving bars widen to consume the leftover columns.
 func renderMetersLine(m model, now time.Time) string {
 	avail := max(1, m.width-2)
-	badge := ""
-	if m.account != "" {
-		badge = lipgloss.NewStyle().Foreground(lipgloss.Color(m.accountColor)).Render(m.account) + " "
+	badge := accountBadge(m.account, m.accountColor)
+	if badge != "" {
 		avail = max(1, avail-lipgloss.Width(badge))
 	}
 	build := func(barW int) gaugeSet {

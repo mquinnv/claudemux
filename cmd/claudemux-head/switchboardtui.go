@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -150,10 +151,11 @@ type swSnapshotMsg struct {
 	err  error
 	// Account rate limits ride along on every poll, tmux error or not: the
 	// meters are about the account, not the fleet, so a wedged tmux should
-	// not blank them.
+	// not blank them. Keyed by account name; each account read lands in
+	// exactly one of the two maps.
 	at    time.Time
-	rl    RateLimits
-	rlErr error
+	rl    map[string]RateLimits
+	rlErr map[string]error
 	// conductReq is the raw @claudemux_conduct_request value — a head's space
 	// key asking for a mode flip. Like the meters it survives a fleet-listing
 	// error: standby is a local flag, and a wedged tmux is no reason to drop a
@@ -297,6 +299,31 @@ func swModeBadge(standby bool, phase swPhase) string {
 	return swBadgeConductStyle.Render(" CONDUCTING ")
 }
 
+// swAccountMeters is one account's budget meters, same source and shape as
+// the head's: the rate-limits cache our `statusline` subcommand writes (or
+// abtop's older file, while ours does not exist yet) re-read on every poll,
+// plus the recent five-hour samples that feed the "empty in X" burn-rate ETA.
+// rateLimitsPath is re-resolved on every tick while it holds that fallback —
+// see refreshedRateLimitsPath.
+//
+// usageCachePath, modelWindows and usageQuietUntil mirror the head's: the
+// per-model weekly rows come from the account's usage cache, refreshed by
+// whichever pane's loop finds it stale first. Empty rows whenever that path
+// is unavailable or broken, which must never affect the gauges above.
+type swAccountMeters struct {
+	rateLimitsPath  string
+	rateLimits      RateLimits
+	rateOK          bool
+	pctSamples      []pctSample
+	claudeConfigDir string
+	usageCachePath  string
+	modelWindows    []ModelWindow
+	credits         PrepaidCredits
+	creditsLoading  bool
+	creditCheckedAt time.Time
+	usageQuietUntil time.Time
+}
+
 type swModel struct {
 	selfPane string
 	snap     swSnapshot
@@ -309,29 +336,18 @@ type swModel struct {
 	// it shares the tmux error row and yields to a live tmux error.
 	accountWarn string
 	accountDirs map[string]string
-	// Account budget meters, same source and shape as the head's: the
-	// rate-limits cache our `statusline` subcommand writes (or abtop's older
-	// file, while ours does not exist yet) re-read on every poll, plus the
-	// recent five-hour samples that feed the "empty in X" burn-rate ETA.
-	// rateLimitsPath is re-resolved on every tick while it holds that
-	// fallback — see refreshedRateLimitsPath.
-	rateLimitsPath string
-	rateLimits     RateLimits
-	rateOK         bool
-	pctSamples     []pctSample
-	// usageCachePath, modelWindows and usageQuietUntil mirror the head's:
-	// the per-model weekly rows come from the shared usage cache, refreshed by
-	// whichever pane's loop finds it stale first. Empty rows whenever that
-	// path is unavailable or broken, which must never affect the gauges above.
-	claudeConfigDir string
-	usageCachePath  string
-	modelWindows    []ModelWindow
-	credits         PrepaidCredits
-	creditsLoading  bool
-	creditCheckedAt time.Time
-	helpVisible     bool
-	helpOffset      int
-	usageQuietUntil time.Time
+	// claude is the `claude:` block, read once at startup: which accounts
+	// get meter rows and badges. The zero value is the implicit single
+	// account.
+	claude ClaudeConfig
+	// The embedded meters are the default account's — the only account in
+	// single mode, so a lobby without a `claude:` block keeps exactly the
+	// state it always had. others holds every other configured account's,
+	// keyed by name; nil in single mode.
+	swAccountMeters
+	others      map[string]*swAccountMeters
+	helpVisible bool
+	helpOffset  int
 	// conductReq is the last head-requested toggle this lobby applied, kept as
 	// the already-applied marker: the head leaves its request published, so
 	// every poll re-reads the same press and only an unseen value may toggle.
@@ -446,18 +462,263 @@ type swModel struct {
 }
 
 func newSwModel(selfPane string) swModel {
-	acct, acctDir := lobbyAccount()
-	multi := loadClaudeConfig().Multi()
-	m := swModel{
-		selfPane:        selfPane,
-		cond:            newConductor(),
-		rateLimitsPath:  sessionRateLimitsPath(acct, multi),
-		usageCachePath:  usageCachePathFor(acct, multi),
-		claudeConfigDir: acctDir,
-	}
+	m := newSwModelFor(selfPane, loadClaudeConfig())
 	m.launchBin, m.launchBinOK = launchBinStamp()
 	m.restoreArchive = archiveRestoreOffer
 	return m
+}
+
+// newSwModelFor builds the lobby's model for a `claude:` block: the default
+// account's meters embedded (the lobby runs outside any session, so its env
+// names no account and the default stands in), and in multi mode one more
+// set per other account, each on its own caches and config dir.
+func newSwModelFor(selfPane string, cc ClaudeConfig) swModel {
+	multi := cc.Multi()
+	meters := func(acct string) swAccountMeters {
+		return swAccountMeters{
+			rateLimitsPath:  sessionRateLimitsPath(acct, multi),
+			usageCachePath:  usageCachePathFor(acct, multi),
+			claudeConfigDir: accountDirFor(cc, acct),
+		}
+	}
+	m := swModel{
+		selfPane:        selfPane,
+		cond:            newConductor(),
+		claude:          cc,
+		swAccountMeters: meters(cc.Default()),
+	}
+	if multi {
+		m.others = map[string]*swAccountMeters{}
+		for _, n := range cc.Names() {
+			if n != cc.Default() {
+				a := meters(n)
+				m.others[n] = &a
+			}
+		}
+	}
+	return m
+}
+
+// swAcctMsg tags a usage or credit message with the non-default account it
+// belongs to. The default account's loops keep their plain messages, so a
+// single-account lobby runs exactly the messages it always did.
+type swAcctMsg struct {
+	account string
+	msg     tea.Msg
+}
+
+// swTagCmd wraps cmd so its message arrives as account's swAcctMsg.
+func swTagCmd(account string, cmd tea.Cmd) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	return func() tea.Msg { return swAcctMsg{account: account, msg: cmd()} }
+}
+
+// meters is account's meter state: the embedded set for the default account,
+// others' entry for any other, nil for a name the config does not know.
+func (m *swModel) meters(account string) *swAccountMeters {
+	if account == m.claude.Default() {
+		return &m.swAccountMeters
+	}
+	return m.others[account]
+}
+
+// accountOrder is every configured account, default first, then the rest
+// sorted — the order meter rows are drawn in.
+func (m swModel) accountOrder() []string {
+	return swDefaultFirst(m.claude, m.claude.Names())
+}
+
+// swDefaultFirst returns names (sorted) with cfg's default account moved to
+// the front when present.
+func swDefaultFirst(cfg ClaudeConfig, names []string) []string {
+	def := cfg.Default()
+	out := make([]string, 0, len(names))
+	if slices.Contains(names, def) {
+		out = append(out, def)
+	}
+	for _, n := range names {
+		if n != def {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// swMeterAccounts is the accounts that get a meter row: those with at least
+// one live session, default first, then the rest sorted. A session that
+// publishes no account (a head older than @claudemux_account) counts as the
+// default account's; a name the config does not know counts as nobody's.
+// When nothing is live the default account's row stands in, so a fresh lobby
+// is never meterless. Single mode is always just the one account.
+func swMeterAccounts(cfg ClaudeConfig, snap swSnapshot) []string {
+	if !cfg.Multi() {
+		return []string{cfg.Default()}
+	}
+	live := map[string]bool{}
+	for _, s := range snap.Sessions {
+		a := s.Account
+		if a == "" {
+			a = cfg.Default()
+		}
+		if _, ok := cfg.Accounts[a]; ok {
+			live[a] = true
+		}
+	}
+	if len(live) == 0 {
+		return []string{cfg.Default()}
+	}
+	var names []string
+	for _, n := range cfg.Names() {
+		if live[n] {
+			names = append(names, n)
+		}
+	}
+	return swDefaultFirst(cfg, names)
+}
+
+// meterShown reports whether account has a meter row on screen right now.
+func (m swModel) meterShown(account string) bool {
+	return slices.Contains(swMeterAccounts(m.claude, m.snap), account)
+}
+
+// meterLineAccounts is the meter rows View draws: the shown accounts whose
+// rate-limit cache read cleanly.
+func (m swModel) meterLineAccounts() []string {
+	var out []string
+	for _, n := range swMeterAccounts(m.claude, m.snap) {
+		if a := m.meters(n); a != nil && a.rateOK {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// meterRows is how many header lines the meters take.
+func (m swModel) meterRows() int { return len(m.meterLineAccounts()) }
+
+// usageAllowed is the spawn gate for account's usage loop: its own gauges
+// render, it is outside its quiet window, and its row is on screen — a
+// hidden account never pays for a Claude Code spawn.
+func (m swModel) usageAllowed(account string, now time.Time) bool {
+	a := m.meters(account)
+	return a != nil && a.usageMaySpawn(now) && m.meterShown(account)
+}
+
+// rateLimitsPaths is every account's rate-limits cache, for swPollCmd.
+func (m swModel) rateLimitsPaths() map[string]string {
+	paths := map[string]string{m.claude.Default(): m.rateLimitsPath}
+	for n, a := range m.others {
+		paths[n] = a.rateLimitsPath
+	}
+	return paths
+}
+
+// applyRateLimits takes account's rate-limit read from a poll. Sample
+// bookkeeping mirrors the head's dataMsg handling — record a sample only
+// when the percentage moves, trim to the last hour plus the baseline
+// (trimSamples). An account the poll did not read is left as it was.
+func (a *swAccountMeters) applyRateLimits(msg swSnapshotMsg, account string) {
+	if msg.rlErr[account] != nil {
+		a.rateOK = false
+		return
+	}
+	rl, ok := msg.rl[account]
+	if !ok {
+		return
+	}
+	a.rateLimits = rl
+	a.rateOK = true
+	if used := rl.FiveHour.usedExact(); len(a.pctSamples) == 0 || a.pctSamples[len(a.pctSamples)-1].pct != used {
+		a.pctSamples = append(a.pctSamples, pctSample{at: msg.at, pct: used})
+	}
+	a.pctSamples = trimSamples(a.pctSamples, msg.at.Add(-1*time.Hour))
+}
+
+func (a *swAccountMeters) applyCredits(msg creditMsg) {
+	a.credits = mergeCreditResult(a.credits, msg.credits, time.Now())
+	a.creditsLoading = false
+	a.creditCheckedAt = creditReadStamp(msg.credits, time.Now())
+}
+
+// applyUsage takes one usage loop answer for the account.
+func (a *swAccountMeters) applyUsage(msg usageMsg) {
+	if msg.err != nil {
+		// Keep whatever rows we already have and try again next tick; the
+		// lobby says nothing about a failed usage pull.
+		return
+	}
+	if !usageAnswered(msg.usage) {
+		// A lost single-flight race with an empty cache on disk — see
+		// usageAnswered. Keep the rows we have rather than blanking them.
+		return
+	}
+	if !msg.usage.Fetched {
+		// A cache read — take the rows and leave the spawn window alone.
+		// See the head's usageMsg case for why that split matters.
+		a.modelWindows = msg.usage.Models
+		return
+	}
+	if !msg.usage.Available {
+		// This account's own credentials, not the machine's. Quiet the
+		// spawns, keep the rows, keep ticking.
+		a.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+		return
+	}
+	a.modelWindows = msg.usage.Models
+	if len(msg.usage.Models) == 0 {
+		a.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
+	} else {
+		a.usageQuietUntil = time.Time{}
+	}
+}
+
+// creditRefreshCmd starts a prepaid-credit read for every shown account that
+// needs one (startCreditRefresh's gates), each through its own config dir.
+// Hidden accounts are never read. The snapshot judged is the poll's own when
+// it listed the fleet, else the last good one.
+func (m *swModel) creditRefreshCmd(msg swSnapshotMsg) tea.Cmd {
+	snap := m.snap
+	if msg.err == nil {
+		snap = msg.snap
+	}
+	var cmds []tea.Cmd
+	for _, acct := range swMeterAccounts(m.claude, snap) {
+		a := m.meters(acct)
+		if a == nil {
+			continue
+		}
+		cmd := startCreditRefresh(a.rateOK, a.rateLimits, a.modelWindows, &a.creditsLoading, a.creditCheckedAt, msg.at, a.claudeConfigDir)
+		if acct != m.claude.Default() {
+			cmd = swTagCmd(acct, cmd)
+		}
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	switch len(cmds) {
+	case 0:
+		return nil
+	case 1:
+		return cmds[0]
+	}
+	return tea.Batch(cmds...)
+}
+
+// webAccounts is the per-account meter rows for the web page: the same rows
+// the lobby draws, nil in single mode so the page keeps its legacy shape.
+func (m swModel) webAccounts() []webAccountFacts {
+	if !m.claude.Multi() {
+		return nil
+	}
+	var out []webAccountFacts
+	for _, n := range m.meterLineAccounts() {
+		a := m.meters(n)
+		out = append(out, webAccountFacts{Name: n, Color: accountColor(m.claude, n),
+			RL: a.rateLimits, RLOK: a.rateOK, Windows: a.modelWindows})
+	}
+	return out
 }
 
 // shouldAutoRestart reports whether this poll may re-exec into a rebuilt
@@ -510,14 +771,22 @@ func (m *swModel) toggleStandby() {
 // out of swPollCmd so a tmux listing failure can never stall the per-model
 // rows and a usage spawn can never delay a fleet poll.
 func (m swModel) Init() tea.Cmd {
-	return tea.Batch(accountCheckCmd(m.accountDirs), swPollCmd(m.selfPane, m.rateLimitsPath),
-		usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageMaySpawn(time.Now())))
+	now := time.Now()
+	cmds := []tea.Cmd{accountCheckCmd(m.accountDirs), swPollCmd(m.selfPane, m.rateLimitsPaths()),
+		usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageAllowed(m.claude.Default(), now))}
+	for _, n := range m.accountOrder() {
+		if a := m.others[n]; a != nil {
+			cmds = append(cmds, swTagCmd(n, usageCmd(a.usageCachePath, a.claudeConfigDir, m.usageAllowed(n, now))))
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 // usageMaySpawn is the lobby's half of the head's gate: it may spawn a Claude
-// Code only when its own gauges render and it is not inside a quiet window.
-func (m swModel) usageMaySpawn(now time.Time) bool {
-	return usageMaySpawn(m.rateOK, m.usageQuietUntil, now)
+// Code only when the account's own gauges render and it is not inside a quiet
+// window. usageAllowed adds the lobby's own condition, a visible row.
+func (a swAccountMeters) usageMaySpawn(now time.Time) bool {
+	return usageMaySpawn(a.rateOK, a.usageQuietUntil, now)
 }
 
 // selectedPane returns the claude pane of the selected session — "" when there
@@ -550,18 +819,26 @@ func (m *swModel) previewCmd() tea.Cmd {
 
 // swPollCmd runs the three tmux listings off the update loop. Any failure
 // returns the error instead of a snapshot — the model keeps its previous
-// data on screen and simply tries again next tick. The rate-limits cache is
-// read up front so every message carries it, even the tmux-error ones.
-func swPollCmd(selfPane, rlPath string) tea.Cmd {
+// data on screen and simply tries again next tick. Every account's
+// rate-limits cache is read up front so every message carries them, even the
+// tmux-error ones.
+func swPollCmd(selfPane string, rlPaths map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		rl, rlErr := readRateLimits(rlPath)
+		rls, rlErrs := map[string]RateLimits{}, map[string]error{}
+		for acct, path := range rlPaths {
+			if rl, err := readRateLimits(path); err != nil {
+				rlErrs[acct] = err
+			} else {
+				rls[acct] = rl
+			}
+		}
 		// Read ahead of the listings so a head's toggle still lands on a poll
 		// whose fleet listing fails — see swSnapshotMsg.conductReq.
-		msg := swSnapshotMsg{at: time.Now(), rl: rl, rlErr: rlErr, conductReq: readConductRequestOption(ctx)}
+		msg := swSnapshotMsg{at: time.Now(), rl: rls, rlErr: rlErrs, conductReq: readConductRequestOption(ctx)}
 		sessOut, err := swTmux(ctx, "list-sessions", "-F",
-			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}	#{"+infoPROption+"}")
+			"#{session_name}	#{"+statePublishOption+"}	#{"+statePublishSinceOption+"}	#{"+infoContextOption+"}	#{"+infoSummaryOption+"}	#{"+infoPromptOption+"}	#{"+infoModelOption+"}	#{"+infoColorOption+"}	#{"+deferOption+"}	#{"+deferReasonOption+"}	#{"+infoEmojiOption+"}	#{"+stayMarkerOption+"}	#{"+infoDescriptionOption+"}	#{"+closingOption+"}	#{session_created}	#{"+parentOption+"}	#{"+parentCreatedOption+"}	#{"+infoPROption+"}	#{"+accountOption+"}")
 		if err != nil {
 			msg.err = err
 			return msg
@@ -761,22 +1038,16 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-resolved every tick while the lobby is still on abtop's file, for
 		// the reason the head does it — see refreshedRateLimitsPath.
 		m.rateLimitsPath = refreshedRateLimitsPath(m.rateLimitsPath)
-		return m, swPollCmd(m.selfPane, m.rateLimitsPath)
+		return m, swPollCmd(m.selfPane, m.rateLimitsPaths())
 	case swSnapshotMsg:
 		// Rate limits first, before the tmux-error early return: the meters
-		// track the account and stay fresh even when tmux is misbehaving.
-		// Sample bookkeeping mirrors the head's dataMsg handling — record a
-		// sample only when the percentage moves, trim to the last hour plus
-		// the baseline (trimSamples).
-		if msg.rlErr == nil {
-			m.rateLimits = msg.rl
-			m.rateOK = true
-			if used := msg.rl.FiveHour.usedExact(); len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != used {
-				m.pctSamples = append(m.pctSamples, pctSample{at: msg.at, pct: used})
+		// track the accounts and stay fresh even when tmux is misbehaving.
+		// Each account separately, so one account's unreadable cache blanks
+		// only its own row (applyRateLimits).
+		for _, acct := range m.accountOrder() {
+			if a := m.meters(acct); a != nil {
+				a.applyRateLimits(msg, acct)
 			}
-			m.pctSamples = trimSamples(m.pctSamples, msg.at.Add(-1*time.Hour))
-		} else {
-			m.rateOK = false
 		}
 		// Apply a head's space before publishing below, so the mode this poll
 		// announces already includes a toggle this same poll picked up rather
@@ -791,7 +1062,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the heads' staleness window (conductStaleAfter) is sized against this
 		// beat, and mode toggles republish immediately on their own.
 		pub := publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
-		creditCmd := startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.at, m.claudeConfigDir)
+		creditCmd := m.creditRefreshCmd(msg)
 		// Schedule the next tick from here, not from swTickMsg: polls never
 		// overlap, and a slow tmux stretches the interval instead of queueing.
 		if msg.err != nil {
@@ -816,7 +1087,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.snap = msg.snap
 		if m.web != nil {
-			m.web.publish(m.snap, m.rateLimits, m.rateOK, m.modelWindows, msg.at)
+			m.web.publish(m.snap, m.rateLimits, m.rateOK, m.modelWindows, msg.at, m.webAccounts()...)
 			m.headliner.poke()
 		}
 		// The scan needs the live fleet to exclude sessions already running
@@ -910,44 +1181,32 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case creditMsg:
-		m.credits = mergeCreditResult(m.credits, msg.credits, time.Now())
-		m.creditsLoading = false
-		m.creditCheckedAt = creditReadStamp(msg.credits, time.Now())
+		m.swAccountMeters.applyCredits(msg)
 		return m, nil
 	case usageTickMsg:
 		// See the head's usageTickMsg case: the tick is a file read and never
-		// stops; usageMaySpawn is the only gate on spawning.
-		return m, usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageMaySpawn(time.Now()))
+		// stops; usageAllowed is the only gate on spawning.
+		return m, usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageAllowed(m.claude.Default(), time.Now()))
 	case usageMsg:
-		if msg.err != nil {
-			// Keep whatever rows we already have and try again next tick; the
-			// lobby says nothing about a failed usage pull.
-			return m, usageTick()
-		}
-		if !usageAnswered(msg.usage) {
-			// A lost single-flight race with an empty cache on disk — see
-			// usageAnswered. Keep the rows we have rather than blanking them.
-			return m, usageTick()
-		}
-		if !msg.usage.Fetched {
-			// A cache read — take the rows and leave the spawn window alone.
-			// See the head's usageMsg case for why that split matters.
-			m.modelWindows = msg.usage.Models
-			return m, usageTick()
-		}
-		if !msg.usage.Available {
-			// This lobby's own credentials, not the machine's. Quiet the
-			// spawns, keep the rows, keep ticking.
-			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
-			return m, usageTick()
-		}
-		m.modelWindows = msg.usage.Models
-		if len(msg.usage.Models) == 0 {
-			m.usageQuietUntil = msg.usage.FetchedAt.Add(usageQuietPeriod)
-		} else {
-			m.usageQuietUntil = time.Time{}
-		}
+		m.swAccountMeters.applyUsage(msg)
 		return m, usageTick()
+	case swAcctMsg:
+		// The same three cases for a non-default account, on its own state,
+		// with every follow-up tagged back to it.
+		a := m.others[msg.account]
+		if a == nil {
+			return m, nil
+		}
+		switch inner := msg.msg.(type) {
+		case creditMsg:
+			a.applyCredits(inner)
+		case usageTickMsg:
+			return m, swTagCmd(msg.account, usageCmd(a.usageCachePath, a.claudeConfigDir, m.usageAllowed(msg.account, time.Now())))
+		case usageMsg:
+			a.applyUsage(inner)
+			return m, swTagCmd(msg.account, usageTick())
+		}
+		return m, nil
 	case swFleetRestartMsg:
 		// Self last: every head has been told to restart; now pick up the
 		// new binary here too, via the same after-Run re-exec as R.
@@ -1354,14 +1613,37 @@ func swDetailLine(sess swSession, reasonInline bool) string {
 // line overflows the pane width, gauges drop from the end in the head's
 // order (eta, then the per-model rows, then wk; 5h always stays), and the
 // surviving bars then widen past defaultBarW to consume the leftover columns.
+//
+// In multi mode it is one line per meterLineAccounts entry, joined by
+// newlines, each led by its account badge (accountBadge, as the head draws
+// it) padded to the widest shown name so the gauges start in one column.
 func swMetersLine(m swModel, now time.Time) string {
+	if !m.claude.Multi() {
+		return swAccountMetersLine(m.swAccountMeters, "", m.width, now)
+	}
+	names := m.meterLineAccounts()
+	nameW := 0
+	for _, n := range names {
+		nameW = max(nameW, lipgloss.Width(n))
+	}
+	lines := make([]string, 0, len(names))
+	for _, n := range names {
+		badge := swPad(accountBadge(n, accountColor(m.claude, n)), nameW+1)
+		lines = append(lines, swAccountMetersLine(*m.meters(n), badge, m.width, now))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// swAccountMetersLine is one account's meter row, badge first ("" for none).
+func swAccountMetersLine(a swAccountMeters, badge string, width int, now time.Time) string {
 	build := func(barW int) gaugeSet {
-		return creditGauges(m.rateLimits, m.modelWindows, m.pctSamples, now, barW, m.credits)
+		return creditGauges(a.rateLimits, a.modelWindows, a.pctSamples, now, barW, a.credits)
 	}
-	if m.width <= 0 {
-		return " " + strings.Join(build(defaultBarW).parts, " · ")
+	if width <= 0 {
+		return " " + badge + strings.Join(build(defaultBarW).parts, " · ")
 	}
-	return statusbarStyle.Width(m.width).Render(clipLine(" "+fitGaugeLine(build, max(1, m.width-2))+" ", m.width))
+	avail := max(1, width-2-lipgloss.Width(badge))
+	return statusbarStyle.Width(width).Render(clipLine(" "+badge+fitGaugeLine(build, avail)+" ", width))
 }
 
 // rowTopicW is the topic column's width for this render. One width for the
@@ -1380,7 +1662,7 @@ func (m swModel) rowTopicW() int {
 			break
 		}
 	}
-	return swTopicW(m.width, reserve+m.rowPRW())
+	return swTopicW(m.width, reserve+m.rowIdentW())
 }
 
 // swPRText is a row's PR cell text, "#N", or "" when the session has linked
@@ -1407,6 +1689,36 @@ func (m swModel) rowPRW() int {
 	}
 	return 1 + w
 }
+
+// rowAccount is the account a row's badge names: the session's own, only in
+// multi mode and only when the config knows it. "" otherwise.
+func (m swModel) rowAccount(sess swSession) string {
+	if !m.claude.Multi() {
+		return ""
+	}
+	if _, ok := m.claude.Accounts[sess.Account]; !ok {
+		return ""
+	}
+	return sess.Account
+}
+
+// rowAcctW is the account column's width, its leading space included: 0 in
+// single mode or when no row names an account, so those lobbies lay out
+// exactly as before. Fleet-wide like rowPRW, so the columns after it hold.
+func (m swModel) rowAcctW() int {
+	w := 0
+	for _, sess := range m.snap.Sessions {
+		w = max(w, lipgloss.Width(m.rowAccount(sess)))
+	}
+	if w == 0 {
+		return 0
+	}
+	return 1 + w
+}
+
+// rowIdentW is the PR and account columns together: the room the topic
+// column yields to what identifies the session.
+func (m swModel) rowIdentW() int { return m.rowPRW() + m.rowAcctW() }
 
 // swInlineReason is the defer blocker to draw on line 1, after the DEFER or
 // WAIT badge, or "" when it goes on line 2 instead: no blocker, a row that
@@ -1451,9 +1763,10 @@ func (m swModel) View() string {
 	b.WriteString(title + "\n")
 	// The account budget meters sit under the title, where the head keeps its
 	// meters line: full-width 5h/wk gauges with reset times, plus the ETA when
-	// there's burn-rate signal. Omitted entirely (no blank placeholder) when
-	// the cache is unreadable — computePreviewLayout is told either way.
-	if m.rateOK {
+	// there's burn-rate signal — one row per shown account in multi mode.
+	// Omitted entirely (no blank placeholder) when no cache is readable —
+	// computePreviewLayout is told the row count either way.
+	if m.meterRows() > 0 {
 		b.WriteString(swMetersLine(m, now) + "\n")
 	}
 	if o := m.restore; o != nil {
@@ -1482,6 +1795,7 @@ func (m swModel) View() string {
 	lay, start, end := m.listWindow()
 	topicW := m.rowTopicW()
 	prW := m.rowPRW()
+	acctW := m.rowAcctW()
 	// findHit holds the rows a live find query matches; nil when no query is
 	// being typed, so nothing dims.
 	var findHit map[int]bool
@@ -1562,13 +1876,24 @@ func (m swModel) View() string {
 		}
 		// The blocker rides after the badge when the whole of it fits there,
 		// and moves to line 2 when it does not.
-		inline := swInlineReason(sess, m.width-prW, topicW)
+		inline := swInlineReason(sess, m.width-prW-acctW, topicW)
 		if inline != "" {
 			badge += " " + swDeferStyle.Render(inline)
 		}
 		prCell := ""
 		if prW > 0 {
 			prCell = " " + swCell(swPRText(sess), prW-1, swPRStyle, false)
+		}
+		// The account badge follows the PR: one more thing that says which
+		// session this is, drawn like the head's (accountBadge) less its
+		// trailing space, which the column's own padding replaces.
+		if acctW > 0 {
+			acct := m.rowAccount(sess)
+			cell := ""
+			if acct != "" {
+				cell = strings.TrimSuffix(accountBadge(acct, accountColor(m.claude, acct)), " ")
+			}
+			prCell += " " + swPad(cell, acctW-1)
 		}
 		// The PR sits right after the name: it identifies the session as much
 		// as the name does, and there the topic column yields the room for it
@@ -1768,9 +2093,7 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 			if m.hasNoticeRow() {
 				limit--
 			}
-			if m.rateOK {
-				limit--
-			}
+			limit -= m.meterRows()
 			if m.restore != nil && !m.restore.picking {
 				limit--
 			}
@@ -1791,7 +2114,7 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 // boxLayout is the layout with the preview box drawn, for a list that wants
 // want rows.
 func (m swModel) boxLayout(want int) swLayout {
-	return computePreviewLayout(m.height, m.hasNoticeRow(), m.rateOK, m.restore != nil && !m.restore.picking, want)
+	return computePreviewLayout(m.height, m.hasNoticeRow(), m.meterRows(), m.restore != nil && !m.restore.picking, want)
 }
 
 // previewCrowds reports whether drawing the box would leave the fleet too few
@@ -1824,7 +2147,7 @@ func (m swModel) listRows() (rows []int, want int) {
 	topicW := m.rowTopicW()
 	rows = make([]int, len(m.snap.Sessions))
 	for i, sess := range m.snap.Sessions {
-		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width-m.rowPRW(), topicW) != "")
+		rows[i] = swSessionRows(sess, swInlineReason(sess, m.width-m.rowIdentW(), topicW) != "")
 		// A divider rides on the row it sits above, so it is budgeted
 		// wherever that row is: View draws it whenever that row is drawn, and
 		// an unbudgeted line here would push the bottom of the pane off.

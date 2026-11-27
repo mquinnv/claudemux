@@ -4915,10 +4915,10 @@ func TestLobbyInitStartsUsageLoop(t *testing.T) {
 	t.Setenv("PATH", "") // swPollCmd's tmux calls fail fast instead of running
 	cachePath := seedFreshUsageCache(t)
 
-	m := swModel{
+	m := swModel{swAccountMeters: swAccountMeters{
 		rateLimitsPath: filepath.Join(t.TempDir(), "rate-limits.json"),
 		usageCachePath: cachePath,
-	}
+	}}
 
 	msg, ok := waitForInitMsg(m.Init(), 3*time.Second, isUsageMsg)
 	if !ok {

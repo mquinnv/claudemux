@@ -202,14 +202,6 @@ func sessionAccount() (name, configDir string) {
 	return sessionAccountFor(loadClaudeConfig())
 }
 
-// lobbyAccount is the account the lobby meters follow: it runs outside any
-// session, so its env says nothing and the default account stands in.
-func lobbyAccount() (name, configDir string) {
-	cc := loadClaudeConfig()
-	n := cc.Default()
-	return n, accountDirFor(cc, n)
-}
-
 // accountPalette mirrors the named palette in bin/project-color-resolve.sh
 // (Claude Code's /color set); keep the two in step.
 var accountPalette = []struct{ name, hex string }{

@@ -128,14 +128,13 @@ type swLayout struct {
 // The min/max clamp governs only the share the preview CLAIMS from the list;
 // rows the fleet was never going to fill go to the preview past the cap,
 // because the alternative is rendering them blank.
-func computePreviewLayout(height int, hasErr, hasMeters, hasStrip bool, listWant int) swLayout {
+func computePreviewLayout(height int, hasErr bool, meterRows int, hasStrip bool, listWant int) swLayout {
 	chrome := swChromeRows
 	if hasErr {
 		chrome++
 	}
-	if hasMeters {
-		chrome++
-	}
+	// One row per account meter line (0 when no cache is readable).
+	chrome += meterRows
 	// The reboot-restore offer strip (swrestore.go) sits under the meters.
 	if hasStrip {
 		chrome++

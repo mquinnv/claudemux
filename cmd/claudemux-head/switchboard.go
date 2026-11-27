@@ -90,6 +90,10 @@ type swSession struct {
 	// predates the option.
 	PRRepo   string
 	PRNumber int
+	// Account is the Claude account the session runs on (@claudemux_account,
+	// set by the launcher), "" when the head predates the option or the value
+	// is not a valid account name.
+	Account string
 	// The fields below are derived by swArrangeFamilies, never parsed.
 	// Depth is 0 for a top-level row; TreePrefix is the tree-glyph string drawn
 	// before the name ("" at depth 0, 2 cells per level); DetailPrefix is the
@@ -211,13 +215,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 
 	for _, line := range strings.Split(sessOut, "\n") {
 		f := strings.Split(line, "\t")
-		// 18 fields in production: the stay mark is field 12, the project
+		// 19 fields in production: the stay mark is field 12, the project
 		// description 13, the closing mark 14, then session_created and the
-		// handoff-link pair, then the active PR. The 13th/14th are optional
+		// handoff-link pair, the active PR, then the account. The 13th/14th are optional
 		// so 12- and 13-field listings (older fixtures) still parse; the
 		// family triple is all-or-nothing, so 15 and 16 fields are malformed;
-		// the PR is optional after it.
-		if len(f) < 12 || len(f) > 18 || len(f) == 15 || len(f) == 16 || f[0] == "" {
+		// the PR is optional after it, and the account after that.
+		if len(f) < 12 || len(f) > 19 || len(f) == 15 || len(f) == 16 || f[0] == "" {
 			continue
 		}
 		if !heads[f[0]] || f[0] == snap.Lobby {
@@ -233,10 +237,13 @@ func buildSwSnapshot(sessOut, paneOut, clientOut, selfPane string) swSnapshot {
 		if len(f) >= 14 {
 			sess.Closing = f[13]
 		}
-		if len(f) == 18 {
+		if len(f) >= 18 {
 			if repo, num, ok := parsePROption(f[17]); ok {
 				sess.PRRepo, sess.PRNumber = repo, num
 			}
+		}
+		if len(f) == 19 && accountNameRE.MatchString(f[18]) {
+			sess.Account = f[18]
 		}
 		if len(f) >= 17 {
 			if c, err := strconv.ParseInt(f[14], 10, 64); err == nil {

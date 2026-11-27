@@ -298,7 +298,7 @@ func TestCreditFetchStartsWithFirstExhaustedSnapshot(t *testing.T) {
 		t.Fatal("second head snapshot dropped in-flight fetch")
 	}
 	sw := swModel{}
-	s, _ := sw.Update(swSnapshotMsg{at: now, rl: rl, err: errors.New("tmux unavailable")})
+	s, _ := sw.Update(swSnapshotMsg{at: now, rl: map[string]RateLimits{implicitAccount: rl}, err: errors.New("tmux unavailable")})
 	if !s.(swModel).creditsLoading {
 		t.Fatal("switchboard did not fetch credits when rates arrived")
 	}
