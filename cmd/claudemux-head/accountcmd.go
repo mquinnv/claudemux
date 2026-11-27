@@ -86,9 +86,11 @@ func runAccount(args []string, stdout, stderr io.Writer) int {
 			return runAccountLogin(args[1:], stderr)
 		case "list":
 			return runAccountList(stdout, stderr)
+		case "sync-mcp":
+			return runAccountSyncMCP(args[1:], stderr)
 		}
 	}
-	fmt.Fprintln(stderr, "usage: claudemux-head account resolve --dir D [--account X] [--resume ID] | setup <name> | check [name] | login <name> | list")
+	fmt.Fprintln(stderr, "usage: claudemux-head account resolve --dir D [--account X] [--resume ID] | setup <name> | check [name] | login <name> | list | sync-mcp <name>")
 	return 2
 }
 
