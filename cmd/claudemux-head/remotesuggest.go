@@ -15,7 +15,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// Haiku-drafted replies for the phone remote. At most one successful call per
+// Replies for the phone remote, drafted by the summary model (Haiku by
+// default). At most one successful call per
 // WAITING EPISODE (a session's state + since); a failed call is retried after
 // a back-off. The screen of a session parked on a question does not change
 // until it is answered, so the episode is the right cache key — it costs
@@ -48,17 +49,25 @@ const (
 	suggestTimeout     = 20 * time.Second
 	suggestRetryAfter  = 30 * time.Second
 	suggestAuthRetry   = 5 * time.Minute
-	suggestMaxInFlight = 2
+	// suggestNoRepliesRetry is the back-off after a call whose replies were
+	// all dropped: the screen of a parked session does not change, so a quick
+	// retry would most likely be another billed call with the same outcome.
+	suggestNoRepliesRetry = 10 * time.Minute
+	suggestMaxInFlight    = 2
 )
 
 // suggestStatus is a session's suggestion state as the page sees it.
 type suggestStatus string
 
 const (
-	suggestStatusOff    suggestStatus = "off"
-	suggestStatusWait   suggestStatus = "pending"
-	suggestStatusReady  suggestStatus = "ready"
-	suggestStatusFailed suggestStatus = "error"
+	suggestStatusOff     suggestStatus = "off"
+	suggestStatusPending suggestStatus = "pending"
+	suggestStatusReady   suggestStatus = "ready"
+	suggestStatusError   suggestStatus = "error"
+
+	// Older names, kept as aliases.
+	suggestStatusWait   = suggestStatusPending
+	suggestStatusFailed = suggestStatusError
 )
 
 // Failure reasons shown on the page (remoteSuggestState.Error). Short and
@@ -208,10 +217,12 @@ func (s *Summarizer) SuggestReplies(ctx context.Context, sess swSession, screen 
 		if err := json.Unmarshal([]byte(tu.JSON.Input.Raw()), &out); err != nil {
 			return nil, &suggestError{suggestErrBadResp, fmt.Sprintf("suggest tool input: %v", err)}
 		}
-		clean := cleanSuggestions(out.Replies, dialog, fixed)
+		clean, drops := cleanSuggestionsCounted(out.Replies, dialog, fixed)
+		if n := drops.total(); n > 0 {
+			teardownLogf("remote: suggest for %s: model returned %d replies, cleaning dropped %d (%s)", sess.Name, len(out.Replies), n, drops)
+		}
 		if len(clean) == 0 {
-			teardownLogf("remote: suggest for %s: model returned %d replies, cleaning dropped all %d", sess.Name, len(out.Replies), len(out.Replies))
-			return nil, &suggestError{suggestErrNoReplies, fmt.Sprintf("no usable suggestions (%d returned, all dropped)", len(out.Replies))}
+			return nil, &suggestError{suggestErrNoReplies, fmt.Sprintf("no usable suggestions (%d returned, all dropped: %s)", len(out.Replies), drops)}
 		}
 		return clean, nil
 	}
@@ -220,19 +231,75 @@ func (s *Summarizer) SuggestReplies(ctx context.Context, sess swSession, screen 
 
 var suggestKeyRE = regexp.MustCompile(`^[1-9]$`)
 
-// cleanSuggestions enforces what the prompt asks for, since a model can
-// ignore it: dialogs get keys only and prompts get text only; no questions
-// back; no duplicates of each other or of the fixed replies; bounded
-// lengths; no control characters (dropped, since the send path refuses
-// them); at most suggestMax.
+// Reasons cleanSuggestionsCounted drops a suggestion, for the log.
+const (
+	suggestDropControl     = "control"
+	suggestDropWrongKind   = "wrong kind"
+	suggestDropQuestion    = "question"
+	suggestDropPlaceholder = "placeholder"
+	suggestDropTooLong     = "too long"
+	suggestDropDuplicate   = "duplicate"
+	suggestDropOverMax     = "over max"
+)
+
+// suggestDrops counts dropped suggestions per reason.
+type suggestDrops map[string]int
+
+func (d suggestDrops) total() int {
+	n := 0
+	for _, c := range d {
+		n += c
+	}
+	return n
+}
+
+// String lists the non-zero counts in a fixed order, e.g. "question 1, duplicate 2".
+func (d suggestDrops) String() string {
+	var parts []string
+	for _, r := range []string{suggestDropControl, suggestDropWrongKind, suggestDropQuestion, suggestDropPlaceholder, suggestDropTooLong, suggestDropDuplicate, suggestDropOverMax} {
+		if d[r] > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", r, d[r]))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// normalizeSuggestText is the form typed replies are compared in: whitespace
+// collapsed, trailing periods trimmed, lowercased. Fixed replies go through
+// it too, so "continue." and "Continue" are one reply.
+func normalizeSuggestText(s string) string {
+	return strings.ToLower(strings.TrimRight(collapseWhitespace(strings.TrimSpace(s)), "."))
+}
+
+// cleanSuggestions is cleanSuggestionsCounted without the drop counts.
 func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remoteSuggestion {
+	out, _ := cleanSuggestionsCounted(in, dialog, fixed)
+	return out
+}
+
+// cleanSuggestionsCounted enforces what the prompt asks for, since a model
+// can ignore it: dialogs get keys only and prompts get text only; no
+// questions back; no duplicates of each other or of the fixed replies;
+// bounded lengths; no control characters (dropped, since the send path
+// refuses them); at most suggestMax. It also counts what it dropped, per
+// reason.
+func cleanSuggestionsCounted(in []remoteSuggestion, dialog bool, fixed []string) ([]remoteSuggestion, suggestDrops) {
+	drops := suggestDrops{}
 	seen := map[string]bool{}
 	for _, f := range fixed {
-		seen[strings.ToLower(strings.TrimSpace(f))] = true
+		seen[normalizeSuggestText(f)] = true
 	}
 	var out []remoteSuggestion
-	for _, s := range in {
+	for i, s := range in {
+		if len(out) == suggestMax {
+			drops[suggestDropOverMax] += len(in) - i
+			break
+		}
 		if hasControlRunes(s.Label) || hasControlRunes(s.Text) {
+			drops[suggestDropControl]++
 			continue
 		}
 		label := collapseWhitespace(s.Label)
@@ -240,7 +307,12 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 		key := strings.TrimSpace(s.Key)
 		var c remoteSuggestion
 		if dialog {
-			if !suggestKeyRE.MatchString(key) || seen["key:"+key] {
+			if !suggestKeyRE.MatchString(key) {
+				drops[suggestDropWrongKind]++
+				continue
+			}
+			if seen["key:"+key] {
+				drops[suggestDropDuplicate]++
 				continue
 			}
 			seen["key:"+key] = true
@@ -250,16 +322,26 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 			}
 		} else {
 			text = strings.TrimRight(collapseWhitespace(text), ".")
-			if text == "" || strings.HasSuffix(text, "?") || placeholderLine(text) {
+			switch {
+			case text == "":
+				drops[suggestDropWrongKind]++
+				continue
+			case strings.HasSuffix(text, "?"):
+				drops[suggestDropQuestion]++
+				continue
+			case placeholderLine(text):
+				drops[suggestDropPlaceholder]++
 				continue
 			}
 			// Too long is dropped, not clipped: a chip SENDS its text, and a
 			// clipped prompt is a different prompt.
 			if len([]rune(text)) > suggestTextRunes {
+				drops[suggestDropTooLong]++
 				continue
 			}
-			k := strings.ToLower(text)
+			k := normalizeSuggestText(text)
 			if seen[k] {
+				drops[suggestDropDuplicate]++
 				continue
 			}
 			seen[k] = true
@@ -270,11 +352,8 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 		}
 		c.Label = truncateRunes(c.Label, suggestLabelRunes)
 		out = append(out, c)
-		if len(out) == suggestMax {
-			break
-		}
 	}
-	return out
+	return out, drops
 }
 
 // hasControlRunes reports C0 controls other than newline and tab, DEL, and
@@ -356,10 +435,10 @@ func (c *remoteSuggestions) get(sess swSession) remoteSuggestState {
 	defer c.mu.Unlock()
 	e, ok := c.entries[sess.Name]
 	if !ok || e.episode != remoteEpisode(sess) {
-		return remoteSuggestState{Status: suggestStatusWait}
+		return remoteSuggestState{Status: suggestStatusPending}
 	}
 	st := remoteSuggestState{Status: e.status, Items: append([]remoteSuggestion(nil), e.items...)}
-	if e.status == suggestStatusFailed {
+	if e.status == suggestStatusError {
 		st.Error = e.reason
 	}
 	return st
@@ -378,15 +457,14 @@ func (c *remoteSuggestions) needsCall(sess swSession) bool {
 
 // needsCallLocked is the decision ensure and needsCall share: a waiting
 // session needs a call unless its episode's entry is ready, pending, or
-// failed less than its back-off ago (suggestAuthRetry for an auth failure,
-// which won't fix itself quickly; suggestRetryAfter otherwise). c.mu must
+// failed less than its back-off ago (see suggestBackoff). c.mu must
 // be held; the caller has checked enabled and isWaiting.
 func (c *remoteSuggestions) needsCallLocked(sess swSession, ep string) bool {
 	e, ok := c.entries[sess.Name]
 	if !ok || e.episode != ep {
 		return true
 	}
-	return e.status == suggestStatusFailed && c.now().Sub(e.at) >= suggestBackoff(e.reason)
+	return e.status == suggestStatusError && c.now().Sub(e.at) >= suggestBackoff(e.reason)
 }
 
 // ensure starts a call for sess's episode when needsCall says one is due.
@@ -403,7 +481,7 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 		c.mu.Unlock()
 		return
 	}
-	c.entries[sess.Name] = &remoteSuggestEntry{episode: ep, status: suggestStatusWait, at: c.now()}
+	c.entries[sess.Name] = &remoteSuggestEntry{episode: ep, status: suggestStatusPending, at: c.now()}
 	c.mu.Unlock()
 
 	go func() {
@@ -431,6 +509,13 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 }
 
 func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, err error) {
+	reason := ""
+	if err != nil {
+		reason = suggestReason(err)
+		// Logged before the episode check, so a failure is never silent even
+		// when the session moved on while the call ran.
+		teardownLogf("remote: suggest for %s (episode %s) failed (%s): %v", name, ep, reason, err)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[name]
@@ -439,9 +524,8 @@ func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, er
 	}
 	e.at = c.now()
 	if err != nil {
-		e.reason = suggestReason(err)
-		teardownLogf("remote: suggest for %s failed (%s): %v", name, e.reason, err)
-		e.status = suggestStatusFailed
+		e.reason = reason
+		e.status = suggestStatusError
 		e.items = nil
 		return
 	}
@@ -450,10 +534,16 @@ func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, er
 	e.items = items
 }
 
-// suggestBackoff is how long a failed episode waits before a retry.
+// suggestBackoff is how long a failed episode waits before a retry: long
+// for an auth failure, which won't fix itself quickly, and longer still for
+// "no usable replies", since the unchanged screen would most likely draw the
+// same replies again; suggestRetryAfter otherwise.
 func suggestBackoff(reason string) time.Duration {
-	if reason == suggestErrAuth {
+	switch reason {
+	case suggestErrAuth:
 		return suggestAuthRetry
+	case suggestErrNoReplies:
+		return suggestNoRepliesRetry
 	}
 	return suggestRetryAfter
 }

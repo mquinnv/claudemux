@@ -34,8 +34,8 @@ const (
 	webContentSecurityPolicy = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:"
 )
 
-// webHandler routes the two paths (plus any extra routes via
-// webHandlerWith). Method patterns make the mux answer 405
+// webHandler routes the two paths; webHandlerWith adds extra routes.
+// Method patterns make the mux answer 405
 // for a POST to a known path and 404 for everything else; "/{$}" matches
 // the root only, so "/index.html" is not quietly the page. allow is the
 // tailnet's MagicDNS suffix and this node's own short name (weblisten.go);

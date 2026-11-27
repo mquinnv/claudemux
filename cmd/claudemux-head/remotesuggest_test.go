@@ -384,3 +384,109 @@ func TestRemoteNextInQueue(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanSuggestions(t *testing.T) {
+	in := []remoteSuggestion{
+		{Label: "Run tests", Text: "run the tests."},
+		{Label: "dup", Text: "Run the tests"},
+		{Label: "q", Text: "should I deploy?"},
+		{Label: "fixed", Text: "continue"},
+		{Label: "key in prompt", Key: "1"},
+		{Label: "", Text: "ship it"},
+		{Label: "long", Text: strings.Repeat("a", suggestTextRunes+1)},
+		{Label: "five", Text: "five"},
+		{Label: "six", Text: "six"},
+	}
+	got := cleanSuggestions(in, false, []string{"Continue"})
+	want := []remoteSuggestion{
+		{Label: "Run tests", Text: "run the tests"},
+		{Label: "ship it", Text: "ship it"},
+		{Label: "five", Text: "five"},
+		{Label: "six", Text: "six"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("prompt:\n got %+v\nwant %+v", got, want)
+	}
+
+	dialog := cleanSuggestions([]remoteSuggestion{
+		{Label: "postgres", Key: "1"},
+		{Label: "typed", Text: "use sqlite"},
+		{Label: "again", Key: "1"},
+		{Label: "bad", Key: "0"},
+		{Label: "", Key: "2"},
+	}, true, nil)
+	wantD := []remoteSuggestion{{Label: "postgres", Key: "1"}, {Label: "option 2", Key: "2"}}
+	if !reflect.DeepEqual(dialog, wantD) {
+		t.Fatalf("dialog:\n got %+v\nwant %+v", dialog, wantD)
+	}
+}
+
+// A chip SENDS its text, so one carrying a terminal escape (or any other
+// control character) is dropped rather than typed into a session.
+func TestCleanSuggestionsDropsControlCharacters(t *testing.T) {
+	got := cleanSuggestions([]remoteSuggestion{
+		{Label: "clear", Text: "run\x1b[2J it"},
+		{Label: "bell", Text: "ding\x07"},
+		{Label: "del", Text: "a\x7fb"},
+		{Label: "c1", Text: "a\u009bb"},
+		{Label: "evil\x1b[31m", Text: "fine text"},
+		{Label: "ok", Text: "keep me"},
+	}, false, nil)
+	if want := []remoteSuggestion{{Label: "ok", Text: "keep me"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("prompt:\n got %+v\nwant %+v", got, want)
+	}
+	gotD := cleanSuggestions([]remoteSuggestion{
+		{Label: "post\x1bgres", Key: "1"},
+		{Label: "sqlite", Key: "2"},
+	}, true, nil)
+	if want := []remoteSuggestion{{Label: "sqlite", Key: "2"}}; !reflect.DeepEqual(gotD, want) {
+		t.Fatalf("dialog:\n got %+v\nwant %+v", gotD, want)
+	}
+}
+
+// Fixed replies are compared in the same normal form as drafted text, so a
+// fixed "continue." still hides a drafted "Continue".
+func TestCleanSuggestionsNormalizesFixedReplies(t *testing.T) {
+	got := cleanSuggestions([]remoteSuggestion{
+		{Label: "c", Text: "continue"},
+		{Label: "C", Text: "Continue."},
+		{Label: "spaced", Text: "commit   and push"},
+		{Label: "ok", Text: "run the tests"},
+	}, false, []string{"continue.", "  Commit and  push. "})
+	if want := []remoteSuggestion{{Label: "ok", Text: "run the tests"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// "No usable replies" means the model looked at this screen and had nothing:
+// the screen of a parked session doesn't change, so it waits out the long
+// suggestNoRepliesRetry, not suggestRetryAfter.
+func TestRemoteSuggestionsNoRepliesBackoff(t *testing.T) {
+	if suggestNoRepliesRetry <= suggestRetryAfter+time.Second {
+		t.Fatalf("suggestNoRepliesRetry = %v, want well past suggestRetryAfter (%v)", suggestNoRepliesRetry, suggestRetryAfter)
+	}
+	clock := &fakeClock{t: rt0}
+	s := idleSession()
+	gen := &fakeSuggester{err: &suggestError{suggestErrNoReplies, "all dropped"}}
+	c := newRemoteSuggestions(gen)
+	c.now = clock.now
+	c.ensure(s, nil, func() string { return "screen" })
+	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusFailed })
+	if st := c.get(s); st.Error != suggestErrNoReplies {
+		t.Fatalf("reason = %q, want %q", st.Error, suggestErrNoReplies)
+	}
+	clock.advance(suggestRetryAfter + time.Second)
+	if c.needsCall(s) {
+		t.Error("needsCall past the ordinary back-off for no usable replies")
+	}
+	c.ensure(s, nil, func() string { return "screen" })
+	if st := c.get(s).Status; st != suggestStatusFailed || gen.count() != 1 {
+		t.Fatalf("retried after %v: status %q, calls %d", suggestRetryAfter+time.Second, st, gen.count())
+	}
+	clock.advance(suggestNoRepliesRetry - suggestRetryAfter)
+	if !c.needsCall(s) {
+		t.Error("needsCall false past suggestNoRepliesRetry")
+	}
+	c.ensure(s, nil, func() string { return "screen" })
+	waitFor(t, "the retry", func() bool { return gen.count() == 2 && c.get(s).Status == suggestStatusFailed })
+}

@@ -252,8 +252,10 @@ type WebConfig struct {
 	// first, then summary.api_key_file).
 	// The status page is for teammates; the remote is for you.
 	Control bool `yaml:"control"`
-	// Replies are the canned answers the remote offers next to Haiku's
-	// suggestions, in order. Empty keeps defaultRemoteReplies.
+	// Replies are the canned answers the remote offers at an empty prompt,
+	// next to the suggested replies from the summary model (Haiku by
+	// default), in order. Empty keeps defaultRemoteReplies.
+	// Each is one line: no newlines or tabs.
 	Replies []string `yaml:"replies"`
 }
 
@@ -449,6 +451,9 @@ func (c Config) validate() error {
 		t := strings.TrimSpace(r)
 		if n := len([]rune(t)); n == 0 || n > remoteReplyMaxRunes {
 			return fmt.Errorf("web.replies[%d] is %q: each reply must be 1-%d characters", i, r, remoteReplyMaxRunes)
+		}
+		if strings.ContainsAny(t, "\n\t") {
+			return fmt.Errorf("web.replies[%d] is %q: a reply must be one line, with no newlines or tabs", i, r)
 		}
 		if hasControlRunes(t) {
 			return fmt.Errorf("web.replies[%d] is %q: a reply must not contain control characters", i, r)

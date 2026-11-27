@@ -381,8 +381,8 @@ no authentication: reachability is the tailnet's job, which is why the
 off the tailnet can reach it. `web.listen: ":7474"` would bind every interface,
 including whatever Wi-Fi the laptop is on; don't. The page is plain HTTP over
 the tailnet's WireGuard tunnel, and never acts on a session — nothing on it can
-defer, jump, or type. (The phone remote below can defer and type, though not
-jump, which is why it is off by default and needs a token on top of the
+defer, jump, or type. (The phone remote below can defer, type, and press keys
+(including Esc, which interrupts a turn), though not jump, which is why it is off by default and needs a token on top of the
 tailnet.)
 
 The lobby also refuses requests from outside the tailnet's address ranges and
@@ -418,11 +418,12 @@ For each waiting session it shows:
   permission prompt, they're the options to pick, by number. At an empty
   prompt, they're the next things you'd likely type. Tap one to send it.
   You get about two seconds to undo it, since a mis-tap on a phone is easy.
-  Tap ✎ to load it into the keyboard and edit it first. There's at most one
+  Tap ✎ on a typed suggestion to load it into the keyboard and edit it first. There's at most one
   successful call per waiting spell (a failed call retries after a back-off),
   and the next session in the queue is drafted while you read this one.
 - **Quick replies**, the canned answers in `web.replies` (default
-  `yes, go ahead`, `continue`, `commit and push`). Long-press one to edit it
+  `yes, go ahead`, `continue`, `commit and push`), shown at an empty prompt
+  (not on an open question or a busy session). Long-press one to edit it
   before sending.
 - **Answer keys** when a question is open: `1`–`4`, Up/Down, Enter and Esc.
   The number keys get the same undo window; Up/Down, Enter and Esc go
@@ -432,7 +433,11 @@ For each waiting session it shows:
   open, the remote offers to dismiss it and send your text as a normal
   prompt. If there's a draft in the session's input box, it asks before
   replacing it. It never types over one silently. Replacing clears the input
-  line (Ctrl-U), so a multi-line draft may not be cleared completely.
+  line (Ctrl-U), so a multi-line draft may not be cleared completely; the
+  remote checks that the clear worked before typing, and refuses if it
+  didn't. When claude's prompt is in vim NORMAL mode, or the screen isn't
+  one it recognises, the remote refuses the send instead of offering to
+  replace.
 - **Skip**, **Defer** (anything typed becomes the blocker) and **Esc** (shown on
   an open question, or as **Interrupt** on a busy session). Skip only
   affects the phone: the session comes back on its next waiting spell, or
@@ -441,7 +446,10 @@ For each waiting session it shows:
 
 Every reply carries the waiting spell it was meant for. If the session has
 moved on by the time the request arrives (someone answered it at the desk,
-say), the send is refused rather than landing on the next question. Tap
+say), the send is refused rather than landing on the next question, and a
+question already answered from the remote won't take a second answer. Esc /
+Interrupt and Defer don't carry a spell: they act on whatever the session is
+doing now. Tap
 **☰** to open any session, including busy ones, and type to it. A busy
 session's state changes often, so if it changes before your send lands, the
 send is refused and your text stays in the box to resend. **Conduct** pauses and resumes the walk.
@@ -459,14 +467,16 @@ web:
 
 ```sh
 # in the lobby's environment, or in summary.api_key_file next to the API key
-CLAUDEMUX_REMOTE_TOKEN=<at least 16 random bytes>
+CLAUDEMUX_REMOTE_TOKEN=<16+ characters, e.g. from openssl rand -hex 16>
 ```
 
 Open `http://<node>:7474/remote#token=<token>` on the phone once. The token is
 taken from the fragment (which never reaches the server), kept in the phone's
 browser storage, and stripped from the address bar. Without a token set, the
-page loads, says the remote isn't set up, and points to the lobby log. Teammates who can see the status page
-can't drive anything without it. The remote shows *all* your sessions, including
+page loads and states what's wrong (token not set, or too short). Full
+details go only to the file named by `CLAUDEMUX_TEARDOWN_LOG`, which is off by
+default; set it in the lobby's environment before starting the lobby.
+Teammates who can see the status page can't drive anything without it. The remote shows *all* your sessions, including
 any that `hide_private_orgs` keeps off the status page.
 
 Under the title, the lobby shows the same account budget meters as the head:
@@ -1028,7 +1038,7 @@ web:
   Default empty: every session shows.
 - `web.control` — serve the phone remote at `/remote` (see **Answering from your
   phone** above). Default `false`. Also needs `CLAUDEMUX_REMOTE_TOKEN` (16+
-  bytes) in the lobby's environment or `summary.api_key_file`.
+  bytes; hex from `openssl rand -hex 16` is easiest) in the lobby's environment or `summary.api_key_file`.
 - `web.replies` — the remote's quick replies, in order. Empty keeps the defaults
   (`yes, go ahead`, `continue`, `commit and push`). Up to 6, each 1–200 characters.
 - `web.headline_interval` — the floor between fleet-headline calls, with

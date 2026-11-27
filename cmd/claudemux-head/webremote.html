@@ -467,7 +467,7 @@ async function pollDetail() {
     // A stale poll (superseded, or for a session no longer on screen)
     // leaves re-arming to the newer one.
     if (rearm && seq === detailSeq && name === S.current) {
-      // Faster while Haiku is still drafting, so chips appear as they land.
+      // Faster while the summary model is still drafting, so chips appear as they land.
       const pending = S.detail && S.detail.suggestions && S.detail.suggestions.status === 'pending';
       clearTimeout(detailTimer);
       detailTimer = setTimeout(pollDetail, document.hidden ? 15000 : (pending ? 1000 : 2000));
@@ -498,6 +498,7 @@ async function probeSetup() {
   catch (e) {
     if (e.code === 'setup') { S.setupError = e.message; renderSetup(true); }
     else if (e.status === 403 || e.status === 404) { S.setupError = OFF_MSG + ' (HTTP ' + e.status + ').'; render(); }
+    else if (e.code === 'offline') { S.online = false; render(); }
     else if (e.code !== 'token' && e.status !== 401) console.error('setup probe:', e);
   }
 }
@@ -510,12 +511,19 @@ let pendingSend = null;
 // Every one-tap send waits out a short undo window first: a mis-tap on a
 // phone is cheap to make and expensive to land in a session.
 function sendWithUndo(label, fn) {
-  if (pendingSend) { clearTimeout(pendingSend.timer); pendingSend = null; }
+  // A second tap inside the window replaces the pending send; say so in
+  // the new Undo toast, so the first one is never dropped silently.
+  let msg = label;
+  if (pendingSend) {
+    clearTimeout(pendingSend.timer);
+    msg = 'Replaced pending “' + pendingSend.label + '”. ' + label;
+    pendingSend = null;
+  }
   const delay = 1800;
   // The Undo toast has its own slot: a toast raised meanwhile stacks
   // above it rather than wiping the only way to cancel the send.
-  const t = toast(label, { slot: 'undo', action: 'Undo', onAction: () => { if (pendingSend) clearTimeout(pendingSend.timer); pendingSend = null; }, duration: delay, bar: true });
-  pendingSend = { timer: setTimeout(async () => { pendingSend = null; t.close(); await fn(); }, delay) };
+  const t = toast(msg, { slot: 'undo', action: 'Undo', onAction: () => { if (pendingSend) clearTimeout(pendingSend.timer); pendingSend = null; }, duration: delay, bar: true });
+  pendingSend = { label, timer: setTimeout(async () => { pendingSend = null; t.close(); await fn(); }, delay) };
 }
 
 async function doSend(name, episode, text, opts = {}) {
@@ -539,7 +547,14 @@ async function doSend(name, episode, text, opts = {}) {
     } else if (e.code === 'dialog') {
       confirmSheet('A question is open in ' + name, 'Dismiss it with Esc and send your message as a normal prompt instead?',
         'Dismiss and send', () => doSend(name, episode, text, { ...opts, escape: true }));
+    } else if (e.code === 'vim_normal' || e.code === 'unrecognized' || e.code === 'not_cleared') {
+      // The lobby won't type into this prompt as it stands: no Replace or
+      // Dismiss offer. A typed message stays in the composer (clearInput
+      // only runs on success).
+      toast(e.message, { err: true, duration: 6000 }); pollDetail();
     } else if (e.code === 'moved') {
+      // Either the session moved on, or it was already answered and is
+      // still moving on: the server's message says which.
       toast(e.message, { err: true }); pollQueue();
     } else if (e.code === 'partial') {
       // The session was changed before the failure: show how, and refresh
@@ -620,11 +635,13 @@ function renderSetup(isSetupErr) {
   if (isSetupErr) {
     box.append(el('p', null, 'The lobby isn’t ready for remote control yet:'));
     box.append(el('p', 'mono', S.setupError));
-    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ characters) in the lobby’s environment or in its api_key_file, then restart the lobby.'));
+    box.append(el('p', null, 'Full details go to the file named by CLAUDEMUX_TEARDOWN_LOG, if you set it before starting the lobby.'));
+    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ bytes, e.g. `openssl rand -hex 16`) in the lobby’s environment or in its api_key_file, then restart the lobby.'));
     m.append(box); return;
   }
   box.append(el('p', null, 'Paste the CLAUDEMUX_REMOTE_TOKEN you set for the lobby. It is kept on this phone only.'));
   if (S.setupError) box.append(el('p', null, S.setupError));
+  if (!S.online) box.append(el('p', null, 'Lobby not reachable yet; you can still save the token.'));
   const input = el('input'); input.type = 'password'; input.placeholder = 'token'; input.autocomplete = 'current-password';
   const go = el('button', 'cbtn go', 'Connect'); go.style.width = '100%';
   go.onclick = () => {
@@ -725,7 +742,7 @@ function renderDetail() {
 
   m.append(card);
 
-  // Haiku suggestions.
+  // Summary-model suggestions.
   if (ds.waiting) {
     const lab = el('div', 'section-label');
     lab.append(el('span', 'spark', '✦'), document.createTextNode(' Suggested'));
@@ -745,14 +762,14 @@ function renderDetail() {
     } else if (sg.status === 'error' && sg.error !== 'no usable replies') {
       box.append(el('div', 'note bad', 'Suggestions failed (' + (sg.error || 'unknown') + ') — retrying shortly.'));
     } else if (sg.status === 'error' || !sg.items || !sg.items.length) {
-      box.append(el('div', 'note', 'Haiku had nothing to suggest for this one.'));
+      box.append(el('div', 'note', 'Nothing to suggest for this one.'));
     } else {
       sg.items.forEach(it => box.append(suggestionChip(ds, it)));
     }
     m.append(box);
   }
 
-  // Dialog: the raw keys, under Haiku's labelled picks.
+  // Dialog: the raw keys, under the summary model's labelled picks.
   if (ds.dialog) {
     m.append(el('div', 'section-label', 'Answer'));
     const keys = el('div', 'keys');

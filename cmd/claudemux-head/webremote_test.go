@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +42,10 @@ type fakeRemoteTmux struct {
 	// escapeScreen, when set, is what the pane shows after an Escape
 	// (default: the empty prompt).
 	escapeScreen string
+	// clearScreen, when set, is what the pane shows after a C-u (default:
+	// the empty prompt). Set it to a draft to model a C-u that cleared
+	// nothing (a multi-line draft, a mode the remote misread).
+	clearScreen string
 }
 
 func (f *fakeRemoteTmux) captured() []string {
@@ -91,6 +98,12 @@ func (f *fakeRemoteTmux) keys(pane string, keys ...string) error {
 		f.screens[pane] = idleScreen("")
 		if f.escapeScreen != "" {
 			f.screens[pane] = f.escapeScreen
+		}
+	}
+	if len(keys) == 1 && keys[0] == "C-u" {
+		f.screens[pane] = idleScreen("")
+		if f.clearScreen != "" {
+			f.screens[pane] = f.clearScreen
 		}
 	}
 	return nil
@@ -725,24 +738,28 @@ func TestRemoteKeyTmuxFailure(t *testing.T) {
 	}
 }
 
-// Two sends at once must not interleave keystrokes in one prompt: the second
-// waits for the first's Enter before it captures or types anything.
+// Two sends at once must not interleave keystrokes: the second waits for the
+// first's Enter before it captures or types anything. The lock is global, so
+// it holds across sessions too (the second send here is to another session,
+// since a second answer to the same episode is refused as "moved").
 func TestRemoteWritesAreSerialized(t *testing.T) {
-	s := idleSession()
-	r, ft, h := newTestRemote(t, testFleet(s), nil)
+	a := idleSession()
+	b := swSession{Name: "b", State: "Idle", Since: rt0, ClaudePane: "%2", Context: -1}
+	r, ft, h := newTestRemote(t, testFleet(a, b), nil)
 	ft.screens["%1"] = idleScreen("")
+	ft.screens["%2"] = idleScreen("")
 	typing, release := make(chan string, 2), make(chan struct{})
 	ft.set(func(f *fakeRemoteTmux) { f.typing, f.release = typing, release })
 
 	var wg sync.WaitGroup
 	codes := make([]int, 2)
-	send := func(i int, text string) {
+	send := func(i int, s swSession, text string) {
 		defer wg.Done()
 		codes[i] = remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
-			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: text}).Code
+			remoteSendReq{Name: s.Name, Episode: remoteEpisode(s), Text: text}).Code
 	}
 	wg.Add(1)
-	go send(0, "first")
+	go send(0, a, "first")
 	if got := <-typing; got != "first" {
 		t.Fatalf("typing %q, want first", got)
 	}
@@ -755,15 +772,10 @@ func TestRemoteWritesAreSerialized(t *testing.T) {
 		t.Fatalf("captures before the second send = %q, want just the first's", got)
 	}
 	wg.Add(1)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		send(1, "second")
-	}()
-	<-started
-	// Give the second request ample time to run as far as it can. Holding the
-	// lock, the first send must keep it from capturing (or typing) anything.
-	time.Sleep(100 * time.Millisecond)
+	go send(1, b, "second")
+	// The second send is parked on the write lock; holding it, the first
+	// keeps it from capturing (or typing) anything.
+	waitWriteMuWaiters(t, "handleSend", 1)
 	if got := ft.captured(); len(got) != 1 {
 		t.Fatalf("second send captured while the first held the lock: captures %q", got)
 	}
@@ -778,10 +790,43 @@ func TestRemoteWritesAreSerialized(t *testing.T) {
 	if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
 		t.Fatalf("codes = %v", codes)
 	}
-	want := []string{"type %1 first", "keys %1 Enter", "type %1 second", "keys %1 Enter"}
+	want := []string{"type %1 first", "keys %1 Enter", "type %2 second", "keys %2 Enter"}
 	if got := ft.log(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
+}
+
+// writeMuWaiters counts goroutines inside (*webRemote).<handler> that are
+// parked acquiring a sync.Mutex. The only mutex a handler waits on for long
+// is writeMu: the fake's own lock is never held across a block, and a
+// goroutine inside the fake is excluded anyway.
+func writeMuWaiters(handler string) int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	count := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "(*webRemote)."+handler) && strings.Contains(g, "(*Mutex).Lock") &&
+			!strings.Contains(g, "(*fakeRemoteTmux)") {
+			count++
+		}
+	}
+	return count
+}
+
+// waitWriteMuWaiters waits until n requests in handler are blocked on the
+// write lock: a deterministic "they are queued", where a sleep only hopes.
+func waitWriteMuWaiters(t *testing.T, handler string, n int) {
+	t.Helper()
+	waitFor(t, fmt.Sprintf("%d %s request(s) blocked on writeMu", n, handler), func() bool {
+		return writeMuWaiters(handler) >= n
+	})
 }
 
 func TestRemoteWriteRefusedWhenEpisodeMoved(t *testing.T) {
@@ -1083,65 +1128,6 @@ func TestToRemoteSession(t *testing.T) {
 	}
 }
 
-func TestCleanSuggestions(t *testing.T) {
-	in := []remoteSuggestion{
-		{Label: "Run tests", Text: "run the tests."},
-		{Label: "dup", Text: "Run the tests"},
-		{Label: "q", Text: "should I deploy?"},
-		{Label: "fixed", Text: "continue"},
-		{Label: "key in prompt", Key: "1"},
-		{Label: "", Text: "ship it"},
-		{Label: "long", Text: strings.Repeat("a", suggestTextRunes+1)},
-		{Label: "five", Text: "five"},
-		{Label: "six", Text: "six"},
-	}
-	got := cleanSuggestions(in, false, []string{"Continue"})
-	want := []remoteSuggestion{
-		{Label: "Run tests", Text: "run the tests"},
-		{Label: "ship it", Text: "ship it"},
-		{Label: "five", Text: "five"},
-		{Label: "six", Text: "six"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("prompt:\n got %+v\nwant %+v", got, want)
-	}
-
-	dialog := cleanSuggestions([]remoteSuggestion{
-		{Label: "postgres", Key: "1"},
-		{Label: "typed", Text: "use sqlite"},
-		{Label: "again", Key: "1"},
-		{Label: "bad", Key: "0"},
-		{Label: "", Key: "2"},
-	}, true, nil)
-	wantD := []remoteSuggestion{{Label: "postgres", Key: "1"}, {Label: "option 2", Key: "2"}}
-	if !reflect.DeepEqual(dialog, wantD) {
-		t.Fatalf("dialog:\n got %+v\nwant %+v", dialog, wantD)
-	}
-}
-
-// A chip SENDS its text, so one carrying a terminal escape (or any other
-// control character) is dropped rather than typed into a session.
-func TestCleanSuggestionsDropsControlCharacters(t *testing.T) {
-	got := cleanSuggestions([]remoteSuggestion{
-		{Label: "clear", Text: "run\x1b[2J it"},
-		{Label: "bell", Text: "ding\x07"},
-		{Label: "del", Text: "a\x7fb"},
-		{Label: "c1", Text: "a\u009bb"},
-		{Label: "evil\x1b[31m", Text: "fine text"},
-		{Label: "ok", Text: "keep me"},
-	}, false, nil)
-	if want := []remoteSuggestion{{Label: "ok", Text: "keep me"}}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("prompt:\n got %+v\nwant %+v", got, want)
-	}
-	gotD := cleanSuggestions([]remoteSuggestion{
-		{Label: "post\x1bgres", Key: "1"},
-		{Label: "sqlite", Key: "2"},
-	}, true, nil)
-	if want := []remoteSuggestion{{Label: "sqlite", Key: "2"}}; !reflect.DeepEqual(gotD, want) {
-		t.Fatalf("dialog:\n got %+v\nwant %+v", gotD, want)
-	}
-}
-
 func TestRemoteTokenRules(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Summary.APIKeyFile = t.TempDir() + "/env"
@@ -1313,8 +1299,10 @@ func TestRemoteWritesDroppedWhenClientGone(t *testing.T) {
 		t.Fatalf("typing %q, want first", got)
 	}
 
+	// The requests start with a LIVE context and queue behind the lock; the
+	// phone gives up only once they are parked there.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
 	routes := []remoteRoute{
 		{"POST", "/api/remote/send", remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "second"}},
 		{"POST", "/api/remote/key", remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"}},
@@ -1335,7 +1323,12 @@ func TestRemoteWritesDroppedWhenClientGone(t *testing.T) {
 			h.ServeHTTP(recs[i], req)
 		}(i)
 	}
-	time.Sleep(50 * time.Millisecond) // let them queue behind the lock
+	waitWriteMuWaiters(t, "handleSend", 1)
+	waitWriteMuWaiters(t, "handleKey", 2)
+	if got := ft.log(); !reflect.DeepEqual(got, []string{"type %1 first"}) {
+		t.Fatalf("queued requests wrote before the lock was free: %q", got)
+	}
+	cancel()
 	close(release)
 	if code := <-firstDone; code != http.StatusOK {
 		t.Fatalf("first send: %d", code)
@@ -1468,11 +1461,31 @@ func TestStartSwitchboardWebWithControl(t *testing.T) {
 		if code != http.StatusServiceUnavailable || e.Code != "setup" {
 			t.Fatalf("queue: %d %s, want 503 setup", code, body)
 		}
-		if e.Message != "remote token missing or too short; see the lobby log" {
-			t.Errorf("setup message = %q", e.Message)
+		if want := remoteTokenKey + " is not set (looked in the environment and the summary key file)"; e.Message != want {
+			t.Errorf("setup message = %q, want %q", e.Message, want)
 		}
 		if strings.Contains(body, cfg.Summary.APIKeyFile) {
 			t.Errorf("setup body leaks the key file path: %s", body)
+		}
+	})
+	t.Run("short token", func(t *testing.T) {
+		t.Setenv(remoteTokenKey, "8bytes!!")
+		w, err := startSwitchboardWeb(cfg, noIP, noSuffix)
+		if err != nil || w == nil {
+			t.Fatalf("got %+v, %v", w, err)
+		}
+		defer w.stop()
+		code, body := get(t, w, "/api/remote/queue")
+		var e remoteErrorBody
+		_ = json.Unmarshal([]byte(body), &e)
+		if code != http.StatusServiceUnavailable || e.Code != "setup" {
+			t.Fatalf("queue: %d %s, want 503 setup", code, body)
+		}
+		if want := remoteTokenKey + " is too short (8 bytes; it needs at least 16)"; e.Message != want {
+			t.Errorf("setup message = %q, want %q", e.Message, want)
+		}
+		if strings.Contains(body, cfg.Summary.APIKeyFile) || strings.Contains(body, "8bytes!!") {
+			t.Errorf("setup body leaks the key file path or the token: %s", body)
 		}
 	})
 	t.Run("token", func(t *testing.T) {
@@ -1582,5 +1595,302 @@ func TestExecRemoteTmuxTypeTextMissingPane(t *testing.T) {
 	}
 	if bufs := tmuxRemoteBuffers(t); len(bufs) != 0 {
 		t.Fatalf("a failed paste left its buffer behind: %q", bufs)
+	}
+}
+
+// The episode check happens UNDER the write lock: a request that queued
+// behind another write while its session moved on is refused once it gets
+// the lock, instead of answering a question it never saw. The first write is
+// to another session so the refusal can only come from the episode check.
+func TestRemoteEpisodeCheckedUnderTheLock(t *testing.T) {
+	for _, tc := range []struct {
+		what, path, handler, state string
+		body                       func(s swSession) any
+	}{
+		{"send", "/api/remote/send", "handleSend", "Idle", func(s swSession) any {
+			return remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "yes"}
+		}},
+		{"key", "/api/remote/key", "handleKey", "Awaiting", func(s swSession) any {
+			return remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"}
+		}},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			a := idleSession()
+			a.State = tc.state
+			b := swSession{Name: "b", State: "Idle", Since: rt0, ClaudePane: "%2", Context: -1}
+			fleet := testFleet(a, b)
+			r, ft, h := newTestRemote(t, fleet, nil)
+			ft.screens["%1"] = idleScreen("")
+			if tc.state == "Awaiting" {
+				ft.screens["%1"] = dialogScreen()
+			}
+			ft.screens["%2"] = idleScreen("")
+			typing, release := make(chan string, 1), make(chan struct{})
+			ft.set(func(f *fakeRemoteTmux) { f.typing, f.release = typing, release })
+
+			first := make(chan int, 1)
+			go func() {
+				first <- remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+					remoteSendReq{Name: "b", Episode: remoteEpisode(b), Text: "first"}).Code
+			}()
+			if got := <-typing; got != "first" {
+				t.Fatalf("typing %q, want first", got)
+			}
+			second := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				second <- remoteDo(t, h, "POST", tc.path, testRemoteToken, tc.body(a))
+			}()
+			waitWriteMuWaiters(t, tc.handler, 1)
+			if r.writeMu.TryLock() {
+				r.writeMu.Unlock()
+				t.Fatal("write lock not held while the first send is typing")
+			}
+			if got := ft.captured(); !reflect.DeepEqual(got, []string{"%2"}) {
+				t.Fatalf("captures while queued = %q, want only the first send's", got)
+			}
+			// While #2 waits, a moves on to a new episode.
+			moved := a
+			moved.State = "Thinking"
+			moved.Since = rt0.Add(time.Minute)
+			fleet.publish(swSnapshot{Sessions: []swSession{moved, b}}, RateLimits{}, false, nil, rt0)
+			close(release)
+			if code := <-first; code != http.StatusOK {
+				t.Fatalf("first send: %d", code)
+			}
+			rec := <-second
+			if rec.Code != http.StatusConflict || remoteCode(t, rec) != "moved" {
+				t.Fatalf("queued %s: got %d %s, want 409 moved", tc.what, rec.Code, rec.Body)
+			}
+			want := []string{"type %2 first", "keys %2 Enter"}
+			if got := ft.log(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("calls = %q, want only the first send's %q", got, want)
+			}
+		})
+	}
+}
+
+// vimInsertScreen is the idle input box as vim mode draws it while typing.
+func vimInsertScreen(draft string) string {
+	rule := strings.Repeat("─", 30)
+	return "● Done. Tests pass.\n\n" + rule + "\n❯ " + draft + "\n" + rule + "\n  -- INSERT --\n"
+}
+
+// handleSend only types into a prompt it has recognised as empty, and only
+// clears a draft it has recognised as a draft; anything else is refused with
+// a code the page can explain, before any key is pressed.
+func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
+	for _, tc := range []struct {
+		what        string
+		vim         bool
+		screen      string
+		clearScreen string
+		replace     bool
+		status      int
+		code        string
+		calls       []string
+	}{
+		{what: "vim NORMAL, empty box", vim: true, screen: idleScreen(""),
+			status: http.StatusConflict, code: "vim_normal"},
+		{what: "vim NORMAL, replace", vim: true, screen: idleScreen(""), replace: true,
+			status: http.StatusConflict, code: "vim_normal"},
+		{what: "vim NORMAL, draft, replace", vim: true, screen: idleScreen("half"), replace: true,
+			status: http.StatusConflict, code: "vim_normal"},
+		{what: "vim INSERT, empty box", vim: true, screen: vimInsertScreen(""),
+			status: http.StatusOK, calls: []string{"type %1 go", "keys %1 Enter"}},
+		{what: "vim INSERT, draft", vim: true, screen: vimInsertScreen("half"),
+			status: http.StatusConflict, code: "draft"},
+		{what: "vim INSERT, draft, replace", vim: true, screen: vimInsertScreen("half"), clearScreen: vimInsertScreen(""), replace: true,
+			status: http.StatusOK, calls: []string{"keys %1 C-u", "type %1 go", "keys %1 Enter"}},
+		{what: "no input box", screen: "Running the tests…\n",
+			status: http.StatusConflict, code: "unrecognized"},
+		{what: "no input box, replace", screen: "Running the tests…\n", replace: true,
+			status: http.StatusConflict, code: "unrecognized"},
+		{what: "draft, replace, C-u clears nothing", screen: idleScreen("half"), clearScreen: idleScreen("half"), replace: true,
+			status: http.StatusConflict, code: "not_cleared", calls: []string{"keys %1 C-u"}},
+		{what: "draft, replace, C-u clears it", screen: idleScreen("half"), replace: true,
+			status: http.StatusOK, calls: []string{"keys %1 C-u", "type %1 go", "keys %1 Enter"}},
+	} {
+		s := idleSession()
+		r, ft, h := newTestRemote(t, testFleet(s), nil)
+		r.vimMode = tc.vim
+		ft.screens["%1"] = tc.screen
+		ft.clearScreen = tc.clearScreen
+		rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "go", Replace: tc.replace})
+		if rec.Code != tc.status || (tc.code != "" && remoteCode(t, rec) != tc.code) {
+			t.Errorf("%s: got %d %s, want %d %s", tc.what, rec.Code, rec.Body, tc.status, tc.code)
+		}
+		if got := ft.log(); !reflect.DeepEqual(got, tc.calls) {
+			t.Errorf("%s: calls = %q, want %q", tc.what, got, tc.calls)
+		}
+	}
+}
+
+// One answer per episode: a second send, or a second option key, for the
+// same name+episode is refused as "moved" even before the session publishes
+// its new state. Moving around a dialog (and Escape) is not an answer.
+func TestRemoteAnsweredEpisodeIsNotAnsweredTwice(t *testing.T) {
+	t.Run("send", func(t *testing.T) {
+		s := idleSession()
+		fleet := testFleet(s)
+		_, ft, h := newTestRemote(t, fleet, nil)
+		ft.screens["%1"] = idleScreen("")
+		send := func(sess swSession) *httptest.ResponseRecorder {
+			return remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+				remoteSendReq{Name: "a", Episode: remoteEpisode(sess), Text: "go"})
+		}
+		if rec := send(s); rec.Code != http.StatusOK {
+			t.Fatalf("first send: %d %s", rec.Code, rec.Body)
+		}
+		if rec := send(s); rec.Code != http.StatusConflict || remoteCode(t, rec) != "moved" {
+			t.Fatalf("resend: got %d %s, want 409 moved", rec.Code, rec.Body)
+		}
+		if got := ft.log(); len(got) != 2 {
+			t.Fatalf("resend wrote: %q", got)
+		}
+		// A new episode is a new question.
+		next := s
+		next.Since = rt0.Add(time.Minute)
+		fleet.publish(swSnapshot{Sessions: []swSession{next}}, RateLimits{}, false, nil, rt0)
+		if rec := send(next); rec.Code != http.StatusOK {
+			t.Fatalf("send in the next episode: %d %s", rec.Code, rec.Body)
+		}
+		if got := ft.log(); len(got) != 4 {
+			t.Fatalf("calls = %q, want two full sends", got)
+		}
+	})
+	t.Run("keys", func(t *testing.T) {
+		s := idleSession()
+		s.State = "Awaiting"
+		_, ft, h := newTestRemote(t, testFleet(s), nil)
+		ft.screens["%1"] = dialogScreen()
+		key := func(k string) *httptest.ResponseRecorder {
+			return remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+				remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: k})
+		}
+		for _, k := range []string{"Down", "Down", "Up", "Tab", "BTab", "Space"} {
+			if rec := key(k); rec.Code != http.StatusOK {
+				t.Fatalf("%s: got %d %s, want 200 (moving is not answering)", k, rec.Code, rec.Body)
+			}
+		}
+		if rec := key("1"); rec.Code != http.StatusOK {
+			t.Fatalf("first 1: %d %s", rec.Code, rec.Body)
+		}
+		for _, k := range []string{"1", "2", "Enter"} {
+			if rec := key(k); rec.Code != http.StatusConflict || remoteCode(t, rec) != "moved" {
+				t.Errorf("%s after an answer: got %d %s, want 409 moved", k, rec.Code, rec.Body)
+			}
+		}
+		for _, k := range []string{"Down", "Escape"} {
+			if rec := key(k); rec.Code != http.StatusOK {
+				t.Errorf("%s after an answer: got %d %s, want 200 (exempt)", k, rec.Code, rec.Body)
+			}
+		}
+		want := []string{"keys %1 Down", "keys %1 Down", "keys %1 Up", "keys %1 Tab", "keys %1 BTab", "keys %1 Space",
+			"keys %1 1", "keys %1 Down", "keys %1 Escape"}
+		if got := ft.log(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("calls = %q, want %q", got, want)
+		}
+	})
+	t.Run("Enter answers too", func(t *testing.T) {
+		s := idleSession()
+		s.State = "Awaiting"
+		_, ft, h := newTestRemote(t, testFleet(s), nil)
+		ft.screens["%1"] = dialogScreen()
+		for i, want := range []int{http.StatusOK, http.StatusConflict} {
+			rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+				remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "Enter"})
+			if rec.Code != want {
+				t.Errorf("Enter #%d: got %d %s, want %d", i+1, rec.Code, rec.Body, want)
+			}
+		}
+		if got := ft.log(); !reflect.DeepEqual(got, []string{"keys %1 Enter"}) {
+			t.Fatalf("calls = %q", got)
+		}
+	})
+}
+
+// The defer reason is shown at the desk and on the phone: control characters
+// are refused, and an over-long reason is cut to 200 runes.
+func TestRemoteDeferReason(t *testing.T) {
+	_, ft, h := newTestRemote(t, testFleet(idleSession()), nil)
+	for _, reason := range []string{"ci\x1b[2J", "ding\x07", "a\u009bb"} {
+		rec := remoteDo(t, h, "POST", "/api/remote/defer", testRemoteToken, remoteDeferReq{Name: "a", On: true, Reason: reason})
+		if rec.Code != http.StatusBadRequest || remoteCode(t, rec) != "control" {
+			t.Errorf("reason %q: got %d %s, want 400 control", reason, rec.Code, rec.Body)
+		}
+	}
+	if got := ft.log(); len(got) != 0 {
+		t.Fatalf("refused defers ran tmux: %q", got)
+	}
+	long := strings.Repeat("é", 300)
+	rec := remoteDo(t, h, "POST", "/api/remote/defer", testRemoteToken, remoteDeferReq{Name: "a", On: true, Reason: long})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("long reason: got %d %s", rec.Code, rec.Body)
+	}
+	want := "run " + strings.Join(deferArgs("%0", true, strings.Repeat("é", 200)), " ")
+	if got := ft.log(); len(got) != 1 || got[0] != want {
+		t.Fatalf("calls = %q, want the reason cut to 200 runes", got)
+	}
+}
+
+// Every error code the page branches on is one the server emits, and the
+// page names an episode on every send and key, which the server requires.
+func TestRemotePageAndServerAgreeOnCodes(t *testing.T) {
+	page := string(webRemoteHTML)
+	src, err := os.ReadFile("webremote.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "episode" and "control" are emitted too, but the page has no special
+	// handling for them: they reach the user through the generic error toast.
+	for _, code := range []string{"token", "setup", "draft", "dismissed_draft", "dialog", "moved", "partial",
+		"vim_normal", "unrecognized", "not_cleared"} {
+		if !strings.Contains(page, "'"+code+"'") {
+			t.Errorf("the page never checks for code %q", code)
+		}
+		if !strings.Contains(string(src), `"`+code+`"`) {
+			t.Errorf("webremote.go never emits code %q", code)
+		}
+	}
+	for _, path := range []string{"send", "key"} {
+		re := regexp.MustCompile(`api\('/api/remote/` + path + `',\s*\{[^}]*\bepisode\b`)
+		if !re.MatchString(page) {
+			t.Errorf("the page's %s call does not carry an episode", path)
+		}
+	}
+	if strings.Contains(page, "Haiku had nothing to suggest") || !strings.Contains(page, "Nothing to suggest for this one.") {
+		t.Error("the empty-suggestions note should read \"Nothing to suggest for this one.\"")
+	}
+}
+
+// A tab goes in through the paste path, not send-keys -l (where tmux would
+// read it as a key): it arrives as a literal tab inside the paste brackets.
+func TestExecRemoteTmuxTypeTextTab(t *testing.T) {
+	pane := tmuxIsolated(t, `printf '\033[?2004h'; stty raw -echo; echo READY; exec cat -v`)
+	tm := execRemoteTmux{}
+	waitFor(t, "the pane to be ready", func() bool {
+		s, err := tm.capture(pane, false, 0)
+		return err == nil && strings.Contains(s, "READY")
+	})
+	if err := tm.typeText(pane, "a\tb"); err != nil {
+		t.Fatalf("typeText: %v", err)
+	}
+	if err := tm.keys(pane, "C-j"); err != nil {
+		t.Fatal(err)
+	}
+	var screen string
+	waitFor(t, "the paste to show", func() bool {
+		s, err := tm.capture(pane, false, 0)
+		screen = s
+		return err == nil && strings.Contains(s, "201~")
+	})
+	// cat -v leaves a tab as a tab, and the capture may expand it to spaces:
+	// either way it must sit inside the paste brackets.
+	if want := regexp.MustCompile(`\^\[\[200~a[\t ]+b\^\[\[201~`); !want.MatchString(screen) {
+		t.Fatalf("pane shows:\n%s\nwant one bracketed paste of a<tab>b", screen)
+	}
+	if bufs := tmuxRemoteBuffers(t); len(bufs) != 0 {
+		t.Fatalf("paste buffers left behind: %q", bufs)
 	}
 }
