@@ -432,6 +432,25 @@ function pickCurrent() {
   return null;
 }
 
+// The session on screen (or the pinned one) is really gone: closed,
+// renamed, or the lobby answered "gone". Conduction moving on after an
+// answer never comes here. With a draft in the composer, conduction
+// pauses and nothing is targeted, so a Return can't send the draft to
+// whichever session would have come next; with no draft, a short note
+// is enough and conduction carries on.
+function sessionVanished(name) {
+  if (!name || (name !== S.current && name !== S.pinned)) return false;
+  if (S.pinned === name) S.pinned = null;
+  if (S.current === name) { S.current = null; S.detail = null; S.detailError = ''; S.screenTall = false; }
+  if ($('input').value.trim() !== '') {
+    S.conduct = false;
+    toast(name + ' is gone; your draft is kept', { err: true, duration: 6000 });
+  } else {
+    toast(name + ' ended', { duration: 1600 });
+  }
+  return true;
+}
+
 function forgetStale() {
   for (const [name, ep] of [...S.skipped]) { const s = byName(name); if (!s || s.episode !== ep) S.skipped.delete(name); }
   for (const [name, ep] of [...S.answered]) { const s = byName(name); if (!s || s.episode !== ep) S.answered.delete(name); }
@@ -486,6 +505,10 @@ async function pollQueue() {
     S.sessions = q.sessions; S.queue = q.queue; S.replies = q.replies || []; S.suggestOn = !!q.suggest;
     S.online = true; S.setupError = ''; S.apiError = '';
     forgetStale();
+    // S.sessions lists every session, waiting or not: one missing from it
+    // has closed or been renamed.
+    if (S.pinned && !byName(S.pinned)) sessionVanished(S.pinned);
+    if (S.current && !byName(S.current)) sessionVanished(S.current);
     const next = pickCurrent();
     if (next !== S.current) { S.current = next; S.detail = null; S.detailError = ''; S.screenTall = false; pollDetail(); }
     render();
@@ -504,7 +527,7 @@ async function pollDetail() {
     S.detail = d; S.detailError = ''; S.detailAt = Date.now();
   } catch (e) {
     if (seq !== detailSeq || name !== S.current) return;
-    if (e.code === 'gone') { rearm = false; S.current = null; pollQueue(); return; }
+    if (e.code === 'gone') { rearm = false; sessionVanished(name); S.current = null; pollQueue(); return; }
     try {
       S.detailError = e.message;
       if (isGlobalFailure(e)) handleApiFailure(e);
@@ -548,8 +571,13 @@ function handleApiFailure(e) {
 // lobby as a whole (not this one action): route it like a poll failure.
 // Returns true when it handled e. "gone" is a 404 too, so it is checked
 // before the global test, which would read 404 as "remote is off".
-function handleWriteFailure(e) {
-  if (e.code === 'gone') { toast(e.message, { err: true }); pollQueue(); return true; }
+// name is the session the write was aimed at: if it is the one on screen,
+// sessionVanished keeps any draft from drifting to the next session.
+function handleWriteFailure(e, name) {
+  if (e.code === 'gone') {
+    if (!sessionVanished(name)) toast(e.message, { err: true });
+    pollQueue(); return true;
+  }
   if (isGlobalFailure(e)) { handleApiFailure(e); return true; }
   return false;
 }
@@ -626,7 +654,7 @@ async function doSend(name, episode, text, opts = {}) {
     } else if (e.code === 'unconfirmed') {
       // It may have landed: refresh now so the screen shows whether it did.
       toast(e.message, { err: true, duration: 8000 }); pollDetail();
-    } else if (!handleWriteFailure(e)) {
+    } else if (!handleWriteFailure(e, name)) {
       toast(e.message, { err: true });
     }
   }
@@ -661,7 +689,7 @@ async function doKey(name, episode, key, advance, okMsg) {
     pollDetail();
   } catch (e) {
     if (e.code === 'unconfirmed') { toast(e.message, { err: true, duration: 8000 }); pollDetail(); return; }
-    if (handleWriteFailure(e)) return;
+    if (handleWriteFailure(e, name)) return;
     toast(e.message, { err: true });
     if (e.code === 'moved') pollQueue();
   }
@@ -1062,7 +1090,10 @@ async function sendTyped() {
   if (S.sending) return;
   const s = byName(S.current);
   const text = input.value.trim();
-  if (!s || !text) return;
+  if (!text) return;
+  // No session targeted (one vanished under a draft, or none is up):
+  // never guess where the text should go.
+  if (!s) { toast('Pick a session first; your draft is kept', { err: true, duration: 3000 }); return; }
   S.sending = true; $('sendBtn').disabled = true;
   try {
     // Typed text has already been read and edited: no undo window.
@@ -1098,7 +1129,7 @@ $('deferBtn').onclick = async () => {
       toast('Not deferred: ' + e.message + '. Shorten the reason and try again.', { err: true, duration: 6000 });
     } else if (e.code === 'unconfirmed') {
       toast(e.message, { err: true, duration: 8000 }); pollQueue();
-    } else if (!handleWriteFailure(e)) {
+    } else if (!handleWriteFailure(e, s.name)) {
       toast(e.message, { err: true });
     }
   }

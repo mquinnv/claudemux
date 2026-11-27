@@ -321,3 +321,57 @@ func TestWebAllowedHost(t *testing.T) {
 		}
 	}
 }
+
+// TestStartSwitchboardWebControlSuggestOn covers the production wiring of
+// the summarizer into the remote: with summaries enabled and a key present,
+// /api/remote/queue must report suggest:true. The fleet is empty, so no
+// model call is made, and the base URL points at a local server that fails
+// the test if anything reaches it.
+func TestStartSwitchboardWebControlSuggestOn(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected API call: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer api.Close()
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-a-real-key")
+	t.Setenv("ANTHROPIC_BASE_URL", api.URL)
+	t.Setenv(remoteTokenKey, testRemoteToken)
+
+	cfg := defaultConfig()
+	cfg.Web.Listen = "127.0.0.1:0"
+	cfg.Web.Control = true
+	cfg.Summary.Enabled = true
+	cfg.Summary.APIKeyFile = t.TempDir() + "/env" // never the real one
+	w, err := startSwitchboardWeb(cfg,
+		func() (string, error) { return "", errors.New("unused") },
+		func() (webAllow, error) { return webAllow{}, nil })
+	if err != nil || w == nil {
+		t.Fatalf("got %+v, %v", w, err)
+	}
+	defer w.stop()
+
+	req, err := http.NewRequest("GET", "http://"+w.addr()+"/api/remote/queue", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testRemoteToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("queue: %d %s", resp.StatusCode, body)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := raw["suggest"].(bool); !ok || !got {
+		t.Errorf("suggest = %v, want true with summaries enabled and a key set", raw["suggest"])
+	}
+}

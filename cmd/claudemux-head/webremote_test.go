@@ -283,11 +283,17 @@ func newTestRemote(t *testing.T, fleet *webFleet, gen remoteSuggester) (*webRemo
 
 func newTestRemoteWith(t *testing.T, fleet *webFleet, gen remoteSuggester, token string, tokenErr error) (*webRemote, *fakeRemoteTmux, http.Handler) {
 	t.Helper()
+	// newWebRemote reads claude's editor mode from $HOME (or
+	// CLAUDE_CONFIG_DIR): point both at nothing so a developer's own
+	// settings cannot change vimMode/vimAssumed. Both are then pinned below.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	ft := &fakeRemoteTmux{screens: map[string]string{}}
 	cfg := defaultConfig()
 	r := newWebRemote(fleet, cfg, token, gen)
 	r.tmux = ft
 	r.vimMode = false
+	r.vimAssumed = false
 	r.sleep = ft.sleep
 	h := webHandlerWith(fleet, webAllow{}, func(mux *http.ServeMux) { r.register(mux, tokenErr) })
 	return r, ft, h
@@ -1822,6 +1828,11 @@ func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
 		// box (a numbered dialog drawn in a frame, say).
 		{what: "box without the prompt glyph, replace", screen: strings.Repeat("─", 30) + "\n  1. Yes\n" + strings.Repeat("─", 30) + "\n", replace: true,
 			status: http.StatusConflict, code: "unrecognized"},
+		{what: "box far above the end of the screen, replace", screen: farUpScreen(), replace: true,
+			status: http.StatusConflict, code: "unrecognized"},
+		// vim mode off, but the footer names NORMAL: the footer wins.
+		{what: "vim off, NORMAL footer, draft, replace", screen: normalFooterScreen("half"), replace: true,
+			status: http.StatusConflict, code: "vim_normal"},
 		{what: "draft, replace, C-u clears nothing", screen: idleScreen("half"), clearScreen: idleScreen("half"), replace: true,
 			status: http.StatusConflict, code: "not_cleared", msg: "not typed", calls: []string{"keys %1 C-u"}},
 		{what: "draft, replace, C-u clears it", screen: idleScreen("half"), replace: true,
@@ -1847,6 +1858,66 @@ func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
 		if got := ft.log(); !reflect.DeepEqual(got, tc.calls) {
 			t.Errorf("%s: calls = %q, want %q", tc.what, got, tc.calls)
 		}
+	}
+}
+
+// farUpScreen is an empty input box followed by more output lines than
+// promptTailLines allows: the box is history, not the live prompt.
+func farUpScreen() string {
+	return idleScreen("") + "line one\nline two\nline three\nline four\n"
+}
+
+// normalFooterScreen is an input box whose footer names vim NORMAL mode.
+func normalFooterScreen(draft string) string {
+	rule := strings.Repeat("─", 30)
+	return "● Done.\n\n" + rule + "\n❯ " + draft + "\n" + rule + "\n  -- NORMAL --\n"
+}
+
+// remotePromptState's structural guards, one screen per branch.
+func TestRemotePromptStateGuards(t *testing.T) {
+	rule := strings.Repeat("─", 30)
+	for _, tc := range []struct {
+		what   string
+		screen string
+		vim    bool
+		empty  bool
+		code   string
+	}{
+		{what: "empty box", screen: idleScreen(""), empty: true},
+		{what: "draft", screen: idleScreen("half"), code: "draft"},
+		{what: "bottom rule too far above the end", screen: farUpScreen(), code: "unrecognized"},
+		{what: "adjacent rules", screen: "out\n" + rule + "\n" + rule + "\n  ? for shortcuts\n", code: "unrecognized"},
+		{what: "first inner line lacks the prompt glyph", screen: "out\n" + rule + "\n  1. Yes\n  2. No\n" + rule + "\n", code: "unrecognized"},
+		{what: "vim off, NORMAL footer, draft", screen: normalFooterScreen("half"), code: "vim_normal"},
+		{what: "vim on, INSERT, empty box", screen: vimInsertScreen(""), vim: true, empty: true},
+	} {
+		empty, code := remotePromptState(tc.screen, tc.vim)
+		if empty != tc.empty || code != tc.code {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)", tc.what, empty, code, tc.empty, tc.code)
+		}
+	}
+}
+
+// When vim mode is only assumed (no claude settings readable), the
+// vim_normal refusal says so.
+func TestRemoteSendVimAssumedMessage(t *testing.T) {
+	s := idleSession()
+	r, ft, h := newTestRemote(t, testFleet(s), nil)
+	r.vimMode = true
+	r.vimAssumed = true
+	ft.screens["%1"] = idleScreen("")
+	rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+		remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "go"})
+	if rec.Code != http.StatusConflict || remoteCode(t, rec) != "vim_normal" {
+		t.Fatalf("got %d %s, want 409 vim_normal", rec.Code, rec.Body)
+	}
+	var e remoteErrorBody
+	_ = json.Unmarshal(rec.Body.Bytes(), &e)
+	if !strings.Contains(e.Message, "assumes vim mode") {
+		t.Errorf("message %q does not say vim mode is assumed", e.Message)
+	}
+	if got := ft.log(); len(got) != 0 {
+		t.Errorf("calls = %q, want none", got)
 	}
 }
 
