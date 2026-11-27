@@ -36,7 +36,7 @@ var sharedClaudeEntries = []string{
 	"projects", "settings.json", "CLAUDE.md", "rules", "skills", "agents",
 	"commands", "plugins", "hooks", "claudemux", "memory.jsonl", "team.json",
 	"plans", "specs", "scripts", "file-history", "history.jsonl", "todos",
-	"session-env", "shell-snapshots",
+	"session-env", "shell-snapshots", "keybindings.json", "output-styles",
 }
 
 // dirProblem is one entry of an account dir that is not the expected link.
@@ -104,7 +104,8 @@ func checkAccountDir(home, dir string) ([]dirProblem, error) {
 
 // setupAccountDir creates dir and any missing links. Idempotent. It never
 // overwrites a real file or folder (or a wrong link): those are left for
-// checkAccountDir to report. .claude.json is never touched.
+// checkAccountDir to report. .claude.json is never touched here; `account
+// setup` seeds a missing one separately (seedAccountClaudeJSON).
 func setupAccountDir(home, dir string) (created []string, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

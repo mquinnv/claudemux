@@ -1074,14 +1074,18 @@ unset; at most one account may do that. Names match `[a-z0-9][a-z0-9_-]{0,31}`. 
 
 The account for a launch is, highest first: `claudemux -a <account>`,
 `claude_account: <name>` in the project's `.claudemux.yml` (or `.project.yml`), then
-`claude.default_account` (required once any account is declared: leaving it unset, or naming an account that isn't listed, is a startup error). An unknown name anywhere is an error that names it. The account
-covers the whole tmux session (shell pane and hooks included). Handoffs resolve the
-*target* project's account. With more than one account configured, sessions show an
-account badge and the lobby shows a meter row per account.
+`claude.default_account`. `default_account` is required once any account is declared:
+leaving it unset, or naming an account that isn't listed, is a startup error. An unknown
+name anywhere is an error that names it. The account covers the whole tmux session (shell
+pane and hooks included). Handoffs resolve the *target* project's account. With more than
+one account configured, sessions show an account badge and the lobby shows a meter row
+per account; an account whose meters can't be read yet shows `meters unavailable`.
 
 Resuming (`-r <id>`, reboot restore) always uses the account recorded for that session;
 a `-a` that contradicts the record is an error rather than a switch. A session with no
-recorded account resumes on `~/.claude`.
+recorded account (one started before accounts were configured) runs on `~/.claude`: it
+resumes there, reboot restore relaunches it there, and the lobby and web page badge it as
+the `~/.claude` account.
 
 Manage account folders with the head binary:
 
@@ -1094,7 +1098,11 @@ claudemux-head account list           # accounts and their folders
 
 `setup` links what describes you or the machine (settings, `CLAUDE.md`, skills, plugins,
 `projects/`, history) and leaves the login (`.claude.json`, keychain item) per account.
-Your user-level MCP servers from the `~/.claude` account are synced into the others at
+When the account has no `.claude.json` yet, `setup` seeds one from `~/.claude.json`
+without its login and account keys (`oauthAccount`, `userID`, subscription, org and
+API-key state), so onboarding and project trust carry over; an existing one is never
+touched. **Run `claudemux-head account login <name>` once before launching detached
+sessions on a new account**, or they stop at the login screen. Your user-level MCP servers from the `~/.claude` account are synced into the others at
 launch. **MCP logins are per account — run `/mcp` once in each.** The lobby also warns at
 startup when an account folder needs repair.
 

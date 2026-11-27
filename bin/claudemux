@@ -41,6 +41,11 @@
 #        claude finds a --resume id under the project dir of its cwd, and a
 #        session that entered a worktree lives under the worktree's. Ignored
 #        if the directory no longer exists: claude starts in the launch dir.
+#   -a   Launch on this Claude account (claude.accounts in config.yml). It
+#        outranks the project's claude_account and claude.default_account;
+#        an unknown name is an error. With -r, the account recorded for the
+#        session wins and a different -a is an error. Reboot restore passes
+#        the recorded account (the ~/.claude one for an account-less record).
 #
 # This script does not create worktrees and no longer passes `claude
 # --worktree`. It decides whether a session SHOULD have one and exports

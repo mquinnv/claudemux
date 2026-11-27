@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -99,6 +100,14 @@ func runAccountSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "linked %s\n", e)
 	}
 	fmt.Fprintf(stdout, "%s: %d links created\n", dir, len(created))
+	seeded, err := seedAccountClaudeJSON(filepath.Join(home, ".claude.json"), filepath.Join(dir, ".claude.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "claudemux-head: seeding .claude.json: %v\n", err)
+		return 1
+	}
+	if seeded {
+		fmt.Fprintf(stdout, "seeded .claude.json from ~/.claude.json (login and account keys left out); run: claudemux account login %s\n", args[0])
+	}
 	return reportAccountProblems(dir, home, stdout)
 }
 
