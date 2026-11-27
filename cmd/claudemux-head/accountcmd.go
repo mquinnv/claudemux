@@ -25,13 +25,9 @@ func resolveAccount(cfg ClaudeConfig, dir, flag, resumeID string,
 			if acct != "" {
 				name, source = acct, "record"
 			} else {
-				for _, n := range cfg.Names() {
-					if d, err := cfg.ConfigDir(n); err == nil && d == "" {
-						name, source = n, "legacy-record"
-						break
-					}
-				}
-				if name == "" {
+				if n, ok := cfg.HomeAccount(); ok {
+					name, source = n, "legacy-record"
+				} else {
 					return accountChoice{}, fmt.Errorf("session %s has no recorded account and no account uses ~/.claude", resumeID)
 				}
 			}

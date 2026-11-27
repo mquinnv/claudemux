@@ -56,6 +56,12 @@ func (m model) sessionRecordFor(now time.Time) sessionRecord {
 		State:     statePublishValue(m.state),
 		Topic:     m.summary.Topic,
 		LastSeen:  now.Unix(),
+		// The head's own account (multi mode only; "" in single mode). It
+		// stands in when the session's @claudemux_account is empty: a pane
+		// launched before accounts existed has no option, but its env (no
+		// CLAUDE_CONFIG_DIR) still says it runs on ~/.claude. writeRecordCmd
+		// lets a non-empty tmux value win.
+		Account: m.account,
 	}
 	// Until this head lands a summary, keep the topic it inherited: writing
 	// "" would erase the only copy, and the next restart would start blank.
@@ -165,14 +171,28 @@ func writeRecordCmd(selfPane, dir string, r sessionRecord) tea.Cmd {
 		if err != nil {
 			return nil
 		}
-		name, path, parent, account, ok := parseSessionNamePath(string(out))
+		r, ok := mergeTmuxRecord(r, string(out))
 		if !ok {
 			return nil
 		}
-		r.SessionName, r.LaunchDir, r.Parent, r.Account = name, path, parent, account
 		if writeSessionRecord(dir, r) != nil {
 			return nil
 		}
-		return recordWrittenMsg{name: name}
+		return recordWrittenMsg{name: r.SessionName}
 	}
+}
+
+// mergeTmuxRecord fills r's tmux-derived fields from writeRecordCmd's
+// display-message output. An empty @claudemux_account keeps r.Account (the
+// head's own, see sessionRecordFor) rather than erasing it.
+func mergeTmuxRecord(r sessionRecord, out string) (sessionRecord, bool) {
+	name, path, parent, account, ok := parseSessionNamePath(out)
+	if !ok {
+		return r, false
+	}
+	r.SessionName, r.LaunchDir, r.Parent = name, path, parent
+	if account != "" {
+		r.Account = account
+	}
+	return r, true
 }

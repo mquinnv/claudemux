@@ -167,7 +167,14 @@ func liveSessionIDs(dir string, panes []string, cutoff int64) map[string]bool {
 // restoreArgs is the launcher argv (after "claudemux") for one session.
 // -W: the session already has whatever worktree it had. -C only when the
 // recorded cwd still exists and differs from the launch dir.
-func restoreArgs(l lostSession, dirExists func(string) bool) ([]string, error) {
+//
+// -a: the recorded account. In multi mode a record with no account (written
+// before accounts existed, by a session on ~/.claude) gets the account with
+// no config_dir — the same legacy rule resolveAccount applies — because
+// startRestore archives the records before the launcher could look them up,
+// and a bare relaunch would land on the default account instead. Single mode
+// passes no -a for such a record, as before.
+func restoreArgs(l lostSession, cfg ClaudeConfig, dirExists func(string) bool) ([]string, error) {
 	r := l.Rec
 	if !resumeIDOK(r.SessionID) || r.SessionID == "" {
 		return nil, fmt.Errorf("bad session id %q", r.SessionID)
@@ -179,8 +186,16 @@ func restoreArgs(l lostSession, dirExists func(string) bool) ([]string, error) {
 	if r.ClaudeCwd != "" && r.ClaudeCwd != r.LaunchDir && dirExists(r.ClaudeCwd) {
 		args = append(args, "-C", r.ClaudeCwd)
 	}
-	if r.Account != "" {
-		args = append(args, "-a", r.Account)
+	acct := r.Account
+	if acct == "" && cfg.Multi() {
+		home, ok := cfg.HomeAccount()
+		if !ok {
+			return nil, errors.New("session ran on ~/.claude but no account uses ~/.claude")
+		}
+		acct = home
+	}
+	if acct != "" {
+		args = append(args, "-a", acct)
 	}
 	return append(args, "--", r.LaunchDir), nil
 }
@@ -192,10 +207,10 @@ func dirExists(p string) bool {
 
 // swRestoreOneCmd relaunches one session. Same timeout and error reporting
 // as swCreateCmd: the launcher's last stderr line says why it failed.
-func swRestoreOneCmd(l lostSession) tea.Cmd {
+func swRestoreOneCmd(l lostSession, cfg ClaudeConfig) tea.Cmd {
 	return func() tea.Msg {
 		name := l.Rec.SessionName
-		args, err := restoreArgs(l, dirExists)
+		args, err := restoreArgs(l, cfg, dirExists)
 		if err != nil {
 			return swRestoreStepMsg{name: name, err: err}
 		}
@@ -337,7 +352,7 @@ func (m *swModel) startRestore() tea.Cmd {
 	o.total = len(sel)
 	o.done = 0
 	o.queue = sel[1:]
-	return swRestoreOneCmd(sel[0])
+	return swRestoreOneCmd(sel[0], m.claude)
 }
 
 // swRestoreStripText is the one-line strip above the fleet list.

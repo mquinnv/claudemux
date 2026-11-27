@@ -43,14 +43,16 @@ type webFleet struct {
 
 func newWebFleet() *webFleet { return &webFleet{title: defaultWebTitle} }
 
-// webAccountFacts is one account's meter row for the page (multi mode only):
-// the account, its badge colour as "#rrggbb", and its own budget facts.
+// webAccountFacts is one account for the page (multi mode only): the
+// account, its badge colour as "#rrggbb", and its own budget facts. A
+// BadgeOnly account only colours session badges and draws no meter row.
 type webAccountFacts struct {
-	Name    string
-	Color   string
-	RL      RateLimits
-	RLOK    bool
-	Windows []ModelWindow
+	Name      string
+	Color     string
+	RL        RateLimits
+	RLOK      bool
+	Windows   []ModelWindow
+	BadgeOnly bool
 }
 
 // publish replaces the fleet facts. Only the lobby's Update calls it. rl,
@@ -254,6 +256,9 @@ func buildWebFleetView(snap swSnapshot, rl RateLimits, rlOK bool, windows []Mode
 	acctColor := map[string]string{}
 	for _, a := range accounts {
 		acctColor[a.Name] = a.Color
+		if a.BadgeOnly {
+			continue
+		}
 		av := webAccountView{Name: a.Name, Color: a.Color}
 		if a.RLOK {
 			av.webBudget = webBudgetFor(a.RL, a.Windows, now)

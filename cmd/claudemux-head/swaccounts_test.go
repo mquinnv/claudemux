@@ -93,17 +93,19 @@ func TestSwMetersLinePerAccount(t *testing.T) {
 		}
 	}
 
-	// One account's unreadable cache drops its row and leaves the other's.
+	// One account's unreadable cache keeps its row as "meters unavailable"
+	// and leaves the other's.
 	next, _ = m.Update(swSnapshotMsg{at: time.Now(), snap: snap,
 		rl:    map[string]RateLimits{"bespoke": swRL(73, 83)},
 		rlErr: map[string]error{"ameriglide": errors.New("no such file")}})
 	m = next.(swModel)
 	lines = strings.Split(ansi.Strip(swMetersLine(m, time.Now())), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], "bespoke") || !strings.Contains(lines[0], "73%") {
-		t.Errorf("after ameriglide error, meters = %q, want bespoke's row alone", lines)
+	if len(lines) != 2 || !strings.Contains(lines[0], "ameriglide meters unavailable") ||
+		!strings.Contains(lines[1], "bespoke") || !strings.Contains(lines[1], "73%") {
+		t.Errorf("after ameriglide error, meters = %q, want ameriglide unavailable + bespoke's row", lines)
 	}
-	if m.meterRows() != 1 {
-		t.Errorf("meterRows = %d, want 1", m.meterRows())
+	if m.meterRows() != 2 {
+		t.Errorf("meterRows = %d, want 2", m.meterRows())
 	}
 
 	// Hidden: bespoke has data but no live session.

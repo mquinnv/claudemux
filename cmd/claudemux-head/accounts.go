@@ -125,6 +125,39 @@ func (c ClaudeConfig) ForConfigDir(envDir string) (string, bool) {
 	return "", false
 }
 
+// HomeAccount is the account with no config_dir, i.e. the ~/.claude one. In
+// single mode that is the implicit (or only) account.
+func (c ClaudeConfig) HomeAccount() (string, bool) {
+	for _, n := range c.Names() {
+		if d, err := c.ConfigDir(n); err == nil && d == "" {
+			return n, true
+		}
+	}
+	return "", false
+}
+
+// SessionAccount is the account a session runs on, from its
+// @claudemux_account value. In multi mode an empty value is a session that
+// predates accounts (or whose head has not published yet): it runs on
+// ~/.claude, so it is the account with no config_dir, or the default when no
+// account uses ~/.claude. A name the config does not know is nobody's ("").
+// Single mode has one account and returns it whatever the value.
+func (c ClaudeConfig) SessionAccount(tmuxValue string) string {
+	if !c.Multi() {
+		return c.Default()
+	}
+	if tmuxValue == "" {
+		if n, ok := c.HomeAccount(); ok {
+			return n
+		}
+		return c.Default()
+	}
+	if _, ok := c.Accounts[tmuxValue]; ok {
+		return tmuxValue
+	}
+	return ""
+}
+
 // Validate checks the block is internally consistent.
 func (c ClaudeConfig) Validate() error {
 	if len(c.Accounts) == 0 {

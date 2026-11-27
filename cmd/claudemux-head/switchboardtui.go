@@ -547,9 +547,10 @@ func swDefaultFirst(cfg ClaudeConfig, names []string) []string {
 }
 
 // swMeterAccounts is the accounts that get a meter row: those with at least
-// one live session, default first, then the rest sorted. A session that
-// publishes no account (a head older than @claudemux_account) counts as the
-// default account's; a name the config does not know counts as nobody's.
+// one live session, default first, then the rest sorted. A session's account
+// is cfg.SessionAccount: one that publishes no account (a session launched
+// before accounts existed) counts as the ~/.claude account's; a name the
+// config does not know counts as nobody's.
 // When nothing is live the default account's row stands in, so a fresh lobby
 // is never meterless. Single mode is always just the one account.
 func swMeterAccounts(cfg ClaudeConfig, snap swSnapshot) []string {
@@ -558,11 +559,7 @@ func swMeterAccounts(cfg ClaudeConfig, snap swSnapshot) []string {
 	}
 	live := map[string]bool{}
 	for _, s := range snap.Sessions {
-		a := s.Account
-		if a == "" {
-			a = cfg.Default()
-		}
-		if _, ok := cfg.Accounts[a]; ok {
+		if a := cfg.SessionAccount(s.Account); a != "" {
 			live[a] = true
 		}
 	}
@@ -583,12 +580,14 @@ func (m swModel) meterShown(account string) bool {
 	return slices.Contains(swMeterAccounts(m.claude, m.snap), account)
 }
 
-// meterLineAccounts is the meter rows View draws: the shown accounts whose
-// rate-limit cache read cleanly.
+// meterLineAccounts is the meter rows View draws. Single mode: the account
+// when its rate-limit cache read cleanly (none otherwise, as always). Multi
+// mode: every shown account; one whose cache is unreadable or missing keeps
+// its row as "meters unavailable" rather than silently vanishing.
 func (m swModel) meterLineAccounts() []string {
 	var out []string
 	for _, n := range swMeterAccounts(m.claude, m.snap) {
-		if a := m.meters(n); a != nil && a.rateOK {
+		if a := m.meters(n); a != nil && (a.rateOK || m.claude.Multi()) {
 			out = append(out, n)
 		}
 	}
@@ -706,19 +705,44 @@ func (m *swModel) creditRefreshCmd(msg swSnapshotMsg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// webAccounts is the per-account meter rows for the web page: the same rows
-// the lobby draws, nil in single mode so the page keeps its legacy shape.
+// webAccounts is the per-account facts for the web page, nil in single mode
+// so the page keeps its legacy shape: the same meter rows the lobby draws
+// (an unreadable cache is a row with no budget), then every other configured
+// account as badge-only, so session badges never depend on a cache read.
 func (m swModel) webAccounts() []webAccountFacts {
 	if !m.claude.Multi() {
 		return nil
 	}
 	var out []webAccountFacts
-	for _, n := range m.meterLineAccounts() {
+	rows := m.meterLineAccounts()
+	for _, n := range rows {
 		a := m.meters(n)
 		out = append(out, webAccountFacts{Name: n, Color: accountColor(m.claude, n),
 			RL: a.rateLimits, RLOK: a.rateOK, Windows: a.modelWindows})
 	}
+	for _, n := range m.accountOrder() {
+		if !slices.Contains(rows, n) {
+			out = append(out, webAccountFacts{Name: n, Color: accountColor(m.claude, n), BadgeOnly: true})
+		}
+	}
 	return out
+}
+
+// webSnapshot is the fleet as the web page gets it. In multi mode each
+// session's Account is resolved through SessionAccount (so an account-less
+// session is badged as the ~/.claude account, like its lobby row); the
+// sessions are copied, leaving the lobby's snapshot untouched. Single mode
+// returns m.snap as is.
+func (m swModel) webSnapshot() swSnapshot {
+	snap := m.snap
+	if !m.claude.Multi() {
+		return snap
+	}
+	snap.Sessions = append([]swSession(nil), m.snap.Sessions...)
+	for i := range snap.Sessions {
+		snap.Sessions[i].Account = m.claude.SessionAccount(snap.Sessions[i].Account)
+	}
+	return snap
 }
 
 // shouldAutoRestart reports whether this poll may re-exec into a rebuilt
@@ -1087,7 +1111,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.snap = msg.snap
 		if m.web != nil {
-			m.web.publish(m.snap, m.rateLimits, m.rateOK, m.modelWindows, msg.at, m.webAccounts()...)
+			m.web.publish(m.webSnapshot(), m.rateLimits, m.rateOK, m.modelWindows, msg.at, m.webAccounts()...)
 			m.headliner.poke()
 		}
 		// The scan needs the live fleet to exclude sessions already running
@@ -1169,7 +1193,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(o.queue) > 0 {
 			next := o.queue[0]
 			o.queue = o.queue[1:]
-			return m, swRestoreOneCmd(next)
+			return m, swRestoreOneCmd(next, m.claude)
 		}
 		o.busy = false
 		restored := o.restored
@@ -1629,9 +1653,24 @@ func swMetersLine(m swModel, now time.Time) string {
 	lines := make([]string, 0, len(names))
 	for _, n := range names {
 		badge := swPad(accountBadge(n, accountColor(m.claude, n)), nameW+1)
-		lines = append(lines, swAccountMetersLine(*m.meters(n), badge, m.width, now))
+		a := m.meters(n)
+		if !a.rateOK {
+			lines = append(lines, swUnavailableMetersLine(badge, m.width))
+			continue
+		}
+		lines = append(lines, swAccountMetersLine(*a, badge, m.width, now))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// swUnavailableMetersLine is a multi-mode meter row for an account whose
+// rate-limits cache cannot be read: its badge, then a dim notice.
+func swUnavailableMetersLine(badge string, width int) string {
+	text := swStatusStyle.Render("meters unavailable")
+	if width <= 0 {
+		return " " + badge + text
+	}
+	return statusbarStyle.Width(width).Render(clipLine(" "+badge+text+" ", width))
 }
 
 // swAccountMetersLine is one account's meter row, badge first ("" for none).
@@ -1690,16 +1729,14 @@ func (m swModel) rowPRW() int {
 	return 1 + w
 }
 
-// rowAccount is the account a row's badge names: the session's own, only in
-// multi mode and only when the config knows it. "" otherwise.
+// rowAccount is the account a row's badge names, only in multi mode:
+// m.claude.SessionAccount, so a session with no account wears the ~/.claude
+// account's badge and an unknown name wears none. "" in single mode.
 func (m swModel) rowAccount(sess swSession) string {
 	if !m.claude.Multi() {
 		return ""
 	}
-	if _, ok := m.claude.Accounts[sess.Account]; !ok {
-		return ""
-	}
-	return sess.Account
+	return m.claude.SessionAccount(sess.Account)
 }
 
 // rowAcctW is the account column's width, its leading space included: 0 in

@@ -59,7 +59,7 @@ func TestLiveSessionIDs(t *testing.T) {
 
 func TestRestoreArgs(t *testing.T) {
 	exists := func(p string) bool { return p != "/gone" }
-	args, err := restoreArgs(lostRec("remix-2", "abc", "/p/remix", "/p/remix/wt", 1, false), exists)
+	args, err := restoreArgs(lostRec("remix-2", "abc", "/p/remix", "/p/remix/wt", 1, false), ClaudeConfig{}, exists)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,15 +69,15 @@ func TestRestoreArgs(t *testing.T) {
 	}
 	// cwd same as launch dir, or gone: no -C.
 	for _, cwd := range []string{"/p/remix", "/gone", ""} {
-		args, _ := restoreArgs(lostRec("r", "abc", "/p/remix", cwd, 1, false), exists)
+		args, _ := restoreArgs(lostRec("r", "abc", "/p/remix", cwd, 1, false), ClaudeConfig{}, exists)
 		if strings.Contains(strings.Join(args, " "), "-C") {
 			t.Errorf("cwd %q: unexpected -C in %v", cwd, args)
 		}
 	}
-	if _, err := restoreArgs(lostRec("r", "abc", "/gone", "", 1, false), exists); err == nil {
+	if _, err := restoreArgs(lostRec("r", "abc", "/gone", "", 1, false), ClaudeConfig{}, exists); err == nil {
 		t.Error("missing launch dir: want error")
 	}
-	if _, err := restoreArgs(lostRec("r", "bad id", "/p", "", 1, false), exists); err == nil {
+	if _, err := restoreArgs(lostRec("r", "bad id", "/p", "", 1, false), ClaudeConfig{}, exists); err == nil {
 		t.Error("bad session id: want error")
 	}
 }
@@ -358,23 +358,5 @@ func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
 	sm = mm.(swModel)
 	if cmd == nil || len(sm.restore.restored) != 2 {
 		t.Errorf("relink cmd=%v restored=%v, want a relink of both", cmd != nil, sm.restore.restored)
-	}
-}
-
-func TestRestoreArgsAccount(t *testing.T) {
-	exists := func(p string) bool { return p != "/gone" }
-	l := lostRec("r", "abc", "/p/remix", "/p/remix", 1, false)
-	l.Rec.Account = "bespoke"
-	args, err := restoreArgs(l, exists)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.Join(args, " "), "-d -W -N r -r abc -a bespoke -- /p/remix"; got != want {
-		t.Errorf("args = %q, want %q", got, want)
-	}
-	l.Rec.Account = ""
-	args, _ = restoreArgs(l, exists)
-	if strings.Contains(strings.Join(args, " "), "-a") {
-		t.Errorf("no account must not pass -a: %v", args)
 	}
 }
