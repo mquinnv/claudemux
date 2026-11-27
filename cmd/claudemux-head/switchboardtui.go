@@ -305,6 +305,10 @@ type swModel struct {
 	width    int
 	height   int
 	lastErr  string
+	// accountWarn is the one-line account-dir warning from the startup check;
+	// it shares the tmux error row and yields to a live tmux error.
+	accountWarn string
+	accountDirs map[string]string
 	// Account budget meters, same source and shape as the head's: the
 	// rate-limits cache our `statusline` subcommand writes (or abtop's older
 	// file, while ours does not exist yet) re-read on every poll, plus the
@@ -502,7 +506,7 @@ func (m *swModel) toggleStandby() {
 // out of swPollCmd so a tmux listing failure can never stall the per-model
 // rows and a usage spawn can never delay a fleet poll.
 func (m swModel) Init() tea.Cmd {
-	return tea.Batch(swPollCmd(m.selfPane, m.rateLimitsPath),
+	return tea.Batch(accountCheckCmd(m.accountDirs), swPollCmd(m.selfPane, m.rateLimitsPath),
 		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())))
 }
 
@@ -963,6 +967,9 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewPane = msg.pane
 		m.previewErr = msg.err != nil
 		m.previewOut = msg.out
+		return m, nil
+	case swAccountWarnMsg:
+		m.accountWarn = msg.warn
 		return m, nil
 	case swCreateMsg:
 		m.createBusy = false
@@ -1695,8 +1702,8 @@ func (m swModel) View() string {
 		statusLine = clipLine(statusLine, m.width)
 	}
 	b.WriteString("\n" + statusLine + "\n")
-	if m.lastErr != "" {
-		errLine := swStatusStyle.Render("tmux: " + m.lastErr)
+	if m.hasNoticeRow() {
+		errLine := swStatusStyle.Render(m.noticeText())
 		if m.width > 0 {
 			errLine = clipLine(errLine, m.width)
 		}
@@ -1754,7 +1761,7 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 		if m.height > 0 {
 			// No box: the blank row above it is not spent either.
 			limit = m.height - (swChromeRows - 1)
-			if m.lastErr != "" {
+			if m.hasNoticeRow() {
 				limit--
 			}
 			if m.rateOK {
@@ -1780,7 +1787,7 @@ func (m swModel) listWindow() (lay swLayout, start, end int) {
 // boxLayout is the layout with the preview box drawn, for a list that wants
 // want rows.
 func (m swModel) boxLayout(want int) swLayout {
-	return computePreviewLayout(m.height, m.lastErr != "", m.rateOK, m.restore != nil && !m.restore.picking, want)
+	return computePreviewLayout(m.height, m.hasNoticeRow(), m.rateOK, m.restore != nil && !m.restore.picking, want)
 }
 
 // previewCrowds reports whether drawing the box would leave the fleet too few
@@ -1913,6 +1920,7 @@ func runSwitchboard(stderr io.Writer) int {
 		return 1
 	}
 	m := newSwModel(selfPane)
+	m.accountDirs = accountDirsOf(cfg.Claude)
 	web, werr := startSwitchboardWeb(cfg, tailscaleIPv4, tailscaleStatusAllow)
 	if werr != nil {
 		m.webErr = werr.Error()

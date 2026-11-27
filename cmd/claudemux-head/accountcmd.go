@@ -74,10 +74,21 @@ func recordedAccount(dir, sessionID string) (string, bool) {
 
 // runAccount dispatches `claudemux-head account <sub>`.
 func runAccount(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "resolve" {
-		return runAccountResolve(args[1:], stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "resolve":
+			return runAccountResolve(args[1:], stdout, stderr)
+		case "setup":
+			return runAccountSetup(args[1:], stdout, stderr)
+		case "check":
+			return runAccountCheck(args[1:], stdout, stderr)
+		case "login":
+			return runAccountLogin(args[1:], stderr)
+		case "list":
+			return runAccountList(stdout, stderr)
+		}
 	}
-	fmt.Fprintln(stderr, "usage: claudemux-head account resolve --dir D [--account X] [--resume ID]")
+	fmt.Fprintln(stderr, "usage: claudemux-head account resolve --dir D [--account X] [--resume ID] | setup <name> | check [name] | login <name> | list")
 	return 2
 }
 
