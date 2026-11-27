@@ -53,6 +53,7 @@ type Config struct {
 	Defer       DeferConfig       `yaml:"defer"`
 	Web         WebConfig         `yaml:"web"`
 	Remote      RemoteConfig      `yaml:"remote"`
+	Claude      ClaudeConfig      `yaml:"claude"`
 }
 
 // HeadConfig picks which context rows the status pane draws under its state and
@@ -365,6 +366,9 @@ func loadConfig() (Config, error) {
 
 	if err := cfg.validate(); err != nil {
 		return defaultConfig(), fmt.Errorf("%s: %w", path, err)
+	}
+	if err := cfg.Claude.Validate(); err != nil {
+		return defaultConfig(), fmt.Errorf("%s: claude: %w", path, err)
 	}
 	resolveAPIKeyFile(&cfg, dir)
 	resolveProjectDirs(&cfg)

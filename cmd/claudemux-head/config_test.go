@@ -785,3 +785,27 @@ func TestRemoteTokenReadsEnvFile(t *testing.T) {
 		t.Errorf("remoteToken = %q, want tok123", got)
 	}
 }
+
+func TestLoadConfigClaudeBlock(t *testing.T) {
+	writeConfig(t, "claude:\n  default_account: ameriglide\n  accounts:\n    ameriglide:\n      config_dir: ~/.claude-accounts/ameriglide\n      color: blue\n    bespoke: {}\n")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() = %v", err)
+	}
+	if !cfg.Claude.Multi() || cfg.Claude.Default() != "ameriglide" {
+		t.Errorf("Claude = %+v", cfg.Claude)
+	}
+	if cfg.Claude.Accounts["ameriglide"].Color != "blue" {
+		t.Errorf("color not parsed: %+v", cfg.Claude.Accounts)
+	}
+
+	writeConfig(t, "claude:\n  default_account: x\n  accounts:\n    x:\n      bogus: 1\n")
+	if _, err := loadConfig(); err == nil {
+		t.Error("unknown key claude.accounts.x.bogus: want error")
+	}
+
+	writeConfig(t, "claude:\n  default_account: nope\n  accounts:\n    x: {}\n")
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "claude:") {
+		t.Errorf("invalid block err = %v, want wrapped with claude:", err)
+	}
+}
