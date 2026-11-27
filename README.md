@@ -1072,9 +1072,9 @@ An account with no `config_dir` uses `~/.claude` and launches with `CLAUDE_CONFI
 unset; at most one account may do that. Names match `[a-z0-9][a-z0-9_-]{0,31}`. With no
 `claude:` block nothing changes: one implicit account, no badges.
 
-The account for a launch is, highest first: `claudemux -a <account>` (or `--account`),
+The account for a launch is, highest first: `claudemux -a <account>`,
 `claude_account: <name>` in the project's `.claudemux.yml` (or `.project.yml`), then
-`claude.default_account`. An unknown name anywhere is an error that names it. The account
+`claude.default_account` (required once any account is declared: leaving it unset, or naming an account that isn't listed, is a startup error). An unknown name anywhere is an error that names it. The account
 covers the whole tmux session (shell pane and hooks included). Handoffs resolve the
 *target* project's account. With more than one account configured, sessions show an
 account badge and the lobby shows a meter row per account.
