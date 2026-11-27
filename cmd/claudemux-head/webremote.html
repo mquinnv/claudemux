@@ -146,6 +146,8 @@ main {
 }
 @keyframes sh { to { background-position: -200% 0; } }
 .note { color: var(--faint); font-size: 13px; padding: 4px 2px; }
+.note.bad { color: var(--bad); }
+.banner { background: var(--bad); color: #fff; border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; font-size: 14px; }
 .fixed-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .fixed {
   padding: 10px 14px; border-radius: 999px; background: var(--chip); border: 1px solid var(--chip-line);
@@ -302,23 +304,29 @@ function el(tag, cls, text) {
 }
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
+  // set reports whether the value was kept: private browsing or a full
+  // quota makes localStorage throw, and the user should know the token
+  // won't survive a reload.
+  set(k, v) { try { localStorage.setItem(k, v); return true; } catch (_) { return false; } },
   del(k) { try { localStorage.removeItem(k); } catch (_) {} },
 };
 const TOKEN_KEY = 'claudemux.remote.token';
+const NO_STORE_MSG = 'This browser won’t let the page remember the token, so you’ll need to enter it again next time.';
 
 // A token in the URL fragment (#token=...) is taken once and stripped, so
 // the link can be opened from a password manager or a QR code without
 // leaving the secret in history. Fragments never reach the server.
+let hashToken = '', hashTokenError = '', storeFailed = false;
 (function adoptHashToken() {
   const m = location.hash.match(/token=([^&]+)/);
-  if (m) {
-    store.set(TOKEN_KEY, decodeURIComponent(m[1]));
-    history.replaceState(null, '', location.pathname);
-  }
+  if (!m) return;
+  history.replaceState(null, '', location.pathname);
+  try { hashToken = decodeURIComponent(m[1]); }
+  catch (_) { hashTokenError = 'The token in that link was malformed.'; return; }
+  if (!store.set(TOKEN_KEY, hashToken)) storeFailed = true;
 })();
 
-let token = store.get(TOKEN_KEY) || '';
+let token = hashToken || store.get(TOKEN_KEY) || '';
 
 // ---------- state ----------
 const S = {
@@ -329,8 +337,11 @@ const S = {
   skipped: new Map(), // name -> episode walked away from
   answered: new Map(),// name -> episode we just answered
   detail: null,       // last /session payload for current
+  detailError: '',    // why the last /session poll failed, if it did
   online: true,
-  setupError: '',
+  apiError: '',       // a non-network API failure, shown as a banner
+  sending: false,     // a typed message is in flight
+  setupError: hashTokenError,
   screenTall: false,
 };
 
@@ -347,9 +358,12 @@ async function api(path, body) {
   }
   let res;
   try { res = await fetch(path, opts); }
-  catch (e) { throw new ApiError(0, 'offline', 'lobby not reachable'); }
+  catch (e) { console.error('fetch ' + path + ' failed:', e); throw new ApiError(0, 'offline', 'lobby not reachable'); }
   let data = null;
-  try { data = await res.json(); } catch (_) {}
+  try { data = await res.json(); }
+  catch (e) {
+    if (res.ok) { console.error('bad JSON from ' + path + ':', e); throw new ApiError(res.status, 'badjson', 'lobby sent an unexpected response'); }
+  }
   if (!res.ok) throw new ApiError(res.status, (data && data.code) || 'http', (data && data.message) || ('HTTP ' + res.status));
   return data;
 }
@@ -402,10 +416,10 @@ async function pollQueue() {
   try {
     const q = await api('/api/remote/queue');
     S.sessions = q.sessions; S.queue = q.queue; S.replies = q.replies || []; S.suggestOn = !!q.suggest;
-    S.online = true; S.setupError = '';
+    S.online = true; S.setupError = ''; S.apiError = '';
     forgetStale();
     const next = pickCurrent();
-    if (next !== S.current) { S.current = next; S.detail = null; S.screenTall = false; pollDetail(); }
+    if (next !== S.current) { S.current = next; S.detail = null; S.detailError = ''; S.screenTall = false; pollDetail(); }
     render();
   } catch (e) {
     handleApiFailure(e);
@@ -421,21 +435,45 @@ async function pollDetail() {
   try {
     const d = await api('/api/remote/session?name=' + encodeURIComponent(name));
     if (seq !== detailSeq || name !== S.current) return;
-    S.detail = d;
+    S.detail = d; S.detailError = '';
     renderDetail();
   } catch (e) {
+    if (seq !== detailSeq || name !== S.current) return;
     if (e.code === 'gone') { S.current = null; pollQueue(); return; }
-    handleApiFailure(e);
+    S.detailError = e.message;
+    if (isGlobalFailure(e)) handleApiFailure(e);
+    else { console.error('session poll failed:', e); renderDetail(); }
   }
   // Faster while Haiku is still drafting, so chips appear as they land.
   const pending = S.detail && S.detail.suggestions && S.detail.suggestions.status === 'pending';
   detailTimer = setTimeout(pollDetail, document.hidden ? 15000 : (pending ? 1000 : 2000));
 }
 
+const OFF_MSG = 'Remote control is off or this device isn’t allowed';
+// Failures that are about the connection or the lobby as a whole, not
+// one session's detail.
+const isGlobalFailure = e => e.code === 'token' || e.code === 'setup' || e.code === 'offline' || e.status === 403 || e.status === 404;
+
+// Only a network failure means "offline": anything else the lobby
+// answered keeps the connection state and says what went wrong.
 function handleApiFailure(e) {
   if (e.code === 'token') { token = ''; store.del(TOKEN_KEY); S.setupError = 'That token was refused.'; render(); return; }
-  if (e.code === 'setup') { S.setupError = e.message; token = token || ''; renderSetup(true); return; }
-  S.online = false; render();
+  if (e.code === 'setup') { S.setupError = e.message; renderSetup(true); return; }
+  if (e.code === 'offline') { S.online = false; render(); return; }
+  console.error('remote API error:', e);
+  S.apiError = (e.status === 403 || e.status === 404) ? OFF_MSG + ' (HTTP ' + e.status + ').' : e.message;
+  render();
+}
+
+// With no token yet, ask the lobby once anyway: if it isn't set up for
+// remote control, say so before asking for a token it can't accept.
+async function probeSetup() {
+  try { await api('/api/remote/queue'); }
+  catch (e) {
+    if (e.code === 'setup') { S.setupError = e.message; renderSetup(true); }
+    else if (e.status === 403 || e.status === 404) { S.setupError = OFF_MSG + ' (HTTP ' + e.status + ').'; render(); }
+    else if (e.code !== 'token' && e.status !== 401) console.error('setup probe:', e);
+  }
 }
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollQueue(); pollDetail(); } });
@@ -461,12 +499,18 @@ async function doSend(name, episode, text, opts = {}) {
   } catch (e) {
     if (e.code === 'draft') {
       confirmSheet('The prompt in ' + name + ' isn’t empty', 'There’s a draft in its input box, or a screen the remote doesn’t recognise. Replace the draft with your message?',
-        'Replace and send', () => doSend(name, episode, text, { ...opts, replace: true }));
+        // escape: false — after "Dismiss and send" the Esc already landed;
+        // pressing it again on a plain prompt would interrupt the session.
+        'Replace and send', () => doSend(name, episode, text, { ...opts, replace: true, escape: false }));
     } else if (e.code === 'dialog') {
       confirmSheet('A question is open in ' + name, 'Dismiss it with Esc and send your message as a normal prompt instead?',
         'Dismiss and send', () => doSend(name, episode, text, { ...opts, escape: true }));
     } else if (e.code === 'moved') {
       toast(e.message, { err: true }); pollQueue();
+    } else if (e.code === 'partial') {
+      // The session was changed before the failure: show how, and refresh
+      // so the screen matches what actually landed.
+      toast(e.message, { err: true, duration: 8000 }); pollQueue(); pollDetail();
     } else {
       toast(e.message, { err: true });
     }
@@ -531,7 +575,12 @@ function renderSetup(isSetupErr) {
   if (S.setupError) box.append(el('p', null, S.setupError));
   const input = el('input'); input.type = 'password'; input.placeholder = 'token'; input.autocomplete = 'current-password';
   const go = el('button', 'cbtn go', 'Connect'); go.style.width = '100%';
-  go.onclick = () => { const v = input.value.trim(); if (!v) return; token = v; store.set(TOKEN_KEY, v); S.setupError = ''; pollQueue(); };
+  go.onclick = () => {
+    const v = input.value.trim(); if (!v) return;
+    token = v; S.setupError = '';
+    if (!store.set(TOKEN_KEY, v)) toast(NO_STORE_MSG, { err: true, duration: 6000 });
+    pollQueue();
+  };
   input.addEventListener('keydown', e => { if (e.key === 'Enter') go.click(); });
   box.append(input, go);
   m.append(box);
@@ -541,6 +590,7 @@ function renderEmpty() {
   $('composer').classList.add('hidden');
   setComposerHeight();
   const m = $('main'); m.textContent = '';
+  apiBanner(m);
   const box = el('div', 'empty');
   box.append(el('div', 'empty-big', S.online ? '✨' : '⚡'));
   box.append(el('div', 'empty-title', S.online ? 'Nothing is waiting on you' : 'Lobby not reachable'));
@@ -556,6 +606,12 @@ function renderEmpty() {
   m.append(box);
 }
 
+// A sticky banner for an API failure that isn't a lost connection: it
+// stays until a queue poll succeeds.
+function apiBanner(m) {
+  if (S.online && S.apiError) m.append(el('div', 'banner', S.apiError));
+}
+
 function sessionRow(s) {
   const r = el('button', 'row');
   r.append(swatch(s.color));
@@ -569,7 +625,7 @@ function sessionRow(s) {
 }
 
 function openSession(name) {
-  S.pinned = name; S.current = name; S.detail = null; S.screenTall = false;
+  S.pinned = name; S.current = name; S.detail = null; S.detailError = ''; S.screenTall = false;
   closeSheet(); render(); pollDetail();
   window.scrollTo(0, 0);
 }
@@ -583,6 +639,9 @@ function renderDetail() {
   const keepScroll = m.querySelector('.screen');
   const prevScroll = keepScroll ? { top: keepScroll.scrollTop, atBottom: keepScroll.scrollTop + keepScroll.clientHeight >= keepScroll.scrollHeight - 8 } : null;
   m.textContent = '';
+  apiBanner(m);
+  // No detail yet and the last poll failed: say so rather than shimmer.
+  const detailErr = !d && S.detailError ? S.detailError : '';
 
   const card = el('div', 'card');
   const head = el('div', 'sess-head');
@@ -618,8 +677,12 @@ function renderDetail() {
     const sg = d ? d.suggestions : { status: 'pending' };
     if (!S.suggestOn || sg.status === 'off') {
       box.append(el('div', 'note', 'Suggestions are off (no API key, or summary.enabled is false).'));
+    } else if (detailErr) {
+      box.append(el('div', 'note bad', 'Couldn’t load this session: ' + detailErr + ' — retrying.'));
     } else if (sg.status === 'pending') {
       box.append(el('div', 'shimmer'), el('div', 'shimmer'));
+    } else if (sg.status === 'error' && sg.error !== 'no usable replies') {
+      box.append(el('div', 'note bad', 'Suggestions failed (' + (sg.error || 'unknown') + ') — retrying shortly.'));
     } else if (sg.status === 'error' || !sg.items || !sg.items.length) {
       box.append(el('div', 'note', 'Haiku had nothing to suggest for this one.'));
     } else {
@@ -660,7 +723,13 @@ function renderDetail() {
 
   // The terminal itself goes last: the replies above are what you came
   // for, and the screen is there to check them against.
-  if (d && d.screen) {
+  if (d && d.screen_error) {
+    const sc = el('div', 'card screen-card');
+    sc.append(el('div', 'note bad', 'Couldn’t read the terminal: ' + d.screen_error));
+    m.append(sc);
+  } else if (detailErr && !ds.waiting) {
+    m.append(el('div', 'note bad', 'Couldn’t load this session: ' + detailErr + ' — retrying.'));
+  } else if (d && d.screen) {
     const sc = el('div', 'card screen-card');
     const bar = el('div', 'screen-bar');
     bar.append(el('span', null, 'Screen'));
@@ -717,7 +786,7 @@ function renderComposer(s) {
   c.classList.remove('hidden');
   const tgt = $('target'); tgt.textContent = '';
   tgt.append(document.createTextNode('to '), el('b', null, s.name));
-  if (s.dialog) tgt.append(document.createTextNode(' · question open: typing dismisses it'));
+  if (s.dialog) tgt.append(document.createTextNode(' · question open: sending will offer to dismiss it'));
   else if (!s.waiting) tgt.append(document.createTextNode(' · busy: your message queues behind the turn'));
   $('skipBtn').classList.toggle('hidden', !!S.pinned || !s.waiting);
   $('queueBtn').classList.toggle('hidden', !S.pinned);
@@ -817,12 +886,19 @@ $('sendBtn').onclick = sendTyped;
 $('sendBtn').addEventListener('mousedown', e => e.preventDefault());
 $('sendBtn').addEventListener('touchstart', e => { e.preventDefault(); sendTyped(); }, { passive: false });
 
-function sendTyped() {
+async function sendTyped() {
+  // Return plus a tap on Send, or a double tap, must not send twice.
+  if (S.sending) return;
   const s = byName(S.current);
   const text = input.value.trim();
   if (!s || !text) return;
-  // Typed text has already been read and edited: no undo window.
-  doSend(s.name, s.episode, text, { clearInput: true, escape: false });
+  S.sending = true; $('sendBtn').disabled = true;
+  try {
+    // Typed text has already been read and edited: no undo window.
+    await doSend(s.name, s.episode, text, { clearInput: true, escape: false });
+  } finally {
+    S.sending = false; $('sendBtn').disabled = false;
+  }
 }
 
 $('skipBtn').onclick = () => {
@@ -867,7 +943,8 @@ if (window.visualViewport) {
 }
 
 render();
-pollQueue();
+if (token) pollQueue(); else probeSetup();
+if (storeFailed) toast(NO_STORE_MSG, { err: true, duration: 6000 });
 })();
 </script>
 </body>

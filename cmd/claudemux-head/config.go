@@ -247,8 +247,9 @@ type WebConfig struct {
 	HidePrivateOrgs  []string `yaml:"hide_private_orgs"`
 	// Control turns on the phone remote at /remote (webremote.go): a page
 	// that can TYPE INTO your sessions, so it is off by default and, once on,
-	// still refuses every request without the CLAUDEMUX_REMOTE_TOKEN secret
-	// (read like the API key: environment first, then summary.api_key_file).
+	// still refuses every API request (/api/remote/*) without the
+	// CLAUDEMUX_REMOTE_TOKEN secret (read like the API key: environment
+	// first, then summary.api_key_file).
 	// The status page is for teammates; the remote is for you.
 	Control bool `yaml:"control"`
 	// Replies are the canned answers the remote offers next to Haiku's

@@ -381,8 +381,9 @@ no authentication: reachability is the tailnet's job, which is why the
 off the tailnet can reach it. `web.listen: ":7474"` would bind every interface,
 including whatever Wi-Fi the laptop is on; don't. The page is plain HTTP over
 the tailnet's WireGuard tunnel, and never acts on a session — nothing on it can
-defer, jump, or type. (The phone remote below can, which is why it is off by
-default and needs a token on top of the tailnet.)
+defer, jump, or type. (The phone remote below can defer and type, though not
+jump, which is why it is off by default and needs a token on top of the
+tailnet.)
 
 The lobby also refuses requests from outside the tailnet's address ranges and
 from Host names it doesn't recognize, whatever address it's actually bound to
@@ -407,8 +408,8 @@ The same server can also serve a **phone remote** at `/remote`: the
 switchboard's conductor, on your phone. It walks the sessions waiting on you
 in the lobby's own order (sessions about to close first, then oldest first,
 deferred ones never), shows one at a time, and moves to the next once you've
-answered. It's laid out for a phone held in one hand (sized for the iPhone Air,
-fine on any phone), and it can be added to the home screen.
+answered. It's laid out for a phone held in one hand, and it can be added to
+the home screen.
 
 For each waiting session it shows:
 
@@ -417,37 +418,43 @@ For each waiting session it shows:
   permission prompt, they're the options to pick, by number. At an empty
   prompt, they're the next things you'd likely type. Tap one to send it.
   You get about two seconds to undo it, since a mis-tap on a phone is easy.
-  Tap ✎ to load it into the keyboard and edit it first. There's one call per
-  waiting spell, and the next session in the queue is drafted while you
-  read this one.
+  Tap ✎ to load it into the keyboard and edit it first. There's at most one
+  successful call per waiting spell (a failed call retries after a back-off),
+  and the next session in the queue is drafted while you read this one.
 - **Quick replies**, the canned answers in `web.replies` (default
   `yes, go ahead`, `continue`, `commit and push`). Long-press one to edit it
   before sending.
 - **Answer keys** when a question is open: `1`–`4`, the arrows, Enter and Esc.
+  The number keys get the same undo window; the arrows, Enter and Esc go
+  straight through.
 - **The keyboard**, which is always there at the bottom, on every session.
   Return sends, and multi-line text goes in as one paste. If a question is
   open, the remote offers to dismiss it and send your text as a normal
   prompt. If there's a draft in the session's input box, it asks before
-  replacing it. It never types over one silently.
-- **Skip**, **Defer** (anything typed becomes the blocker) and **Esc**. Skip only
+  replacing it. It never types over one silently. Replacing clears the input
+  line (Ctrl-U), so a multi-line draft may not be cleared completely.
+- **Skip**, **Defer** (anything typed becomes the blocker) and **Esc** (shown on
+  an open question, or as **Interrupt** on a busy session). Skip only
   affects the phone: the session comes back on its next waiting spell, or
   when nothing else is waiting. Defer is the lobby's `d`, so a session you
   defer leaves both queues.
 
-Every send carries the waiting spell it was meant for. If the session has
+Every reply carries the waiting spell it was meant for. If the session has
 moved on by the time the request arrives (someone answered it at the desk,
 say), the send is refused rather than landing on the next question. Tap
-**☰** to open any session, including busy ones, where a message queues
-behind the running turn. **Conduct** pauses and resumes the walk.
+**☰** to open any session, including busy ones, and type to it. A busy
+session's state changes often, so if it changes before your send lands, the
+remote asks you to retry. **Conduct** pauses and resumes the walk.
 
 Because it types into your sessions, the remote is off unless you turn it on,
-and every request also needs a token, on top of the tailnet-only guard:
+and every API request also needs a token (the page itself loads without one),
+on top of the tailnet-only guard:
 
 ```yaml
 web:
   listen: tailscale:7474
   control: true
-  replies: [yes, go ahead, continue, commit and push]   # optional
+  replies: ["yes, go ahead", continue, commit and push]   # optional
 ```
 
 ```sh

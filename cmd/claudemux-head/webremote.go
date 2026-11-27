@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	_ "embed"
@@ -42,7 +43,8 @@ var webRemoteHTML []byte
 const (
 	// remoteTokenKey names the secret, looked up like ANTHROPIC_API_KEY.
 	remoteTokenKey = "CLAUDEMUX_REMOTE_TOKEN"
-	// remoteTokenMinLen refuses a token short enough to guess over a tailnet.
+	// remoteTokenMinLen refuses a token short enough to guess over a tailnet;
+	// it counts bytes.
 	remoteTokenMinLen = 16
 	// remoteMaxReplies and remoteReplyMaxRunes bound web.replies (config.go).
 	remoteMaxReplies    = 6
@@ -62,8 +64,10 @@ const (
 var defaultRemoteReplies = []string{"yes, go ahead", "continue", "commit and push"}
 
 // remoteKeys is every key the page may press. Digits pick a dialog option;
-// the arrows, Tab and Enter move around one; Escape dismisses a dialog or
-// interrupts a turn. Nothing here can reach a shell (no C-c, no C-z).
+// the arrows, Tab, BTab, Space and Enter move around one; Escape dismisses a
+// dialog or interrupts a turn. No key in this allowlist can signal the pane's
+// process (no C-c, no C-z). Typed text is a separate, token-gated path
+// (handleSend) that refuses control characters.
 var remoteKeys = map[string]bool{
 	"1": true, "2": true, "3": true, "4": true, "5": true, "6": true, "7": true, "8": true, "9": true,
 	"Enter": true, "Escape": true, "Up": true, "Down": true, "Tab": true, "BTab": true, "Space": true,
@@ -96,7 +100,29 @@ func (execRemoteTmux) capture(pane string, escapes bool, scrollback int) (string
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
-	return string(out), err
+	if err != nil {
+		var stderr []byte
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			stderr = ee.Stderr
+		}
+		return "", tmuxError(args, err, stderr)
+	}
+	return string(out), nil
+}
+
+// tmuxError names the tmux subcommand that failed and carries what tmux said
+// on stderr, so a failure reads "tmux send-keys: exit status 1: can't find
+// pane: %12" rather than a bare exit status.
+func tmuxError(args []string, err error, stderr []byte) error {
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if msg := bytes.TrimSpace(stderr); len(msg) > 0 {
+		return fmt.Errorf("tmux %s: %w: %s", name, err, msg)
+	}
+	return fmt.Errorf("tmux %s: %w", name, err)
 }
 
 // typeText sends a single line as literal keys (sendLiteralArgs). A
@@ -114,12 +140,19 @@ func (t execRemoteTmux) typeText(pane, text string) error {
 	buf := fmt.Sprintf("claudemux-remote-%d", time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	defer cancel()
-	load := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", buf, "-")
+	loadArgs := []string{"load-buffer", "-b", buf, "-"}
+	load := exec.CommandContext(ctx, "tmux", loadArgs...)
 	load.Stdin = strings.NewReader(text)
-	if err := load.Run(); err != nil {
-		return fmt.Errorf("load-buffer: %w", err)
+	if out, err := load.CombinedOutput(); err != nil {
+		return tmuxError(loadArgs, err, out)
 	}
-	return t.run([]string{"paste-buffer", "-p", "-d", "-b", buf, "-t", pane})
+	if err := t.run([]string{"paste-buffer", "-p", "-d", "-b", buf, "-t", pane}); err != nil {
+		// -d deletes the buffer only after a successful paste: don't leave
+		// the message sitting in the tmux server.
+		_ = t.run([]string{"delete-buffer", "-b", buf})
+		return err
+	}
+	return nil
 }
 
 func (t execRemoteTmux) keys(pane string, keys ...string) error {
@@ -129,7 +162,10 @@ func (t execRemoteTmux) keys(pane string, keys ...string) error {
 func (execRemoteTmux) run(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTmuxTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "tmux", args...).Run()
+	if out, err := exec.CommandContext(ctx, "tmux", args...).CombinedOutput(); err != nil {
+		return tmuxError(args, err, out)
+	}
+	return nil
 }
 
 // webRemote is the remote's state: where it reads the fleet, how it drives
@@ -152,10 +188,13 @@ type webRemote struct {
 func remoteToken(cfg Config) (string, error) {
 	tok := configValue(cfg.Summary.APIKeyFile, remoteTokenKey)
 	if tok == "" {
-		return "", fmt.Errorf("web.control is on but %s is not set (environment or %s)", remoteTokenKey, cfg.Summary.APIKeyFile)
+		if cfg.Summary.APIKeyFile != "" {
+			return "", fmt.Errorf("web.control is on but %s was not found in the environment or in %s", remoteTokenKey, cfg.Summary.APIKeyFile)
+		}
+		return "", fmt.Errorf("web.control is on but %s was not found in the environment", remoteTokenKey)
 	}
 	if len(tok) < remoteTokenMinLen {
-		return "", fmt.Errorf("%s is %d characters: use at least %d", remoteTokenKey, len(tok), remoteTokenMinLen)
+		return "", fmt.Errorf("%s is %d bytes: use at least %d", remoteTokenKey, len(tok), remoteTokenMinLen)
 	}
 	return tok, nil
 }
@@ -168,7 +207,10 @@ func newWebRemote(fleet *webFleet, cfg Config, token string, gen remoteSuggester
 			replies = append(replies, strings.TrimSpace(r))
 		}
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		teardownLogf("remote: no home directory (%v): assuming claude's vim mode is off", err)
+	}
 	return &webRemote{
 		fleet:   fleet,
 		token:   token,
@@ -184,6 +226,11 @@ func newWebRemote(fleet *webFleet, cfg Config, token string, gen remoteSuggester
 // API cannot run: the page still loads and shows it, so a missing secret
 // reads as a setup step rather than a dead link.
 func (r *webRemote) register(mux *http.ServeMux, tokenErr error) {
+	if tokenErr != nil {
+		// The detail (which can name the key file) goes to the log only:
+		// the 503 below reaches callers who have not authenticated.
+		teardownLogf("remote: API disabled: %v", tokenErr)
+	}
 	mux.HandleFunc("GET /remote", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -197,7 +244,7 @@ func (r *webRemote) register(mux *http.ServeMux, tokenErr error) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			if tokenErr != nil {
-				remoteError(w, http.StatusServiceUnavailable, "setup", tokenErr.Error())
+				remoteError(w, http.StatusServiceUnavailable, "setup", "remote token not configured; see the lobby log")
 				return
 			}
 			if !r.authorized(req) {
@@ -380,6 +427,8 @@ type remoteSessionView struct {
 	Screen      string             `json:"screen"`
 	PromptEmpty bool               `json:"prompt_empty"`
 	Suggestions remoteSuggestState `json:"suggestions"`
+	// ScreenError says why Screen is empty when the pane could not be read.
+	ScreenError string `json:"screen_error,omitempty"`
 }
 
 func (r *webRemote) handleSession(w http.ResponseWriter, req *http.Request) {
@@ -397,8 +446,14 @@ func (r *webRemote) handleSession(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	v := remoteSessionView{Session: toRemoteSession(s, pos)}
+	captured := false
 	if s.ClaudePane != "" {
-		if raw, err := r.tmux.capture(s.ClaudePane, true, remoteScreenLines); err == nil {
+		raw, err := r.tmux.capture(s.ClaudePane, true, remoteScreenLines)
+		if err != nil {
+			v.ScreenError = "can't read the screen: " + err.Error()
+			teardownLogf("remote: capture %s (%s): %v", s.Name, s.ClaudePane, err)
+		} else {
+			captured = true
 			v.PromptEmpty = promptEmpty(raw, r.vimMode)
 			v.Screen = remoteScreenText(raw, remoteScreenLines)
 			if v.PromptEmpty {
@@ -406,23 +461,47 @@ func (r *webRemote) handleSession(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	}
-	if isWaiting(s.State) && s.ClaudePane != "" {
-		r.suggest.ensure(s, r.replies, func() string { return v.Screen })
-		// Conduction is a walk down the queue, so draft the next stop's
-		// replies while this one is being read.
-		if next, ok := remoteNextInQueue(queue, s.Name); ok {
-			pane := next.ClaudePane
-			r.suggest.ensure(next, r.replies, func() string {
-				raw, err := r.tmux.capture(pane, false, remoteScreenLines)
-				if err != nil {
-					return ""
-				}
-				return remoteScreenText(raw, remoteScreenLines)
-			})
+	waiting := isWaiting(s.State)
+	switch {
+	case waiting && s.ClaudePane == "":
+		// Nothing to read, so nothing will ever be drafted: get would say
+		// pending forever.
+		v.Suggestions = remoteSuggestState{Status: suggestStatusOff}
+	case waiting && !captured:
+		v.Suggestions = remoteSuggestState{Status: suggestStatusFailed, Error: "no screen"}
+	default:
+		if waiting {
+			screen := v.Screen
+			r.suggest.ensure(s, r.replies, func() string { return screen })
+			// Conduction is a walk down the queue, so draft the next stop's
+			// replies while this one is being read.
+			if next, ok := remoteNextInQueue(queue, s.Name); ok {
+				r.prefetch(next)
+			}
 		}
+		v.Suggestions = r.suggest.get(s)
 	}
-	v.Suggestions = r.suggest.get(s)
 	remoteJSON(w, v)
+}
+
+// prefetch drafts next's replies ahead of time. The capture happens here, not
+// lazily inside ensure, so a screen that can't be read is skipped (and the
+// real error logged) instead of being handed to Haiku as an empty capture;
+// the session's own visit retries it. Stops already drafted cost nothing.
+func (r *webRemote) prefetch(next swSession) {
+	if !r.suggest.enabled() {
+		return
+	}
+	if st := r.suggest.get(next); st.Status == suggestStatusReady || st.Status == suggestStatusOff {
+		return
+	}
+	raw, err := r.tmux.capture(next.ClaudePane, false, remoteScreenLines)
+	if err != nil {
+		teardownLogf("remote: prefetch capture %s (%s): %v", next.Name, next.ClaudePane, err)
+		return
+	}
+	screen := remoteScreenText(raw, remoteScreenLines)
+	r.suggest.ensure(next, r.replies, func() string { return screen })
 }
 
 // remoteNextInQueue is the queued session after name (the head of the queue
@@ -475,7 +554,9 @@ type remoteSendReq struct {
 	Name    string `json:"name"`
 	Episode string `json:"episode"`
 	Text    string `json:"text"`
-	// Replace clears a draft (C-u) instead of refusing to type over it.
+	// Replace sends C-u first instead of refusing to type over a draft. C-u
+	// clears the current input line, so a multi-line draft may not be fully
+	// cleared.
 	Replace bool `json:"replace"`
 	// Escape dismisses an open dialog first, so the text goes in as a
 	// normal prompt instead.
@@ -509,8 +590,9 @@ func decodeRemote(w http.ResponseWriter, req *http.Request, v any) bool {
 }
 
 // target resolves the session a write is aimed at and checks it is still in
-// the episode the page saw. An empty episode skips the check: the page
-// always sends one, but a deliberate "type this regardless" stays possible.
+// the episode the page saw. An empty episode skips the check: the page sends
+// one on every reply and option key; Esc/Interrupt sends none, since
+// dismissing or interrupting is safe whatever the session has moved on to.
 func (r *webRemote) target(w http.ResponseWriter, name, episode string) (swSession, bool) {
 	s, ok := r.lookup(name)
 	if !ok {
@@ -542,27 +624,52 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 		remoteError(w, http.StatusBadRequest, "long", fmt.Sprintf("message is over %d characters", remoteTextMaxRunes))
 		return
 	}
+	if remoteHasControl(text) {
+		// A raw \x03 or \x1b would reach the pane through send-keys -l, and
+		// "\x1b[201~" would end a bracketed paste early and run the rest as
+		// keystrokes.
+		remoteError(w, http.StatusBadRequest, "control", "the message contains control characters")
+		return
+	}
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
+	if err := req.Context().Err(); err != nil {
+		// The phone gave up while another write held the lock: typing now
+		// would land a message nobody is waiting on.
+		teardownLogf("remote: send to %s dropped, client gone: %v", body.Name, err)
+		return
+	}
 	s, ok := r.target(w, body.Name, body.Episode)
 	if !ok {
 		return
 	}
 	pane := s.ClaudePane
+	// done names what has already changed in the session, so a later failure
+	// says what state it left behind ("partial") rather than a bare 502.
+	done := ""
+	fail := func(step string, err error) {
+		teardownLogf("remote: send to %s failed at %s (after %q): %v", s.Name, step, done, err)
+		if done == "" {
+			remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
+			return
+		}
+		remoteError(w, http.StatusBadGateway, "partial", done+", then tmux failed: "+err.Error())
+	}
 	if remoteDialog(s.State) {
 		if !body.Escape {
 			remoteError(w, http.StatusConflict, "dialog", "a question is open: pick an option, or dismiss it and send this as a prompt")
 			return
 		}
 		if err := r.tmux.keys(pane, "Escape"); err != nil {
-			remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
+			fail("escape", err)
 			return
 		}
+		done = "dialog dismissed"
 		r.sleep(remoteEscapeSettle)
 	}
 	raw, err := r.tmux.capture(pane, true, 0)
 	if err != nil {
-		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
+		fail("capture", err)
 		return
 	}
 	if !promptEmpty(raw, r.vimMode) {
@@ -571,21 +678,40 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if err := r.tmux.keys(pane, "C-u"); err != nil {
-			remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
+			fail("clear", err)
 			return
+		}
+		if done == "" {
+			done = "draft cleared"
+		} else {
+			done += " and draft cleared"
 		}
 	}
 	if err := r.tmux.typeText(pane, text); err != nil {
-		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
+		fail("type", err)
 		return
 	}
 	r.sleep(teardownKeyDelay) // see teardownKeyDelay
 	if err := r.tmux.keys(pane, "Enter"); err != nil {
-		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
+		teardownLogf("remote: send to %s typed but not submitted: %v", s.Name, err)
+		remoteError(w, http.StatusBadGateway, "partial", "typed but not submitted: "+err.Error())
 		return
 	}
 	teardownLogf("remote: sent %d chars to %s", len(text), s.Name)
 	remoteJSON(w, remoteOK{OK: true})
+}
+
+// remoteHasControl reports a rune the remote refuses to type: C0 controls
+// other than newline and tab, DEL, and C1 controls.
+func remoteHasControl(text string) bool {
+	for _, c := range text {
+		switch {
+		case c == '\n' || c == '\t':
+		case c < 0x20, c == 0x7f, c >= 0x80 && c <= 0x9f:
+			return true
+		}
+	}
+	return false
 }
 
 func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
@@ -599,11 +725,16 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 	}
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
+	if err := req.Context().Err(); err != nil {
+		teardownLogf("remote: key %s for %s dropped, client gone: %v", body.Key, body.Name, err)
+		return
+	}
 	s, ok := r.target(w, body.Name, body.Episode)
 	if !ok {
 		return
 	}
 	if err := r.tmux.keys(s.ClaudePane, body.Key); err != nil {
+		teardownLogf("remote: key %s in %s failed: %v", body.Key, s.Name, err)
 		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
 		return
 	}
@@ -635,8 +766,10 @@ func (r *webRemote) handleDefer(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if err := r.tmux.run(deferArgs(target, body.On, body.Reason)); err != nil {
+		teardownLogf("remote: defer=%v for %s failed: %v", body.On, s.Name, err)
 		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
 		return
 	}
+	teardownLogf("remote: defer=%v for %s", body.On, s.Name)
 	remoteJSON(w, remoteOK{OK: true})
 }

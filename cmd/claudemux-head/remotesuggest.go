@@ -13,11 +13,12 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// Haiku-drafted replies for the phone remote. One call per WAITING EPISODE
-// (a session's state + since): the screen of a session parked on a question
-// does not change until it is answered, so the episode is the right cache key
-// — it costs nothing to compute, never churns on a spinner or a clock, and a
-// new question is by definition a new episode.
+// Haiku-drafted replies for the phone remote. At most one successful call per
+// WAITING EPISODE (a session's state + since); a failed call is retried after
+// a back-off. The screen of a session parked on a question does not change
+// until it is answered, so the episode is the right cache key — it costs
+// nothing to compute, never churns on a spinner or a clock, and a new
+// question is in practice a new episode (since has 1-second resolution).
 
 // remoteSuggestion is one reply chip. Exactly one of Text and Key is set:
 // Text is typed as a prompt and submitted; Key is pressed in an open dialog
@@ -35,20 +36,72 @@ type remoteSuggester interface {
 }
 
 const (
-	suggestToolName     = "suggest"
-	suggestMaxTokens    = 600
-	suggestMax          = 4
-	suggestLabelRunes   = 40
-	suggestTextRunes    = 300
-	suggestScreenRunes  = 6000
-	suggestTimeout      = 20 * time.Second
-	suggestRetryAfter   = 30 * time.Second
-	suggestMaxInFlight  = 2
-	suggestStatusOff    = "off"
-	suggestStatusWait   = "pending"
-	suggestStatusReady  = "ready"
-	suggestStatusFailed = "error"
+	suggestToolName    = "suggest"
+	suggestMaxTokens   = 600
+	suggestMax         = 4
+	suggestLabelRunes  = 40
+	suggestTextRunes   = 300
+	suggestScreenRunes = 6000
+	suggestTimeout     = 20 * time.Second
+	suggestRetryAfter  = 30 * time.Second
+	suggestAuthRetry   = 5 * time.Minute
+	suggestMaxInFlight = 2
 )
+
+// suggestStatus is a session's suggestion state as the page sees it.
+type suggestStatus string
+
+const (
+	suggestStatusOff    suggestStatus = "off"
+	suggestStatusWait   suggestStatus = "pending"
+	suggestStatusReady  suggestStatus = "ready"
+	suggestStatusFailed suggestStatus = "error"
+)
+
+// Failure reasons shown on the page (remoteSuggestState.Error). Short and
+// sanitized: the full error goes to the log only.
+const (
+	suggestErrAuth      = "auth"
+	suggestErrRateLimit = "rate limit"
+	suggestErrTimeout   = "timeout"
+	suggestErrAPI       = "api error"
+	suggestErrNoScreen  = "no screen"
+	suggestErrNoReplies = "no usable replies"
+	suggestErrBadResp   = "bad response"
+	suggestErrInternal  = "internal"
+)
+
+// suggestError is a failure whose page reason is known where it happens.
+type suggestError struct {
+	reason string
+	msg    string
+}
+
+func (e *suggestError) Error() string { return e.msg }
+
+// suggestReason maps err to one of the suggestErr* reasons.
+func suggestReason(err error) string {
+	var se *suggestError
+	if errors.As(err, &se) {
+		return se.reason
+	}
+	var ae *anthropic.Error
+	if errors.As(err, &ae) {
+		switch ae.StatusCode {
+		case 401, 403:
+			return suggestErrAuth
+		case 429:
+			return suggestErrRateLimit
+		case 408, 504:
+			return suggestErrTimeout
+		}
+		return suggestErrAPI
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return suggestErrTimeout
+	}
+	return suggestErrAPI
+}
 
 const suggestSystemPrompt = `You draft one-tap replies that a developer sends from their PHONE to a Claude Code session that is waiting on them. You see the bottom of the session's terminal and its state.
 
@@ -69,7 +122,7 @@ Never repeat one of the fixed replies you are given; they are already on screen.
 // or nothing usable comes back.
 func (s *Summarizer) SuggestReplies(ctx context.Context, sess swSession, screen string, fixed []string) ([]remoteSuggestion, error) {
 	if strings.TrimSpace(screen) == "" {
-		return nil, errors.New("empty screen")
+		return nil, &suggestError{suggestErrNoScreen, "empty screen"}
 	}
 	dialog := remoteDialog(sess.State)
 	var b strings.Builder
@@ -122,6 +175,11 @@ func (s *Summarizer) SuggestReplies(ctx context.Context, sess swSession, screen 
 	if err != nil {
 		return nil, err
 	}
+	switch resp.StopReason {
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonToolUse, anthropic.StopReasonStopSequence, "":
+	default:
+		return nil, &suggestError{suggestErrBadResp, fmt.Sprintf("stop reason %s", resp.StopReason)}
+	}
 	for _, block := range resp.Content {
 		tu, ok := block.AsAny().(anthropic.ToolUseBlock)
 		if !ok || tu.Name != suggestToolName {
@@ -131,15 +189,15 @@ func (s *Summarizer) SuggestReplies(ctx context.Context, sess swSession, screen 
 			Replies []remoteSuggestion `json:"replies"`
 		}
 		if err := json.Unmarshal([]byte(tu.JSON.Input.Raw()), &out); err != nil {
-			return nil, fmt.Errorf("suggest tool input: %w", err)
+			return nil, &suggestError{suggestErrBadResp, fmt.Sprintf("suggest tool input: %v", err)}
 		}
 		clean := cleanSuggestions(out.Replies, dialog, fixed)
 		if len(clean) == 0 {
-			return nil, errors.New("no usable suggestions")
+			return nil, &suggestError{suggestErrNoReplies, "no usable suggestions"}
 		}
 		return clean, nil
 	}
-	return nil, errors.New("no suggest tool call in response")
+	return nil, &suggestError{suggestErrBadResp, "no suggest tool call in response"}
 }
 
 var suggestKeyRE = regexp.MustCompile(`^[1-9]$`)
@@ -147,7 +205,8 @@ var suggestKeyRE = regexp.MustCompile(`^[1-9]$`)
 // cleanSuggestions enforces what the prompt asks for, since a model can
 // ignore it: dialogs get keys only and prompts get text only; no questions
 // back; no duplicates of each other or of the fixed replies; bounded
-// lengths; at most suggestMax.
+// lengths; no control characters (dropped, since the send path refuses
+// them); at most suggestMax.
 func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remoteSuggestion {
 	seen := map[string]bool{}
 	for _, f := range fixed {
@@ -155,6 +214,9 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 	}
 	var out []remoteSuggestion
 	for _, s := range in {
+		if hasControlRunes(s.Label) || hasControlRunes(s.Text) {
+			continue
+		}
 		label := collapseWhitespace(s.Label)
 		text := strings.TrimSpace(s.Text)
 		key := strings.TrimSpace(s.Key)
@@ -173,16 +235,16 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 			if text == "" || strings.HasSuffix(text, "?") || placeholderLine(text) {
 				continue
 			}
-			k := strings.ToLower(text)
-			if seen[k] {
-				continue
-			}
-			seen[k] = true
 			// Too long is dropped, not clipped: a chip SENDS its text, and a
 			// clipped prompt is a different prompt.
 			if len([]rune(text)) > suggestTextRunes {
 				continue
 			}
+			k := strings.ToLower(text)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
 			c = remoteSuggestion{Label: label, Text: text}
 			if c.Label == "" {
 				c.Label = text
@@ -197,6 +259,20 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 	return out
 }
 
+// hasControlRunes reports C0 controls other than newline and tab, DEL, and
+// C1 controls — what the remote's send path rejects.
+func hasControlRunes(s string) bool {
+	for _, r := range s {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
+}
+
 // tailRunes keeps the last n runes of s.
 func tailRunes(s string, n int) string {
 	r := []rune(s)
@@ -206,16 +282,20 @@ func tailRunes(s string, n int) string {
 	return string(r[len(r)-n:])
 }
 
-// remoteSuggestState is what the page gets: Status is off (no key or
-// summaries disabled), pending, ready or error.
+// remoteSuggestState is what the page gets: Status is off (no key,
+// summaries disabled, or the session isn't waiting), pending, ready or
+// error. Error is the short reason (a suggestErr* value) when Status is
+// error.
 type remoteSuggestState struct {
-	Status string             `json:"status"`
+	Status suggestStatus      `json:"status"`
 	Items  []remoteSuggestion `json:"items,omitempty"`
+	Error  string             `json:"error,omitempty"`
 }
 
 type remoteSuggestEntry struct {
 	episode string
-	status  string
+	status  suggestStatus
+	reason  string
 	items   []remoteSuggestion
 	at      time.Time
 }
@@ -255,11 +335,17 @@ func (c *remoteSuggestions) get(sess swSession) remoteSuggestState {
 	if !ok || e.episode != remoteEpisode(sess) {
 		return remoteSuggestState{Status: suggestStatusWait}
 	}
-	return remoteSuggestState{Status: e.status, Items: append([]remoteSuggestion(nil), e.items...)}
+	st := remoteSuggestState{Status: e.status, Items: append([]remoteSuggestion(nil), e.items...)}
+	if e.status == suggestStatusFailed {
+		st.Error = e.reason
+	}
+	return st
 }
 
 // ensure starts a call for sess's episode unless one is cached, in flight,
-// or failed less than suggestRetryAfter ago. screen is read only when a
+// or failed less than its back-off ago (suggestAuthRetry for an auth
+// failure, which won't fix itself quickly; suggestRetryAfter otherwise).
+// screen is read only when a
 // call actually starts, in the call's goroutine. Never blocks.
 func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func() string) {
 	if !c.enabled() {
@@ -268,7 +354,7 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 	ep := remoteEpisode(sess)
 	c.mu.Lock()
 	if e, ok := c.entries[sess.Name]; ok && e.episode == ep {
-		if e.status != suggestStatusFailed || c.now().Sub(e.at) < suggestRetryAfter {
+		if e.status != suggestStatusFailed || c.now().Sub(e.at) < suggestBackoff(e.reason) {
 			c.mu.Unlock()
 			return
 		}
@@ -280,13 +366,20 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 		defer func() {
 			if p := recover(); p != nil {
 				teardownLogf("remote: suggest panic for %s: %v", sess.Name, p)
-				c.finish(sess.Name, ep, nil, errors.New("panic"))
+				c.finish(sess.Name, ep, nil, &suggestError{suggestErrInternal, fmt.Sprintf("panic: %v", p)})
 			}
 		}()
-		c.sem <- struct{}{}
-		defer func() { <-c.sem }()
+		// The timeout covers the wait for a slot too, so a goroutine never
+		// queues forever behind stuck calls.
 		ctx, cancel := context.WithTimeout(context.Background(), suggestTimeout)
 		defer cancel()
+		select {
+		case c.sem <- struct{}{}:
+		case <-ctx.Done():
+			c.finish(sess.Name, ep, nil, fmt.Errorf("waiting for a call slot: %w", ctx.Err()))
+			return
+		}
+		defer func() { <-c.sem }()
 		items, err := c.gen.SuggestReplies(ctx, sess, screen(), fixed)
 		c.finish(sess.Name, ep, items, err)
 	}()
@@ -301,12 +394,23 @@ func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, er
 	}
 	e.at = c.now()
 	if err != nil {
-		teardownLogf("remote: suggest for %s: %v", name, err)
+		e.reason = suggestReason(err)
+		teardownLogf("remote: suggest for %s failed (%s): %v", name, e.reason, err)
 		e.status = suggestStatusFailed
+		e.items = nil
 		return
 	}
 	e.status = suggestStatusReady
+	e.reason = ""
 	e.items = items
+}
+
+// suggestBackoff is how long a failed episode waits before a retry.
+func suggestBackoff(reason string) time.Duration {
+	if reason == suggestErrAuth {
+		return suggestAuthRetry
+	}
+	return suggestRetryAfter
 }
 
 // prune drops entries for sessions that are gone.
