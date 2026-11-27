@@ -413,8 +413,8 @@ the home screen.
 
 For each waiting session it shows:
 
-- **Suggested replies from Haiku.** These come from the bottom of the session's
-  screen, with the same key and model as the summaries. On a question or a
+- **Suggested replies** (from the summary model, Haiku by default). These come
+  from the bottom of the session's screen, with the same key as the summaries. On a question or a
   permission prompt, they're the options to pick, by number. At an empty
   prompt, they're the next things you'd likely type. Tap one to send it.
   You get about two seconds to undo it, since a mis-tap on a phone is easy.
@@ -424,8 +424,8 @@ For each waiting session it shows:
 - **Quick replies**, the canned answers in `web.replies` (default
   `yes, go ahead`, `continue`, `commit and push`). Long-press one to edit it
   before sending.
-- **Answer keys** when a question is open: `1`–`4`, the arrows, Enter and Esc.
-  The number keys get the same undo window; the arrows, Enter and Esc go
+- **Answer keys** when a question is open: `1`–`4`, Up/Down, Enter and Esc.
+  The number keys get the same undo window; Up/Down, Enter and Esc go
   straight through.
 - **The keyboard**, which is always there at the bottom, on every session.
   Return sends, and multi-line text goes in as one paste. If a question is
@@ -444,7 +444,7 @@ moved on by the time the request arrives (someone answered it at the desk,
 say), the send is refused rather than landing on the next question. Tap
 **☰** to open any session, including busy ones, and type to it. A busy
 session's state changes often, so if it changes before your send lands, the
-remote asks you to retry. **Conduct** pauses and resumes the walk.
+send is refused and your text stays in the box to resend. **Conduct** pauses and resumes the walk.
 
 Because it types into your sessions, the remote is off unless you turn it on,
 and every API request also needs a token (the page itself loads without one),
@@ -459,13 +459,13 @@ web:
 
 ```sh
 # in the lobby's environment, or in summary.api_key_file next to the API key
-CLAUDEMUX_REMOTE_TOKEN=<at least 16 random characters>
+CLAUDEMUX_REMOTE_TOKEN=<at least 16 random bytes>
 ```
 
 Open `http://<node>:7474/remote#token=<token>` on the phone once. The token is
 taken from the fragment (which never reaches the server), kept in the phone's
 browser storage, and stripped from the address bar. Without a token set, the
-page loads and says what's missing. Teammates who can see the status page
+page loads, says the remote isn't set up, and points to the lobby log. Teammates who can see the status page
 can't drive anything without it. The remote shows *all* your sessions, including
 any that `hide_private_orgs` keeps off the status page.
 
@@ -1028,7 +1028,7 @@ web:
   Default empty: every session shows.
 - `web.control` — serve the phone remote at `/remote` (see **Answering from your
   phone** above). Default `false`. Also needs `CLAUDEMUX_REMOTE_TOKEN` (16+
-  characters) in the lobby's environment or `summary.api_key_file`.
+  bytes) in the lobby's environment or `summary.api_key_file`.
 - `web.replies` — the remote's quick replies, in order. Empty keeps the defaults
   (`yes, go ahead`, `continue`, `commit and push`). Up to 6, each 1–200 characters.
 - `web.headline_interval` — the floor between fleet-headline calls, with

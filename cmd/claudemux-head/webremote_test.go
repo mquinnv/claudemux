@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -30,11 +33,24 @@ type fakeRemoteTmux struct {
 	// blocks until release is closed: a write held mid-flight.
 	typing  chan string
 	release chan struct{}
+	// captures lists the pane of every capture, in order (reads are not in
+	// calls, which is writes only).
+	captures []string
+	// escapeScreen, when set, is what the pane shows after an Escape
+	// (default: the empty prompt).
+	escapeScreen string
+}
+
+func (f *fakeRemoteTmux) captured() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.captures...)
 }
 
 func (f *fakeRemoteTmux) capture(pane string, _ bool, _ int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.captures = append(f.captures, pane)
 	if f.failCapture {
 		return "", errors.New("tmux down")
 	}
@@ -73,6 +89,9 @@ func (f *fakeRemoteTmux) keys(pane string, keys ...string) error {
 	// An Esc closes a dialog: the fake shows the empty prompt behind it.
 	if len(keys) == 1 && keys[0] == "Escape" {
 		f.screens[pane] = idleScreen("")
+		if f.escapeScreen != "" {
+			f.screens[pane] = f.escapeScreen
+		}
 	}
 	return nil
 }
@@ -177,10 +196,11 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// waitFor polls cond until it holds, failing the test after two seconds.
+// waitFor polls cond until it holds, failing the test after ten seconds
+// (generous, for a loaded -race run).
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
@@ -731,8 +751,25 @@ func TestRemoteWritesAreSerialized(t *testing.T) {
 		r.writeMu.Unlock()
 		t.Fatal("write lock not held while a send is typing")
 	}
+	if got := ft.captured(); len(got) != 1 {
+		t.Fatalf("captures before the second send = %q, want just the first's", got)
+	}
 	wg.Add(1)
-	go send(1, "second")
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		send(1, "second")
+	}()
+	<-started
+	// Give the second request ample time to run as far as it can. Holding the
+	// lock, the first send must keep it from capturing (or typing) anything.
+	time.Sleep(100 * time.Millisecond)
+	if got := ft.captured(); len(got) != 1 {
+		t.Fatalf("second send captured while the first held the lock: captures %q", got)
+	}
+	if got := ft.log(); !reflect.DeepEqual(got, []string{"type %1 first"}) {
+		t.Fatalf("second send wrote while the first held the lock: calls %q", got)
+	}
 	close(release)
 	if got := <-typing; got != "second" {
 		t.Fatalf("typing %q, want second", got)
@@ -902,6 +939,9 @@ func TestRemoteSessionEdges(t *testing.T) {
 		if v.ScreenError == "" || v.Screen != "" {
 			t.Errorf("screen_error = %q, screen = %q", v.ScreenError, v.Screen)
 		}
+		if v.Suggestions.Status != suggestStatusFailed || v.Suggestions.Error != suggestErrNoScreen {
+			t.Errorf("suggestions = %+v, want error %q", v.Suggestions, suggestErrNoScreen)
+		}
 		if n := suggestEntryCount(r.suggest); n != 0 {
 			t.Errorf("drafted replies from a screen that could not be read (%d entries)", n)
 		}
@@ -910,8 +950,8 @@ func TestRemoteSessionEdges(t *testing.T) {
 		bare := swSession{Name: "a", State: "Idle", Since: rt0, Context: -1}
 		r, _, h := newTestRemote(t, testFleet(bare), gen)
 		v := decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
-		if v.Suggestions.Status != suggestStatusOff {
-			t.Errorf("status = %q, want off", v.Suggestions.Status)
+		if v.Suggestions.Status != suggestStatusFailed || v.Suggestions.Error != suggestErrNoPane {
+			t.Errorf("suggestions = %+v, want error %q", v.Suggestions, suggestErrNoPane)
 		}
 		if n := suggestEntryCount(r.suggest); n != 0 {
 			t.Errorf("started %d suggest calls with no pane", n)
@@ -991,13 +1031,13 @@ func TestRemoteSuggestionsRetryBackoff(t *testing.T) {
 	}
 	// Inside the back-off a poll does not retry (a retry would flip the entry
 	// to pending synchronously).
-	clock.advance(10 * time.Second)
+	clock.advance(suggestRetryAfter - time.Second)
 	c.ensure(s, nil, func() string { return "screen" })
-	if st := c.get(s).Status; st != suggestStatusFailed {
-		t.Fatalf("retried inside the back-off: status %q", st)
+	if st := c.get(s).Status; st != suggestStatusFailed || failing.count() != 1 {
+		t.Fatalf("retried inside the back-off: status %q, calls %d", st, failing.count())
 	}
 	// Past it, the next poll retries.
-	clock.advance(21 * time.Second)
+	clock.advance(2 * time.Second)
 	c.ensure(s, nil, func() string { return "screen" })
 	waitFor(t, "the retry", func() bool { return failing.count() == 2 && c.get(s).Status == suggestStatusFailed })
 
@@ -1129,13 +1169,29 @@ func TestRemoteRepliesConfigValidation(t *testing.T) {
 	if err := cfg.validate(); err == nil {
 		t.Fatal("too many replies: want error")
 	}
-	cfg.Web.Replies = []string{"ship it"}
+	for _, tc := range []struct {
+		what    string
+		replies []string
+		ok      bool
+	}{
+		{"exactly the cap", []string{"1", "2", "3", "4", "5", "6"}, true},
+		{"one rune over the length cap", []string{strings.Repeat("a", remoteReplyMaxRunes+1)}, false},
+		{"the length cap in multi-byte runes", []string{strings.Repeat("é", remoteReplyMaxRunes)}, true},
+		{"an escape sequence", []string{"ok\x1b[2J"}, false},
+		{"a C1 control", []string{"a\u009bb"}, false},
+	} {
+		cfg.Web.Replies = tc.replies
+		if err := cfg.validate(); (err == nil) != tc.ok {
+			t.Errorf("%s: validate() = %v, want ok=%v", tc.what, err, tc.ok)
+		}
+	}
+	cfg.Web.Replies = []string{"  ship it  ", "continue"}
 	if err := cfg.validate(); err != nil {
 		t.Fatal(err)
 	}
 	r := newWebRemote(newWebFleet(), cfg, testRemoteToken, nil)
-	if !reflect.DeepEqual(r.replies, []string{"ship it"}) {
-		t.Fatalf("replies = %v", r.replies)
+	if !reflect.DeepEqual(r.replies, []string{"ship it", "continue"}) {
+		t.Fatalf("replies = %q, want trimmed", r.replies)
 	}
 }
 
@@ -1146,5 +1202,385 @@ func TestRemoteTrimPromptBox(t *testing.T) {
 	}
 	if got := remoteTrimPromptBox("no box here"); got != "no box here" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// A send must name the episode it answers; a key too, except Escape, which
+// is safe whatever the session is doing now.
+func TestRemoteWritesNeedAnEpisode(t *testing.T) {
+	s := idleSession()
+	_, ft, h := newTestRemote(t, testFleet(s), nil)
+	ft.screens["%1"] = idleScreen("")
+	for _, tc := range []struct {
+		path string
+		body any
+	}{
+		{"/api/remote/send", remoteSendReq{Name: "a", Text: "yes"}},
+		{"/api/remote/key", remoteKeyReq{Name: "a", Key: "1"}},
+		{"/api/remote/key", remoteKeyReq{Name: "a", Key: "Enter"}},
+	} {
+		rec := remoteDo(t, h, "POST", tc.path, testRemoteToken, tc.body)
+		if rec.Code != http.StatusBadRequest || remoteCode(t, rec) != "episode" {
+			t.Errorf("%s %+v: got %d %s, want 400 episode", tc.path, tc.body, rec.Code, rec.Body)
+		}
+	}
+	if got := ft.log(); len(got) != 0 {
+		t.Fatalf("wrote without an episode: %q", got)
+	}
+	if got := ft.captured(); len(got) != 0 {
+		t.Fatalf("captured without an episode: %q", got)
+	}
+
+	// Escape with no episode reaches a session that has moved on since the
+	// page last looked (it is mid-turn now): interrupting is the point.
+	moved := idleSession()
+	moved.State = "Thinking"
+	moved.Since = rt0.Add(time.Minute)
+	_, ft, h = newTestRemote(t, testFleet(moved), nil)
+	rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken, remoteKeyReq{Name: "a", Key: "Escape"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Escape without an episode: got %d %s, want 200", rec.Code, rec.Body)
+	}
+	if got := ft.log(); !reflect.DeepEqual(got, []string{"keys %1 Escape"}) {
+		t.Fatalf("calls = %q, want just the Escape", got)
+	}
+}
+
+func TestRemoteWriteTargetRefusals(t *testing.T) {
+	bare := swSession{Name: "bare", State: "Asking", Since: rt0, Context: -1}
+	for _, tc := range []struct {
+		what   string
+		path   string
+		body   any
+		status int
+		code   string
+	}{
+		{"send to a gone session", "/api/remote/send", remoteSendReq{Name: "ghost", Episode: "x", Text: "hi"}, http.StatusNotFound, "gone"},
+		{"key to a gone session", "/api/remote/key", remoteKeyReq{Name: "ghost", Episode: "x", Key: "1"}, http.StatusNotFound, "gone"},
+		{"Escape to a gone session", "/api/remote/key", remoteKeyReq{Name: "ghost", Key: "Escape"}, http.StatusNotFound, "gone"},
+		{"send with no claude pane", "/api/remote/send", remoteSendReq{Name: "bare", Episode: remoteEpisode(bare), Text: "hi", Escape: true}, http.StatusConflict, "nopane"},
+		{"key with no claude pane", "/api/remote/key", remoteKeyReq{Name: "bare", Episode: remoteEpisode(bare), Key: "1"}, http.StatusConflict, "nopane"},
+	} {
+		_, ft, h := newTestRemote(t, testFleet(bare), nil)
+		rec := remoteDo(t, h, "POST", tc.path, testRemoteToken, tc.body)
+		if rec.Code != tc.status || remoteCode(t, rec) != tc.code {
+			t.Errorf("%s: got %d %s, want %d %s", tc.what, rec.Code, rec.Body, tc.status, tc.code)
+		}
+		if got := ft.log(); len(got) != 0 {
+			t.Errorf("%s: tmux writes %q", tc.what, got)
+		}
+		if got := ft.captured(); len(got) != 0 {
+			t.Errorf("%s: tmux captures %q", tc.what, got)
+		}
+	}
+}
+
+// Escape closed the dialog but the prompt behind it holds a draft: the send
+// stops there (the episode the page answered is gone), even with replace.
+func TestRemoteSendDismissedIntoADraft(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		s := idleSession()
+		s.State = "Asking"
+		_, ft, h := newTestRemote(t, testFleet(s), nil)
+		ft.screens["%1"] = dialogScreen()
+		ft.escapeScreen = idleScreen("half a thought")
+		rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "use postgres", Escape: true, Replace: replace})
+		if rec.Code != http.StatusConflict || remoteCode(t, rec) != "dismissed_draft" {
+			t.Errorf("replace=%v: got %d %s, want 409 dismissed_draft", replace, rec.Code, rec.Body)
+		}
+		if got := ft.log(); !reflect.DeepEqual(got, []string{"keys %1 Escape"}) {
+			t.Errorf("replace=%v: calls = %q, want the Escape only (nothing typed or cleared)", replace, got)
+		}
+	}
+}
+
+// Requests whose client left while another write held the lock type nothing
+// once they get it, and answer nothing.
+func TestRemoteWritesDroppedWhenClientGone(t *testing.T) {
+	s := idleSession()
+	_, ft, h := newTestRemote(t, testFleet(s), nil)
+	ft.screens["%1"] = idleScreen("")
+	typing, release := make(chan string, 2), make(chan struct{})
+	ft.set(func(f *fakeRemoteTmux) { f.typing, f.release = typing, release })
+
+	firstDone := make(chan int, 1)
+	go func() {
+		firstDone <- remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "first"}).Code
+	}()
+	if got := <-typing; got != "first" {
+		t.Fatalf("typing %q, want first", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	routes := []remoteRoute{
+		{"POST", "/api/remote/send", remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "second"}},
+		{"POST", "/api/remote/key", remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"}},
+		{"POST", "/api/remote/key", remoteKeyReq{Name: "a", Key: "Escape"}},
+	}
+	recs := make([]*httptest.ResponseRecorder, len(routes))
+	var wg sync.WaitGroup
+	for i, rt := range routes {
+		req := httptest.NewRequest(rt.method, rt.path, strings.NewReader(routeBody(t, rt))).WithContext(ctx)
+		req.RemoteAddr = "127.0.0.1:5555"
+		req.Host = "localhost:7474"
+		req.Header.Set("Authorization", "Bearer "+testRemoteToken)
+		req.Header.Set("Content-Type", "application/json")
+		recs[i] = httptest.NewRecorder()
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			h.ServeHTTP(recs[i], req)
+		}(i)
+	}
+	time.Sleep(50 * time.Millisecond) // let them queue behind the lock
+	close(release)
+	if code := <-firstDone; code != http.StatusOK {
+		t.Fatalf("first send: %d", code)
+	}
+	wg.Wait()
+	for i, rec := range recs {
+		if rec.Body.Len() != 0 {
+			t.Errorf("%s %+v answered a gone client: %s", routes[i].path, routes[i].body, rec.Body)
+		}
+	}
+	want := []string{"type %1 first", "keys %1 Enter"}
+	if got := ft.log(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %q, want only the first send's", got)
+	}
+}
+
+// A session that leaves the fleet loses its suggestion entry at the next
+// queue poll.
+func TestRemoteQueuePrunesGoneSessions(t *testing.T) {
+	a, b := idleSession(), swSession{Name: "b", State: "Idle", Since: rt0, ClaudePane: "%2", Context: -1}
+	fleet := testFleet(a, b)
+	gen := &fakeSuggester{out: []remoteSuggestion{{Label: "x", Text: "x"}}}
+	r, _, h := newTestRemote(t, fleet, gen)
+	r.suggest.ensure(a, nil, func() string { return "screen" })
+	r.suggest.ensure(b, nil, func() string { return "screen" })
+	waitFor(t, "both drafts", func() bool {
+		return r.suggest.get(a).Status == suggestStatusReady && r.suggest.get(b).Status == suggestStatusReady
+	})
+	fleet.publish(swSnapshot{Sessions: []swSession{b}}, RateLimits{}, false, nil, rt0)
+	if rec := remoteDo(t, h, "GET", "/api/remote/queue", testRemoteToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("queue: %d %s", rec.Code, rec.Body)
+	}
+	r.suggest.mu.Lock()
+	_, hasA := r.suggest.entries["a"]
+	_, hasB := r.suggest.entries["b"]
+	r.suggest.mu.Unlock()
+	if hasA || !hasB {
+		t.Fatalf("after prune: a kept=%v, b kept=%v; want only b", hasA, hasB)
+	}
+}
+
+// prefetch reads the next stop's screen only when a call is actually due.
+func TestRemotePrefetchSkipsWhenNoCallIsDue(t *testing.T) {
+	next := swSession{Name: "b", State: "Idle", Since: rt0, ClaudePane: "%2", Context: -1}
+
+	ready := &fakeSuggester{out: []remoteSuggestion{{Label: "x", Text: "x"}}}
+	r, ft, _ := newTestRemote(t, testFleet(next), ready)
+	ft.screens["%2"] = idleScreen("")
+	r.prefetch(next)
+	waitFor(t, "the prefetched draft", func() bool { return r.suggest.get(next).Status == suggestStatusReady })
+	if got := ft.captured(); !reflect.DeepEqual(got, []string{"%2"}) {
+		t.Fatalf("first prefetch captures = %q, want one of %%2", got)
+	}
+	r.prefetch(next)
+	if got := ft.captured(); len(got) != 1 || ready.count() != 1 {
+		t.Fatalf("prefetch of a ready stop: captures %q, calls %d", got, ready.count())
+	}
+
+	// Failed inside its back-off: no capture either.
+	clock := &fakeClock{t: rt0}
+	failing := &fakeSuggester{err: errors.New("boom")}
+	r, ft, _ = newTestRemote(t, testFleet(next), failing)
+	r.suggest.now = clock.now
+	ft.screens["%2"] = idleScreen("")
+	r.prefetch(next)
+	waitFor(t, "the failed prefetch", func() bool { return r.suggest.get(next).Status == suggestStatusFailed })
+	clock.advance(suggestRetryAfter - time.Second)
+	r.prefetch(next)
+	if got := ft.captured(); len(got) != 1 || failing.count() != 1 {
+		t.Fatalf("prefetch inside the back-off: captures %q, calls %d", got, failing.count())
+	}
+
+	// Not waiting, or no suggester: nothing to draft, nothing captured.
+	busy := next
+	busy.State = "Thinking"
+	r, ft, _ = newTestRemote(t, testFleet(busy), ready)
+	ft.screens["%2"] = idleScreen("")
+	r.prefetch(busy)
+	r2, ft2, _ := newTestRemote(t, testFleet(next), nil)
+	ft2.screens["%2"] = idleScreen("")
+	r2.prefetch(next)
+	if len(ft.captured())+len(ft2.captured()) != 0 {
+		t.Fatalf("captured with nothing to draft: %q %q", ft.captured(), ft2.captured())
+	}
+}
+
+// startSwitchboardWeb with web.control on: the page always loads, and the
+// API answers 503 setup until a usable token is present.
+func TestStartSwitchboardWebWithControl(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Web.Listen = "127.0.0.1:0"
+	cfg.Web.Control = true
+	cfg.Summary.Enabled = false
+	cfg.Summary.APIKeyFile = t.TempDir() + "/env" // never the real one
+	noSuffix := func() (webAllow, error) { return webAllow{}, nil }
+	noIP := func() (string, error) { return "", errors.New("unused") }
+
+	get := func(t *testing.T, w *swWeb, path string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest("GET", "http://"+w.addr()+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testRemoteToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	t.Run("no token", func(t *testing.T) {
+		t.Setenv(remoteTokenKey, "")
+		w, err := startSwitchboardWeb(cfg, noIP, noSuffix)
+		if err != nil || w == nil {
+			t.Fatalf("got %+v, %v", w, err)
+		}
+		defer w.stop()
+		if code, body := get(t, w, "/remote"); code != http.StatusOK || !strings.Contains(body, "claudemux remote") {
+			t.Fatalf("page: %d", code)
+		}
+		code, body := get(t, w, "/api/remote/queue")
+		var e remoteErrorBody
+		_ = json.Unmarshal([]byte(body), &e)
+		if code != http.StatusServiceUnavailable || e.Code != "setup" {
+			t.Fatalf("queue: %d %s, want 503 setup", code, body)
+		}
+		if e.Message != "remote token missing or too short; see the lobby log" {
+			t.Errorf("setup message = %q", e.Message)
+		}
+		if strings.Contains(body, cfg.Summary.APIKeyFile) {
+			t.Errorf("setup body leaks the key file path: %s", body)
+		}
+	})
+	t.Run("token", func(t *testing.T) {
+		t.Setenv(remoteTokenKey, testRemoteToken)
+		w, err := startSwitchboardWeb(cfg, noIP, noSuffix)
+		if err != nil || w == nil {
+			t.Fatalf("got %+v, %v", w, err)
+		}
+		defer w.stop()
+		code, body := get(t, w, "/api/remote/queue")
+		if code != http.StatusOK {
+			t.Fatalf("queue: %d %s", code, body)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := raw["suggest"].(bool); !ok || got {
+			t.Errorf("suggest = %v, want false with summaries disabled", raw["suggest"])
+		}
+	})
+}
+
+// tmuxIsolated points every tmux call this process makes (execRemoteTmux
+// included) at a private server, starts it with one pane running shell, and
+// returns that pane's id.
+func tmuxIsolated(t *testing.T, shell string) string {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	// Short and outside $TMPDIR: a unix socket path is capped near 104 bytes.
+	dir, err := os.MkdirTemp("/tmp", "cmxrt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_TMPDIR", dir)
+	out, err := exec.Command("tmux", "-f", "/dev/null", "new-session", "-d", "-x", "120", "-y", "20",
+		"-s", "t", "-P", "-F", "#{pane_id}", shell).CombinedOutput()
+	if err != nil {
+		t.Fatalf("tmux new-session: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-server").Run() })
+	return strings.TrimSpace(string(out))
+}
+
+// tmuxRemoteBuffers lists the remote's paste buffers left in the server.
+func tmuxRemoteBuffers(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("tmux", "list-buffers", "-F", "#{buffer_name}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("list-buffers: %v: %s", err, out)
+	}
+	var names []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(l, "claudemux-remote-") {
+			names = append(names, l)
+		}
+	}
+	return names
+}
+
+// A multi-line message goes in as ONE bracketed paste: the newline arrives
+// inside the paste brackets (where claude treats it as text), never as a
+// bare Enter between the lines.
+func TestExecRemoteTmuxTypeTextMultiLine(t *testing.T) {
+	// The pane asks for bracketed paste as claude does, then shows every
+	// byte it gets: a raw tty (no echo, CR kept as CR) read by cat -v.
+	pane := tmuxIsolated(t, `printf '\033[?2004h'; stty raw -echo; echo READY; exec cat -v`)
+	tm := execRemoteTmux{}
+	waitFor(t, "the pane to be ready", func() bool {
+		s, err := tm.capture(pane, false, 0)
+		return err == nil && strings.Contains(s, "READY")
+	})
+	if err := tm.typeText(pane, "a\nb"); err != nil {
+		t.Fatalf("typeText: %v", err)
+	}
+	// cat -v flushes at a newline: a raw LF (C-j) shows what came before it.
+	if err := tm.keys(pane, "C-j"); err != nil {
+		t.Fatal(err)
+	}
+	var screen string
+	waitFor(t, "the paste to show", func() bool {
+		s, err := tm.capture(pane, false, 0)
+		screen = s
+		return err == nil && strings.Contains(s, "201~")
+	})
+	if want := "^[[200~a^Mb^[[201~"; !strings.Contains(screen, want) {
+		t.Fatalf("pane shows:\n%s\nwant one bracketed paste %q (a, then b, no Enter outside the brackets)", screen, want)
+	}
+	if bufs := tmuxRemoteBuffers(t); len(bufs) != 0 {
+		t.Fatalf("paste buffers left behind: %q", bufs)
+	}
+}
+
+func TestExecRemoteTmuxTypeTextMissingPane(t *testing.T) {
+	tmuxIsolated(t, "cat")
+	err := execRemoteTmux{}.typeText("%999", "a\nb")
+	if err == nil {
+		t.Fatal("paste into a missing pane: want an error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "paste-buffer") && !strings.Contains(msg, "%999") {
+		t.Errorf("error %q names neither paste-buffer nor the pane", msg)
+	}
+	if bufs := tmuxRemoteBuffers(t); len(bufs) != 0 {
+		t.Fatalf("a failed paste left its buffer behind: %q", bufs)
 	}
 }

@@ -227,6 +227,8 @@ textarea:focus { border-color: color-mix(in srgb, var(--accent) 70%, var(--line)
   font-weight: 600; font-size: 14px;
 }
 .toast.err { background: var(--bad); color: #fff; }
+/* A toast shown while an Undo toast is pending sits above it. */
+.toast.above { transform: translateY(calc(-100% - 8px)); }
 .toast-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .toast button { font-weight: 800; padding: 6px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bg) 18%, transparent); }
 .toast-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); border-radius: 0 0 14px 14px; }
@@ -338,6 +340,7 @@ const S = {
   answered: new Map(),// name -> episode we just answered
   detail: null,       // last /session payload for current
   detailError: '',    // why the last /session poll failed, if it did
+  detailAt: 0,        // when S.detail was last loaded (ms)
   online: true,
   apiError: '',       // a non-network API failure, shown as a banner
   sending: false,     // a typed message is in flight
@@ -408,11 +411,20 @@ function forgetStale() {
 }
 
 // ---------- polling ----------
-let queueTimer = null, detailTimer = null, detailSeq = 0;
+let queueTimer = null, detailTimer = null, detailSeq = 0, queueSeq = 0;
+
+// A render that throws (a payload shape the page didn't expect) must not
+// stop polling: say so in the banner instead.
+function pageError(e) {
+  console.error('page error:', e);
+  S.apiError = 'page error: ' + e.message;
+  try { render(); } catch (e2) { console.error('render failed again:', e2); }
+}
 
 async function pollQueue() {
   clearTimeout(queueTimer);
   if (!token) return;
+  const seq = ++queueSeq;
   try {
     const q = await api('/api/remote/queue');
     S.sessions = q.sessions; S.queue = q.queue; S.replies = q.replies || []; S.suggestOn = !!q.suggest;
@@ -422,9 +434,14 @@ async function pollQueue() {
     if (next !== S.current) { S.current = next; S.detail = null; S.detailError = ''; S.screenTall = false; pollDetail(); }
     render();
   } catch (e) {
-    handleApiFailure(e);
+    try { handleApiFailure(e); } catch (e2) { pageError(e2); }
+  } finally {
+    // Only the newest poll re-arms, so overlapping calls don't stack timers.
+    if (seq === queueSeq && token) {
+      clearTimeout(queueTimer);
+      queueTimer = setTimeout(pollQueue, document.hidden ? 15000 : 2000);
+    }
   }
-  queueTimer = setTimeout(pollQueue, document.hidden ? 15000 : 2000);
 }
 
 async function pollDetail() {
@@ -432,21 +449,30 @@ async function pollDetail() {
   const name = S.current;
   if (!name || !token) { S.detail = null; render(); return; }
   const seq = ++detailSeq;
+  let rearm = true;
   try {
     const d = await api('/api/remote/session?name=' + encodeURIComponent(name));
     if (seq !== detailSeq || name !== S.current) return;
-    S.detail = d; S.detailError = '';
+    S.detail = d; S.detailError = ''; S.detailAt = Date.now();
     renderDetail();
   } catch (e) {
     if (seq !== detailSeq || name !== S.current) return;
-    if (e.code === 'gone') { S.current = null; pollQueue(); return; }
-    S.detailError = e.message;
-    if (isGlobalFailure(e)) handleApiFailure(e);
-    else { console.error('session poll failed:', e); renderDetail(); }
+    if (e.code === 'gone') { rearm = false; S.current = null; pollQueue(); return; }
+    try {
+      S.detailError = e.message;
+      if (isGlobalFailure(e)) handleApiFailure(e);
+      else { console.error('session poll failed:', e); renderDetail(); }
+    } catch (e2) { pageError(e2); }
+  } finally {
+    // A stale poll (superseded, or for a session no longer on screen)
+    // leaves re-arming to the newer one.
+    if (rearm && seq === detailSeq && name === S.current) {
+      // Faster while Haiku is still drafting, so chips appear as they land.
+      const pending = S.detail && S.detail.suggestions && S.detail.suggestions.status === 'pending';
+      clearTimeout(detailTimer);
+      detailTimer = setTimeout(pollDetail, document.hidden ? 15000 : (pending ? 1000 : 2000));
+    }
   }
-  // Faster while Haiku is still drafting, so chips appear as they land.
-  const pending = S.detail && S.detail.suggestions && S.detail.suggestions.status === 'pending';
-  detailTimer = setTimeout(pollDetail, document.hidden ? 15000 : (pending ? 1000 : 2000));
 }
 
 const OFF_MSG = 'Remote control is off or this device isn’t allowed';
@@ -486,7 +512,9 @@ let pendingSend = null;
 function sendWithUndo(label, fn) {
   if (pendingSend) { clearTimeout(pendingSend.timer); pendingSend = null; }
   const delay = 1800;
-  const t = toast(label, { action: 'Undo', onAction: () => { clearTimeout(pendingSend.timer); pendingSend = null; }, duration: delay, bar: true });
+  // The Undo toast has its own slot: a toast raised meanwhile stacks
+  // above it rather than wiping the only way to cancel the send.
+  const t = toast(label, { slot: 'undo', action: 'Undo', onAction: () => { if (pendingSend) clearTimeout(pendingSend.timer); pendingSend = null; }, duration: delay, bar: true });
   pendingSend = { timer: setTimeout(async () => { pendingSend = null; t.close(); await fn(); }, delay) };
 }
 
@@ -497,11 +525,17 @@ async function doSend(name, episode, text, opts = {}) {
     if (opts.clearInput) { $('input').value = ''; autosize(); }
     toast('Sent to ' + name, { duration: 1400 });
   } catch (e) {
-    if (e.code === 'draft') {
+    if (e.code === 'dismissed_draft') {
+      // The Esc has already landed and the dialog is gone, so the session
+      // is on a new episode. Never offer Esc again in this chain: on a
+      // plain prompt it would interrupt the session.
+      await offerReplaceAfterDismiss(name, text, opts);
+    } else if (e.code === 'draft') {
       confirmSheet('The prompt in ' + name + ' isn’t empty', 'There’s a draft in its input box, or a screen the remote doesn’t recognise. Replace the draft with your message?',
-        // escape: false — after "Dismiss and send" the Esc already landed;
-        // pressing it again on a plain prompt would interrupt the session.
         'Replace and send', () => doSend(name, episode, text, { ...opts, replace: true, escape: false }));
+    } else if (e.code === 'dialog' && opts.noEscape) {
+      toast('A question opened again in ' + name + '; not dismissing it a second time.', { err: true, duration: 6000 });
+      pollQueue(); pollDetail();
     } else if (e.code === 'dialog') {
       confirmSheet('A question is open in ' + name, 'Dismiss it with Esc and send your message as a normal prompt instead?',
         'Dismiss and send', () => doSend(name, episode, text, { ...opts, escape: true }));
@@ -517,10 +551,28 @@ async function doSend(name, episode, text, opts = {}) {
   }
 }
 
-async function doKey(name, episode, key, advance) {
+// After "Dismiss and send" found a draft behind the dialog: fetch the
+// session's new episode and offer to replace the draft, with escape off.
+async function offerReplaceAfterDismiss(name, text, opts) {
+  let ep;
+  try {
+    const d = await api('/api/remote/session?name=' + encodeURIComponent(name));
+    ep = d && d.session && d.session.episode;
+  } catch (e2) {
+    toast('Dialog dismissed, but ' + name + ' couldn’t be re-read: ' + e2.message, { err: true, duration: 6000 });
+    pollQueue(); return;
+  }
+  if (!ep) { toast('Dialog dismissed, but ' + name + ' has no current episode.', { err: true, duration: 6000 }); pollQueue(); return; }
+  pollQueue(); pollDetail();
+  confirmSheet('Dialog dismissed in ' + name, 'The question is gone, but the prompt isn’t empty. Replace what’s there with your message?',
+    'Replace and send', () => doSend(name, ep, text, { ...opts, replace: true, escape: false, noEscape: true }));
+}
+
+async function doKey(name, episode, key, advance, okMsg) {
   try {
     await api('/api/remote/key', { name, episode, key });
     if (advance) afterAnswer(name, episode);
+    if (okMsg) toast(okMsg, { duration: 1400 });
     pollDetail();
   } catch (e) {
     toast(e.message, { err: true });
@@ -640,8 +692,13 @@ function renderDetail() {
   const prevScroll = keepScroll ? { top: keepScroll.scrollTop, atBottom: keepScroll.scrollTop + keepScroll.clientHeight >= keepScroll.scrollHeight - 8 } : null;
   m.textContent = '';
   apiBanner(m);
-  // No detail yet and the last poll failed: say so rather than shimmer.
-  const detailErr = !d && S.detailError ? S.detailError : '';
+  // A failed refresh is always shown: with an older payload on screen it
+  // says how old; with none it says we're retrying.
+  if (S.detailError) {
+    const when = d && S.detailAt ? new Date(S.detailAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+    m.append(el('div', 'banner', 'Refresh failed: ' + S.detailError + (when ? ' — showing the screen from ' + when : ' — retrying')));
+  }
+  const detailErr = !d && !!S.detailError;
 
   const card = el('div', 'card');
   const head = el('div', 'sess-head');
@@ -678,9 +735,13 @@ function renderDetail() {
     if (!S.suggestOn || sg.status === 'off') {
       box.append(el('div', 'note', 'Suggestions are off (no API key, or summary.enabled is false).'));
     } else if (detailErr) {
-      box.append(el('div', 'note bad', 'Couldn’t load this session: ' + detailErr + ' — retrying.'));
+      box.append(el('div', 'note', 'Suggestions appear once the session loads.'));
     } else if (sg.status === 'pending') {
       box.append(el('div', 'shimmer'), el('div', 'shimmer'));
+    } else if (sg.status === 'error' && sg.error === 'no pane') {
+      box.append(el('div', 'note', 'This session has no claude pane to read.'));
+    } else if (sg.status === 'error' && sg.error === 'network') {
+      box.append(el('div', 'note bad', 'Suggestions failed (can’t reach the API) — retrying shortly.'));
     } else if (sg.status === 'error' && sg.error !== 'no usable replies') {
       box.append(el('div', 'note bad', 'Suggestions failed (' + (sg.error || 'unknown') + ') — retrying shortly.'));
     } else if (sg.status === 'error' || !sg.items || !sg.items.length) {
@@ -727,8 +788,6 @@ function renderDetail() {
     const sc = el('div', 'card screen-card');
     sc.append(el('div', 'note bad', 'Couldn’t read the terminal: ' + d.screen_error));
     m.append(sc);
-  } else if (detailErr && !ds.waiting) {
-    m.append(el('div', 'note bad', 'Couldn’t load this session: ' + detailErr + ' — retrying.'));
   } else if (d && d.screen) {
     const sc = el('div', 'card screen-card');
     const bar = el('div', 'screen-bar');
@@ -830,9 +889,18 @@ $('listBtn').onclick = () => { renderSheet(); $('sheet').classList.remove('hidde
 $('sheetClose').onclick = closeSheet;
 
 // ---------- toast & confirm ----------
+// The Undo toast (slot 'undo') lives in its own host, so an ordinary
+// toast never clears it; while one is pending, others sit above it.
+let undoHost = null;
 function toast(msg, o = {}) {
-  const host = $('toastHost'); host.textContent = '';
-  const t = el('div', 'toast' + (o.err ? ' err' : ''));
+  let host;
+  if (o.slot === 'undo') {
+    if (!undoHost) { undoHost = el('div'); $('toastHost').after(undoHost); }
+    host = undoHost;
+  } else host = $('toastHost');
+  host.textContent = '';
+  const above = o.slot !== 'undo' && pendingSend;
+  const t = el('div', 'toast' + (o.err ? ' err' : '') + (above ? ' above' : ''));
   t.append(el('span', 'toast-msg', msg));
   let closed = false;
   const close = () => { if (!closed) { closed = true; t.remove(); } };
@@ -910,7 +978,7 @@ $('skipBtn').onclick = () => {
 $('queueBtn').onclick = () => { S.pinned = null; S.current = null; pollQueue(); };
 $('escBtn').onclick = () => {
   const s = byName(S.current); if (!s) return;
-  doKey(s.name, '', 'Escape', false);
+  doKey(s.name, '', 'Escape', false, s.waiting ? 'Dismissed' : 'Interrupted ' + s.name);
 };
 $('deferBtn').onclick = async () => {
   const s = byName(S.current); if (!s) return;

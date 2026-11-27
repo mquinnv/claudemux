@@ -292,10 +292,8 @@ func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusA
 	summarizer := newSummarizer(cfg.Summary)
 	var extra func(*http.ServeMux)
 	if cfg.Web.Control {
+		// register logs tokenErr; passing it through is enough here.
 		token, tokenErr := remoteToken(cfg)
-		if tokenErr != nil {
-			teardownLogf("web: remote control: %v", tokenErr)
-		}
 		// A nil *Summarizer must stay a nil interface, or the remote would
 		// think suggestions are on and call through a nil client.
 		var gen remoteSuggester

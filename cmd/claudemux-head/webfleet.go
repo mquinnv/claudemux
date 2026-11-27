@@ -50,8 +50,10 @@ func newWebFleet() *webFleet { return &webFleet{title: defaultWebTitle} }
 // publish replaces the fleet facts. Only the lobby's Update calls it.
 func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time) {
 	// Filtered here, before anything reads it, so hidden sessions reach
-	// neither the page, its counts, nor the headline model's prompt. snap is
-	// a copy; reassigning its slice leaves the lobby's own untouched.
+	// neither the page, its counts, nor the headline model's prompt. w.all
+	// keeps the unfiltered list for the token-gated remote only (see the all
+	// field). snap is a copy; reassigning its slice leaves the lobby's own
+	// untouched.
 	all := append([]swSession(nil), snap.Sessions...)
 	snap.Sessions = w.privacy.visible(snap.Sessions)
 	w.mu.Lock()

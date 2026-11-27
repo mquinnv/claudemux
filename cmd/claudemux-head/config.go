@@ -446,8 +446,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("web.replies has %d entries: at most %d fit on the remote's reply row", len(c.Web.Replies), remoteMaxReplies)
 	}
 	for i, r := range c.Web.Replies {
-		if n := len([]rune(strings.TrimSpace(r))); n == 0 || n > remoteReplyMaxRunes {
+		t := strings.TrimSpace(r)
+		if n := len([]rune(t)); n == 0 || n > remoteReplyMaxRunes {
 			return fmt.Errorf("web.replies[%d] is %q: each reply must be 1-%d characters", i, r, remoteReplyMaxRunes)
+		}
+		if hasControlRunes(t) {
+			return fmt.Errorf("web.replies[%d] is %q: a reply must not contain control characters", i, r)
 		}
 	}
 	return nil

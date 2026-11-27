@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -18,7 +20,8 @@ import (
 // a back-off. The screen of a session parked on a question does not change
 // until it is answered, so the episode is the right cache key — it costs
 // nothing to compute, never churns on a spinner or a clock, and a new
-// question is in practice a new episode (since has 1-second resolution).
+// question is in practice a new episode (since has 1-second resolution, so
+// only two waits in the same state starting within one second would collide).
 
 // remoteSuggestion is one reply chip. Exactly one of Text and Key is set:
 // Text is typed as a prompt and submitted; Key is pressed in an open dialog
@@ -64,8 +67,10 @@ const (
 	suggestErrAuth      = "auth"
 	suggestErrRateLimit = "rate limit"
 	suggestErrTimeout   = "timeout"
+	suggestErrNetwork   = "network"
 	suggestErrAPI       = "api error"
 	suggestErrNoScreen  = "no screen"
+	suggestErrNoPane    = "no pane"
 	suggestErrNoReplies = "no usable replies"
 	suggestErrBadResp   = "bad response"
 	suggestErrInternal  = "internal"
@@ -100,12 +105,24 @@ func suggestReason(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return suggestErrTimeout
 	}
+	// Transport failures: the request never got an HTTP answer. A timeout
+	// among them stays "timeout".
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return suggestErrTimeout
+	}
+	var ue *url.Error
+	var oe *net.OpError
+	var de *net.DNSError
+	if errors.As(err, &ue) || errors.As(err, &oe) || errors.As(err, &de) {
+		return suggestErrNetwork
+	}
 	return suggestErrAPI
 }
 
-const suggestSystemPrompt = `You draft one-tap replies that a developer sends from their PHONE to a Claude Code session that is waiting on them. You see the bottom of the session's terminal and its state.
+var suggestSystemPrompt = `You draft one-tap replies that a developer sends from their PHONE to a Claude Code session that is waiting on them. You see the bottom of the session's terminal and its state.
 
-Call the suggest tool with up to 4 replies, the most likely first.
+Call the suggest tool with up to ` + fmt.Sprint(suggestMax) + ` replies, the most likely first.
 
 When the state is a dialog (a question with numbered options, or a permission prompt), every reply is a KEY: the digit of an option exactly as numbered on screen, with a short label naming that option. Prefer the options a careful developer would pick; leave out "Type something" / "Chat about this" style entries.
 
@@ -193,7 +210,8 @@ func (s *Summarizer) SuggestReplies(ctx context.Context, sess swSession, screen 
 		}
 		clean := cleanSuggestions(out.Replies, dialog, fixed)
 		if len(clean) == 0 {
-			return nil, &suggestError{suggestErrNoReplies, "no usable suggestions"}
+			teardownLogf("remote: suggest for %s: model returned %d replies, cleaning dropped all %d", sess.Name, len(out.Replies), len(out.Replies))
+			return nil, &suggestError{suggestErrNoReplies, fmt.Sprintf("no usable suggestions (%d returned, all dropped)", len(out.Replies))}
 		}
 		return clean, nil
 	}
@@ -260,7 +278,9 @@ func cleanSuggestions(in []remoteSuggestion, dialog bool, fixed []string) []remo
 }
 
 // hasControlRunes reports C0 controls other than newline and tab, DEL, and
-// C1 controls — what the remote's send path rejects.
+// C1 controls — what the remote's send path rejects. The single source of
+// truth for that rule: webremote.go's remoteHasControl and config.go's
+// replies validation call it too.
 func hasControlRunes(s string) bool {
 	for _, r := range s {
 		if r == '\n' || r == '\t' {
@@ -282,10 +302,13 @@ func tailRunes(s string, n int) string {
 	return string(r[len(r)-n:])
 }
 
-// remoteSuggestState is what the page gets: Status is off (no key,
-// summaries disabled, or the session isn't waiting), pending, ready or
-// error. Error is the short reason (a suggestErr* value) when Status is
-// error.
+// remoteSuggestState is what the page gets. Status is one of:
+//   - off: no API key, summaries disabled, or the session isn't waiting;
+//   - pending: a call is queued or running for the current episode;
+//   - ready: Items holds the drafted replies;
+//   - error: Error is the short reason, a suggestErr* value. Besides the
+//     call's own failures this includes "no pane" and "no screen", which
+//     handleSession sets when there is nothing to draft from.
 type remoteSuggestState struct {
 	Status suggestStatus      `json:"status"`
 	Items  []remoteSuggestion `json:"items,omitempty"`
@@ -342,22 +365,43 @@ func (c *remoteSuggestions) get(sess swSession) remoteSuggestState {
 	return st
 }
 
-// ensure starts a call for sess's episode unless one is cached, in flight,
-// or failed less than its back-off ago (suggestAuthRetry for an auth
-// failure, which won't fix itself quickly; suggestRetryAfter otherwise).
-// screen is read only when a
-// call actually starts, in the call's goroutine. Never blocks.
+// needsCall reports whether ensure(sess, ...) would start a new call right
+// now. Callers use it to skip capturing a screen nobody will read.
+func (c *remoteSuggestions) needsCall(sess swSession) bool {
+	if !c.enabled() || !isWaiting(sess.State) {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.needsCallLocked(sess, remoteEpisode(sess))
+}
+
+// needsCallLocked is the decision ensure and needsCall share: a waiting
+// session needs a call unless its episode's entry is ready, pending, or
+// failed less than its back-off ago (suggestAuthRetry for an auth failure,
+// which won't fix itself quickly; suggestRetryAfter otherwise). c.mu must
+// be held; the caller has checked enabled and isWaiting.
+func (c *remoteSuggestions) needsCallLocked(sess swSession, ep string) bool {
+	e, ok := c.entries[sess.Name]
+	if !ok || e.episode != ep {
+		return true
+	}
+	return e.status == suggestStatusFailed && c.now().Sub(e.at) >= suggestBackoff(e.reason)
+}
+
+// ensure starts a call for sess's episode when needsCall says one is due.
+// screen is read only when a call actually starts, in the call's goroutine;
+// current callers pass a closure over an already-captured screen. Never
+// blocks.
 func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func() string) {
-	if !c.enabled() {
+	if !c.enabled() || !isWaiting(sess.State) {
 		return
 	}
 	ep := remoteEpisode(sess)
 	c.mu.Lock()
-	if e, ok := c.entries[sess.Name]; ok && e.episode == ep {
-		if e.status != suggestStatusFailed || c.now().Sub(e.at) < suggestBackoff(e.reason) {
-			c.mu.Unlock()
-			return
-		}
+	if !c.needsCallLocked(sess, ep) {
+		c.mu.Unlock()
+		return
 	}
 	c.entries[sess.Name] = &remoteSuggestEntry{episode: ep, status: suggestStatusWait, at: c.now()}
 	c.mu.Unlock()
@@ -370,7 +414,8 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 			}
 		}()
 		// The timeout covers the wait for a slot too, so a goroutine never
-		// queues forever behind stuck calls.
+		// queues forever behind stuck calls: time spent waiting for a slot
+		// comes out of the same suggestTimeout (20s) budget as the call.
 		ctx, cancel := context.WithTimeout(context.Background(), suggestTimeout)
 		defer cancel()
 		select {
