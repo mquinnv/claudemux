@@ -160,8 +160,8 @@ func creditProfile(configDir string) (org, dir string, err error) {
 // directory for an account's config dir, the way Claude Code does. With
 // CLAUDE_SECURESTORAGE_CONFIG_DIR set the old behaviour stands (that value
 // names the store, hashed when non-empty). Otherwise the ~/.claude account
-// (dir "" or canonically ~/.claude) is unhashed, and any other dir is hashed
-// over the exact CLAUDE_CONFIG_DIR string, NFC-normalized. The decision comes
+// (dir "") is unhashed, and any non-empty dir, ~/.claude included, is hashed
+// over the exact CLAUDE_CONFIG_DIR string as passed, NFC-normalized. The decision comes
 // from the dir argument, never the process env: the lobby runs with no
 // CLAUDE_CONFIG_DIR yet polls credits for the default account.
 func credentialService(dir string, env func(string) (string, bool)) (service, fileDir string) {
@@ -173,11 +173,10 @@ func credentialService(dir string, env func(string) (string, bool)) (service, fi
 		}
 		return service + "-" + dirHash(store), store
 	}
-	if dir == "" || (home != "" && canonicalDir(dir) == canonicalDir(filepath.Join(home, ".claude"))) {
-		if dir == "" {
-			dir = filepath.Join(home, ".claude")
-		}
-		return service, dir
+	// Claude Code hashes whenever CLAUDE_CONFIG_DIR is set, even to ~/.claude,
+	// and hashes the literal string; only an empty dir is the unhashed item.
+	if dir == "" {
+		return service, filepath.Join(home, ".claude")
 	}
 	return service + "-" + dirHash(dir), dir
 }
@@ -367,7 +366,7 @@ func creditsCmd(needed bool, configDir string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		out := refreshCreditCache(ctx, cache, time.Now(), func(ctx context.Context) (PrepaidCredits, error) {
-			token, err := creditToken(ctx, dir)
+			token, err := creditToken(ctx, configDir)
 			if err != nil {
 				return PrepaidCredits{}, err
 			}

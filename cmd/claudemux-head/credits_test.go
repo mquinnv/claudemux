@@ -417,8 +417,11 @@ func TestCredentialService(t *testing.T) {
 	if svc, dir := credentialService("", none); svc != "Claude Code-credentials" || dir != def {
 		t.Errorf(`"" = %q, %q`, svc, dir)
 	}
-	if svc, dir := credentialService(def, none); svc != "Claude Code-credentials" || dir != def {
-		t.Errorf("~/.claude = %q, %q", svc, dir)
+	// CLAUDE_CONFIG_DIR set to ~/.claude (or a variant) still hashes the literal string.
+	for _, d := range []string{def, def + "/"} {
+		if svc, dir := credentialService(d, none); svc != hash(d) || dir != d {
+			t.Errorf("%q = %q, %q", d, svc, dir)
+		}
 	}
 	if svc, dir := credentialService("/x/acct", none); svc != hash("/x/acct") || dir != "/x/acct" {
 		t.Errorf("/x/acct = %q, %q", svc, dir)
