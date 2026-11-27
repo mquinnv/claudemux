@@ -360,3 +360,21 @@ func TestRestoreStartsRelinkAfterLastStep(t *testing.T) {
 		t.Errorf("relink cmd=%v restored=%v, want a relink of both", cmd != nil, sm.restore.restored)
 	}
 }
+
+func TestRestoreArgsAccount(t *testing.T) {
+	exists := func(p string) bool { return p != "/gone" }
+	l := lostRec("r", "abc", "/p/remix", "/p/remix", 1, false)
+	l.Rec.Account = "bespoke"
+	args, err := restoreArgs(l, exists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(args, " "), "-d -W -N r -r abc -a bespoke -- /p/remix"; got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+	l.Rec.Account = ""
+	args, _ = restoreArgs(l, exists)
+	if strings.Contains(strings.Join(args, " "), "-a") {
+		t.Errorf("no account must not pass -a: %v", args)
+	}
+}

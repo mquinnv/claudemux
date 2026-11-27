@@ -1,11 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"os"
 )
 
 // accountChoice is the account a session runs on. Source says why:
@@ -64,20 +62,12 @@ func resolveAccount(cfg ClaudeConfig, dir, flag, resumeID string,
 }
 
 // recordedAccount scans session records for sessionID and returns the account
-// key of the first match. The key is read raw so this works whether or not
-// sessionRecord carries an Account field yet.
+// of the first match.
 func recordedAccount(dir, sessionID string) (string, bool) {
 	for _, lr := range readSessionRecords(dir) {
-		if lr.Rec.SessionID != sessionID {
-			continue
+		if lr.Rec.SessionID == sessionID {
+			return lr.Rec.Account, true
 		}
-		var raw struct {
-			Account string `json:"account"`
-		}
-		if data, err := os.ReadFile(lr.Path); err == nil {
-			_ = json.Unmarshal(data, &raw)
-		}
-		return raw.Account, true
 	}
 	return "", false
 }

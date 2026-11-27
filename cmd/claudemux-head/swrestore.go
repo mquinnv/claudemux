@@ -179,6 +179,9 @@ func restoreArgs(l lostSession, dirExists func(string) bool) ([]string, error) {
 	if r.ClaudeCwd != "" && r.ClaudeCwd != r.LaunchDir && dirExists(r.ClaudeCwd) {
 		args = append(args, "-C", r.ClaudeCwd)
 	}
+	if r.Account != "" {
+		args = append(args, "-a", r.Account)
+	}
 	return append(args, "--", r.LaunchDir), nil
 }
 

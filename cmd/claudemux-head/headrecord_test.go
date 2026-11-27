@@ -221,12 +221,12 @@ func TestRecordWrittenMsgNoDeleteWhenNameUnchanged(t *testing.T) {
 }
 
 func TestParseSessionNamePath(t *testing.T) {
-	name, path, parent, ok := parseSessionNamePath("remix-2\t/Users/m/Projects/remix\n")
+	name, path, parent, _, ok := parseSessionNamePath("remix-2\t/Users/m/Projects/remix\n")
 	if !ok || name != "remix-2" || path != "/Users/m/Projects/remix" || parent != "" {
 		t.Errorf("got %q %q %q %v", name, path, parent, ok)
 	}
 	for _, bad := range []string{"", "\t/p", "name-only"} {
-		if _, _, _, ok := parseSessionNamePath(bad); ok {
+		if _, _, _, _, ok := parseSessionNamePath(bad); ok {
 			t.Errorf("parseSessionNamePath(%q) ok, want failure", bad)
 		}
 	}
@@ -275,13 +275,43 @@ func TestRecordDueOnDeferChange(t *testing.T) {
 }
 
 func TestParseSessionNamePathParent(t *testing.T) {
-	name, path, parent, ok := parseSessionNamePath("beejax\t/Users/x/beejax\tiai-admin\n")
+	name, path, parent, _, ok := parseSessionNamePath("beejax\t/Users/x/beejax\tiai-admin\n")
 	if !ok || name != "beejax" || path != "/Users/x/beejax" || parent != "iai-admin" {
 		t.Errorf("got %q %q %q %v", name, path, parent, ok)
 	}
 	// An unset option expands to an empty third field.
-	_, _, parent, ok = parseSessionNamePath("beejax\t/Users/x/beejax\t\n")
+	_, _, parent, _, ok = parseSessionNamePath("beejax\t/Users/x/beejax\t\n")
 	if !ok || parent != "" {
 		t.Errorf("empty parent: got %q %v", parent, ok)
+	}
+}
+
+func TestWriteRecordReadsAccountOption(t *testing.T) {
+	_, _, parent, account, ok := parseSessionNamePath("s\t/p\tpar\tbespoke\n")
+	if !ok || parent != "par" || account != "bespoke" {
+		t.Errorf("got parent=%q account=%q ok=%v", parent, account, ok)
+	}
+	_, _, parent, account, ok = parseSessionNamePath("s\t/p\t\t\n")
+	if !ok || parent != "" || account != "" {
+		t.Errorf("unset options: got parent=%q account=%q ok=%v", parent, account, ok)
+	}
+	_, _, _, account, ok = parseSessionNamePath("s\t/p\tpar\n")
+	if !ok || account != "" {
+		t.Errorf("old output: got account=%q ok=%v", account, ok)
+	}
+}
+
+func TestSessionRecordAccountRoundTrip(t *testing.T) {
+	b, err := json.Marshal(sessionRecord{SessionName: "a", Account: "bespoke"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got sessionRecord
+	if err := json.Unmarshal(b, &got); err != nil || got.Account != "bespoke" {
+		t.Errorf("round trip: %+v %v", got, err)
+	}
+	var old sessionRecord
+	if err := json.Unmarshal([]byte(`{"session_name":"a"}`), &old); err != nil || old.Account != "" {
+		t.Errorf("old json: %+v %v", old, err)
 	}
 }

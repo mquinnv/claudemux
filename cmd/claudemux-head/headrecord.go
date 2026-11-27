@@ -132,19 +132,25 @@ func claudeProjectDirName(absPath string) string {
 	return string(b)
 }
 
-// parseSessionNamePath splits "#{session_name}\t#{session_path}\t#{@claudemux_parent}"
-// output. The parent is optional: empty when the option is unset, and absent
-// from older two-field output.
-func parseSessionNamePath(out string) (name, path, parent string, ok bool) {
+// accountOption is the tmux session option the launcher sets to the claude
+// account the session runs on.
+const accountOption = "@claudemux_account"
+
+// parseSessionNamePath splits
+// "#{session_name}\t#{session_path}\t#{@claudemux_parent}\t#{@claudemux_account}"
+// output. Parent and account are optional: empty when the option is unset, and
+// absent from older output.
+func parseSessionNamePath(out string) (name, path, parent, account string, ok bool) {
 	name, rest, found := strings.Cut(strings.TrimRight(out, "\n"), "\t")
 	if !found || name == "" {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	path, parent, _ = strings.Cut(rest, "\t")
+	path, rest, _ = strings.Cut(rest, "\t")
 	if path == "" {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return name, path, parent, true
+	parent, account, _ = strings.Cut(rest, "\t")
+	return name, path, parent, account, true
 }
 
 // writeRecordCmd resolves this pane's session name and launch dir and writes
@@ -155,15 +161,15 @@ func writeRecordCmd(selfPane, dir string, r sessionRecord) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", selfPane,
-			"#{session_name}\t#{session_path}\t#{"+parentOption+"}").Output()
+			"#{session_name}\t#{session_path}\t#{"+parentOption+"}\t#{"+accountOption+"}").Output()
 		if err != nil {
 			return nil
 		}
-		name, path, parent, ok := parseSessionNamePath(string(out))
+		name, path, parent, account, ok := parseSessionNamePath(string(out))
 		if !ok {
 			return nil
 		}
-		r.SessionName, r.LaunchDir, r.Parent = name, path, parent
+		r.SessionName, r.LaunchDir, r.Parent, r.Account = name, path, parent, account
 		if writeSessionRecord(dir, r) != nil {
 			return nil
 		}

@@ -54,6 +54,9 @@ type sessionRecord struct {
 	// tmux session option, so another thing a reboot erases; restore relinks
 	// it once the whole batch is back (swRelinkCmd).
 	Parent string `json:"parent,omitempty"`
+	// Account is the claude account the session runs on (@claudemux_account).
+	// Restore and resume pass it back with -a so the session keeps its config dir.
+	Account string `json:"account,omitempty"`
 }
 
 // loadedRecord pairs a record with the file it came from, so the lobby can
