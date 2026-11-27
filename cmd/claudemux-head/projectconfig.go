@@ -3,7 +3,30 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// projectField returns the trimmed, unquoted value of the first top-level
+// `key: value` line in dir's project config, "" when absent. It is the Go twin
+// of project_field in bin/claudemux (same semantics), which is how op_account
+// and claude_account are read.
+func projectField(dir, key string) string {
+	data, err := os.ReadFile(projectConfigPath(dir))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(t, key+":") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(t, key+":"))
+		v = strings.TrimPrefix(strings.TrimPrefix(v, `"`), "'")
+		v = strings.TrimSuffix(strings.TrimSuffix(v, `"`), "'")
+		return v
+	}
+	return ""
+}
 
 // The per-project config file claudemux reads from a project's root.
 //

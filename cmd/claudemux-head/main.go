@@ -63,6 +63,10 @@ func main() {
 	// configured launch.project_dirs: `--exact` before zoxide, the full
 	// exact/prefix/substring search after zoxide misses. Dispatched here for the same reason
 	// `config` is — the launcher calls it as a bare first argument.
+	if len(os.Args) > 1 && os.Args[1] == "account" {
+		os.Exit(runAccount(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "project" {
 		if len(os.Args) > 2 && os.Args[2] == "find" {
 			os.Exit(runProjectFind(os.Args[3:], os.Stdout, os.Stderr))
