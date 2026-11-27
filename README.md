@@ -381,9 +381,10 @@ no authentication: reachability is the tailnet's job, which is why the
 off the tailnet can reach it. `web.listen: ":7474"` would bind every interface,
 including whatever Wi-Fi the laptop is on; don't. The page is plain HTTP over
 the tailnet's WireGuard tunnel, and never acts on a session — nothing on it can
-defer, jump, or type. (The phone remote below can defer, type, and press keys
-(including Esc, which interrupts a turn), though not jump, which is why it is off by default and needs a token on top of the
-tailnet.)
+defer, jump, or type. The phone remote below is different: it can defer, type
+and press keys, including Esc, which interrupts a turn. It cannot jump. Because
+it acts on sessions, it is off by default and needs a token on top of the
+tailnet.
 
 The lobby also refuses requests from outside the tailnet's address ranges and
 from Host names it doesn't recognize, whatever address it's actually bound to
@@ -415,15 +416,15 @@ For each waiting session it shows:
 
 - **Suggested replies** (from the summary model, Haiku by default). These come
   from the bottom of the session's screen, with the same key as the summaries. On a question or a
-  permission prompt, they're the options to pick, by number. At an empty
-  prompt, they're the next things you'd likely type. Tap one to send it.
+  permission prompt, they're the options to pick, by number. When the session
+  is waiting at its prompt, they're the next things you'd likely type. Tap one to send it.
   You get about two seconds to undo it, since a mis-tap on a phone is easy.
   Tap ✎ on a typed suggestion to load it into the keyboard and edit it first. There's at most one
   successful call per waiting spell (a failed call retries after a back-off),
   and the next session in the queue is drafted while you read this one.
 - **Quick replies**, the canned answers in `web.replies` (default
-  `yes, go ahead`, `continue`, `commit and push`), shown at an empty prompt
-  (not on an open question or a busy session). Long-press one to edit it
+  `yes, go ahead`, `continue`, `commit and push`), shown when the session is
+  waiting at its prompt (not on an open question or a busy session). Long-press one to edit it
   before sending.
 - **Answer keys** when a question is open: `1`–`4`, Up/Down, Enter and Esc.
   The number keys get the same undo window; Up/Down, Enter and Esc go
@@ -447,8 +448,9 @@ For each waiting session it shows:
 Every reply carries the waiting spell it was meant for. If the session has
 moved on by the time the request arrives (someone answered it at the desk,
 say), the send is refused rather than landing on the next question, and a
-question already answered from the remote won't take a second answer. Esc /
-Interrupt and Defer don't carry a spell: they act on whatever the session is
+second typed reply to the same question is refused (keys can still step through
+a multi-question dialog). The **Esc** / **Interrupt** button and Defer don't
+carry a spell (the Answer row's Esc does): they act on whatever the session is
 doing now. Tap
 **☰** to open any session, including busy ones, and type to it. A busy
 session's state changes often, so if it changes before your send lands, the
@@ -467,7 +469,7 @@ web:
 
 ```sh
 # in the lobby's environment, or in summary.api_key_file next to the API key
-CLAUDEMUX_REMOTE_TOKEN=<16+ characters, e.g. from openssl rand -hex 16>
+CLAUDEMUX_REMOTE_TOKEN=<16+ bytes, e.g. from openssl rand -hex 16>
 ```
 
 Open `http://<node>:7474/remote#token=<token>` on the phone once. The token is

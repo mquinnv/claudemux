@@ -266,7 +266,9 @@ func TestSuggestReason(t *testing.T) {
 		{"net timeout", &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{}}, suggestErrTimeout},
 		{"suggestError passthrough", &suggestError{suggestErrNoReplies, "x"}, suggestErrNoReplies},
 		{"wrapped suggestError", fmt.Errorf("x: %w", &suggestError{suggestErrBadResp, "y"}), suggestErrBadResp},
-		{"anything else", errors.New("boom"), suggestErrAPI},
+		{"canceled", context.Canceled, suggestErrInternal},
+		{"wrapped canceled", fmt.Errorf("x: %w", context.Canceled), suggestErrInternal},
+		{"anything else", errors.New("boom"), suggestErrInternal},
 	} {
 		if got := suggestReason(tc.err); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.what, got, tc.want)
@@ -283,7 +285,7 @@ func TestRemoteSuggestionsAuthBackoff(t *testing.T) {
 	c := newRemoteSuggestions(gen)
 	c.now = clock.now
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusError })
 	if st := c.get(s); st.Error != suggestErrAuth {
 		t.Fatalf("reason = %q, want %q", st.Error, suggestErrAuth)
 	}
@@ -292,7 +294,7 @@ func TestRemoteSuggestionsAuthBackoff(t *testing.T) {
 		t.Error("needsCall past the ordinary back-off for an auth failure")
 	}
 	c.ensure(s, nil, func() string { return "screen" })
-	if st := c.get(s).Status; st != suggestStatusFailed || gen.count() != 1 {
+	if st := c.get(s).Status; st != suggestStatusError || gen.count() != 1 {
 		t.Fatalf("retried an auth failure after %v: status %q, calls %d", suggestRetryAfter+time.Second, st, gen.count())
 	}
 	clock.advance(suggestAuthRetry - suggestRetryAfter)
@@ -300,7 +302,7 @@ func TestRemoteSuggestionsAuthBackoff(t *testing.T) {
 		t.Error("needsCall false past suggestAuthRetry")
 	}
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the retry", func() bool { return gen.count() == 2 && c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the retry", func() bool { return gen.count() == 2 && c.get(s).Status == suggestStatusError })
 }
 
 func TestRemoteSuggestionsNeedsCall(t *testing.T) {
@@ -335,6 +337,43 @@ func TestRemoteSuggestionsNeedsCall(t *testing.T) {
 	}
 }
 
+// At most suggestMaxInFlight calls run at once: a third session's entry is
+// pending with no call started until one of the running two finishes.
+func TestRemoteSuggestionsInFlightCap(t *testing.T) {
+	if suggestMaxInFlight != 2 {
+		t.Fatalf("suggestMaxInFlight = %d; this test is written for 2", suggestMaxInFlight)
+	}
+	gen := &gatedSuggester{gates: map[time.Time]chan struct{}{}}
+	c := newRemoteSuggestions(gen)
+	var sess []swSession
+	for i, name := range []string{"a", "b", "c"} {
+		s := swSession{Name: name, State: "Idle", Since: rt0.Add(time.Duration(i) * time.Minute), ClaudePane: "%1", Context: -1}
+		sess = append(sess, s)
+	}
+	c.ensure(sess[0], nil, func() string { return "screen" })
+	c.ensure(sess[1], nil, func() string { return "screen" })
+	waitFor(t, "two calls in flight", func() bool { return gen.begun() == 2 })
+	c.ensure(sess[2], nil, func() string { return "screen" })
+	if st := c.get(sess[2]).Status; st != suggestStatusPending {
+		t.Fatalf("third session status = %q, want pending", st)
+	}
+	// The third goroutine is parked on the semaphore, not in the suggester.
+	time.Sleep(20 * time.Millisecond)
+	if n := gen.begun(); n != 2 {
+		t.Fatalf("calls started = %d with the cap full, want 2", n)
+	}
+	close(gen.gate(sess[0].Since))
+	waitFor(t, "the first draft", func() bool { return c.get(sess[0]).Status == suggestStatusReady })
+	waitFor(t, "the third call to start", func() bool { return gen.begun() == 3 })
+	close(gen.gate(sess[2].Since))
+	waitFor(t, "the third draft", func() bool { return c.get(sess[2]).Status == suggestStatusReady })
+	if st := c.get(sess[1]).Status; st != suggestStatusPending {
+		t.Errorf("second session status = %q, want still pending", st)
+	}
+	close(gen.gate(sess[1].Since))
+	waitFor(t, "the second draft", func() bool { return c.get(sess[1]).Status == suggestStatusReady })
+}
+
 type panicSuggester struct{}
 
 func (panicSuggester) SuggestReplies(context.Context, swSession, string, []string) ([]remoteSuggestion, error) {
@@ -345,7 +384,7 @@ func TestRemoteSuggestionsPanicIsAnError(t *testing.T) {
 	c := newRemoteSuggestions(panicSuggester{})
 	s := idleSession()
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the panicked call", func() bool { return c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the panicked call", func() bool { return c.get(s).Status == suggestStatusError })
 	if st := c.get(s); st.Error != suggestErrInternal {
 		t.Fatalf("reason = %q, want %q", st.Error, suggestErrInternal)
 	}
@@ -471,7 +510,7 @@ func TestRemoteSuggestionsNoRepliesBackoff(t *testing.T) {
 	c := newRemoteSuggestions(gen)
 	c.now = clock.now
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusError })
 	if st := c.get(s); st.Error != suggestErrNoReplies {
 		t.Fatalf("reason = %q, want %q", st.Error, suggestErrNoReplies)
 	}
@@ -480,7 +519,7 @@ func TestRemoteSuggestionsNoRepliesBackoff(t *testing.T) {
 		t.Error("needsCall past the ordinary back-off for no usable replies")
 	}
 	c.ensure(s, nil, func() string { return "screen" })
-	if st := c.get(s).Status; st != suggestStatusFailed || gen.count() != 1 {
+	if st := c.get(s).Status; st != suggestStatusError || gen.count() != 1 {
 		t.Fatalf("retried after %v: status %q, calls %d", suggestRetryAfter+time.Second, st, gen.count())
 	}
 	clock.advance(suggestNoRepliesRetry - suggestRetryAfter)
@@ -488,5 +527,5 @@ func TestRemoteSuggestionsNoRepliesBackoff(t *testing.T) {
 		t.Error("needsCall false past suggestNoRepliesRetry")
 	}
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the retry", func() bool { return gen.count() == 2 && c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the retry", func() bool { return gen.count() == 2 && c.get(s).Status == suggestStatusError })
 }

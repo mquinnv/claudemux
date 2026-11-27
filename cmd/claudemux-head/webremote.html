@@ -352,23 +352,39 @@ const S = {
 class ApiError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
 }
+const API_TIMEOUT_MS = 10000;
 async function api(path, body) {
-  const opts = { headers: { 'Authorization': 'Bearer ' + token } };
-  if (body !== undefined) {
+  const isPost = body !== undefined;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), API_TIMEOUT_MS);
+  const opts = { headers: { 'Authorization': 'Bearer ' + token }, signal: ctl.signal };
+  if (isPost) {
     opts.method = 'POST';
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  let res;
-  try { res = await fetch(path, opts); }
-  catch (e) { console.error('fetch ' + path + ' failed:', e); throw new ApiError(0, 'offline', 'lobby not reachable'); }
-  let data = null;
-  try { data = await res.json(); }
-  catch (e) {
-    if (res.ok) { console.error('bad JSON from ' + path + ':', e); throw new ApiError(res.status, 'badjson', 'lobby sent an unexpected response'); }
+  // A POST that timed out or lost the network may still have landed: it
+  // is "unconfirmed", not "offline", so nobody retries it blind.
+  const lost = () => {
+    if (!isPost) return new ApiError(0, 'offline', ctl.signal.aborted ? 'lobby didn’t answer in time' : 'lobby not reachable');
+    const who = (body && body.name) || 'the session';
+    return new ApiError(0, 'unconfirmed', 'Couldn’t confirm that reached ' + who + '; check its screen before retrying');
+  };
+  try {
+    let res;
+    try { res = await fetch(path, opts); }
+    catch (e) { console.error('fetch ' + path + ' failed:', e); throw lost(); }
+    let data = null;
+    try { data = await res.json(); }
+    catch (e) {
+      if (ctl.signal.aborted) { console.error('reading ' + path + ' timed out:', e); throw lost(); }
+      if (res.ok) { console.error('bad JSON from ' + path + ':', e); throw new ApiError(res.status, 'badjson', 'lobby sent an unexpected response'); }
+    }
+    if (!res.ok) throw new ApiError(res.status, (data && data.code) || 'http', (data && data.message) || ('HTTP ' + res.status));
+    return data;
+  } finally {
+    clearTimeout(timer);
   }
-  if (!res.ok) throw new ApiError(res.status, (data && data.code) || 'http', (data && data.message) || ('HTTP ' + res.status));
-  return data;
 }
 
 // ---------- conduction ----------
@@ -378,6 +394,8 @@ const isHeld = s => (S.skipped.get(s.name) === s.episode) || (S.answered.get(s.n
 // The phone's conductor, a sibling of the lobby's: stay on the session
 // being answered while it still waits; once it is answered, skipped or
 // stops waiting, move to the next one in the lobby's own queue order.
+// A pinned session (opened from the list) stays on screen even once
+// answered: you chose that one.
 // A draft in the composer holds the current session — it never yanks the
 // screen out from under your thumbs.
 function pickCurrent() {
@@ -425,14 +443,9 @@ async function pollQueue() {
   clearTimeout(queueTimer);
   if (!token) return;
   const seq = ++queueSeq;
+  let q;
   try {
-    const q = await api('/api/remote/queue');
-    S.sessions = q.sessions; S.queue = q.queue; S.replies = q.replies || []; S.suggestOn = !!q.suggest;
-    S.online = true; S.setupError = ''; S.apiError = '';
-    forgetStale();
-    const next = pickCurrent();
-    if (next !== S.current) { S.current = next; S.detail = null; S.detailError = ''; S.screenTall = false; pollDetail(); }
-    render();
+    q = await api('/api/remote/queue');
   } catch (e) {
     try { handleApiFailure(e); } catch (e2) { pageError(e2); }
   } finally {
@@ -442,6 +455,17 @@ async function pollQueue() {
       queueTimer = setTimeout(pollQueue, document.hidden ? 15000 : 2000);
     }
   }
+  if (!q) return;
+  // Applying and rendering sit outside the fetch's try: a bug here is a
+  // page error, not a failed refresh.
+  try {
+    S.sessions = q.sessions; S.queue = q.queue; S.replies = q.replies || []; S.suggestOn = !!q.suggest;
+    S.online = true; S.setupError = ''; S.apiError = '';
+    forgetStale();
+    const next = pickCurrent();
+    if (next !== S.current) { S.current = next; S.detail = null; S.detailError = ''; S.screenTall = false; pollDetail(); }
+    render();
+  } catch (e) { pageError(e); }
 }
 
 async function pollDetail() {
@@ -454,7 +478,6 @@ async function pollDetail() {
     const d = await api('/api/remote/session?name=' + encodeURIComponent(name));
     if (seq !== detailSeq || name !== S.current) return;
     S.detail = d; S.detailError = ''; S.detailAt = Date.now();
-    renderDetail();
   } catch (e) {
     if (seq !== detailSeq || name !== S.current) return;
     if (e.code === 'gone') { rearm = false; S.current = null; pollQueue(); return; }
@@ -463,6 +486,7 @@ async function pollDetail() {
       if (isGlobalFailure(e)) handleApiFailure(e);
       else { console.error('session poll failed:', e); renderDetail(); }
     } catch (e2) { pageError(e2); }
+    return;
   } finally {
     // A stale poll (superseded, or for a session no longer on screen)
     // leaves re-arming to the newer one.
@@ -473,6 +497,9 @@ async function pollDetail() {
       detailTimer = setTimeout(pollDetail, document.hidden ? 15000 : (pending ? 1000 : 2000));
     }
   }
+  // Rendering sits outside the fetch's try: a render bug is a page error,
+  // not a failed refresh.
+  try { renderDetail(); } catch (e) { pageError(e); }
 }
 
 const OFF_MSG = 'Remote control is off or this device isn’t allowed';
@@ -539,7 +566,7 @@ async function doSend(name, episode, text, opts = {}) {
       // plain prompt it would interrupt the session.
       await offerReplaceAfterDismiss(name, text, opts);
     } else if (e.code === 'draft') {
-      confirmSheet('The prompt in ' + name + ' isn’t empty', 'There’s a draft in its input box, or a screen the remote doesn’t recognise. Replace the draft with your message?',
+      confirmSheet('The prompt in ' + name + ' isn’t empty', 'There’s a draft in its input box. Replace it with your message?',
         'Replace and send', () => doSend(name, episode, text, { ...opts, replace: true, escape: false }));
     } else if (e.code === 'dialog' && opts.noEscape) {
       toast('A question opened again in ' + name + '; not dismissing it a second time.', { err: true, duration: 6000 });
@@ -560,6 +587,9 @@ async function doSend(name, episode, text, opts = {}) {
       // The session was changed before the failure: show how, and refresh
       // so the screen matches what actually landed.
       toast(e.message, { err: true, duration: 8000 }); pollQueue(); pollDetail();
+    } else if (e.code === 'unconfirmed') {
+      // It may have landed: refresh now so the screen shows whether it did.
+      toast(e.message, { err: true, duration: 8000 }); pollDetail();
     } else {
       toast(e.message, { err: true });
     }
@@ -583,21 +613,27 @@ async function offerReplaceAfterDismiss(name, text, opts) {
     'Replace and send', () => doSend(name, ep, text, { ...opts, replace: true, escape: false, noEscape: true }));
 }
 
+// A key press never marks the episode answered: a multi-question
+// AskUserQuestion keeps one episode across its questions, so holding it
+// would hide the next question. Conduction moves on by itself once the
+// session stops waiting; `advance` just re-reads the queue right away.
 async function doKey(name, episode, key, advance, okMsg) {
   try {
     await api('/api/remote/key', { name, episode, key });
-    if (advance) afterAnswer(name, episode);
     if (okMsg) toast(okMsg, { duration: 1400 });
+    if (advance) pollQueue();
     pollDetail();
   } catch (e) {
+    if (e.code === 'unconfirmed') { toast(e.message, { err: true, duration: 8000 }); pollDetail(); return; }
     toast(e.message, { err: true });
     if (e.code === 'moved') pollQueue();
   }
 }
 
+// A typed send or a text chip answers the episode: hold it so conduction
+// moves on even before the session's state catches up.
 function afterAnswer(name, episode) {
   S.answered.set(name, episode);
-  if (S.pinned === name) { /* stay pinned: you chose this one */ }
   pollQueue();
 }
 
@@ -636,7 +672,7 @@ function renderSetup(isSetupErr) {
     box.append(el('p', null, 'The lobby isn’t ready for remote control yet:'));
     box.append(el('p', 'mono', S.setupError));
     box.append(el('p', null, 'Full details go to the file named by CLAUDEMUX_TEARDOWN_LOG, if you set it before starting the lobby.'));
-    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ bytes, e.g. `openssl rand -hex 16`) in the lobby’s environment or in its api_key_file, then restart the lobby.'));
+    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ bytes, e.g. `openssl rand -hex 16`) in the lobby’s environment or in its summary.api_key_file, then restart the lobby.'));
     m.append(box); return;
   }
   box.append(el('p', null, 'Paste the CLAUDEMUX_REMOTE_TOKEN you set for the lobby. It is kept on this phone only.'));
@@ -757,6 +793,10 @@ function renderDetail() {
       box.append(el('div', 'shimmer'), el('div', 'shimmer'));
     } else if (sg.status === 'error' && sg.error === 'no pane') {
       box.append(el('div', 'note', 'This session has no claude pane to read.'));
+    } else if (sg.status === 'error' && sg.error === 'auth') {
+      box.append(el('div', 'note bad', 'Suggestions failed: the API key was refused (check ANTHROPIC_API_KEY / summary.api_key_file).'));
+    } else if (sg.status === 'error' && sg.error === 'rate limit') {
+      box.append(el('div', 'note bad', 'Suggestions are rate-limited; retrying in a while.'));
     } else if (sg.status === 'error' && sg.error === 'network') {
       box.append(el('div', 'note bad', 'Suggestions failed (can’t reach the API) — retrying shortly.'));
     } else if (sg.status === 'error' && sg.error !== 'no usable replies') {

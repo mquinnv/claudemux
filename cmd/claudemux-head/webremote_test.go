@@ -32,6 +32,8 @@ type fakeRemoteTmux struct {
 	failType bool
 	// failKeys names the keys whose press fails ("*" = every key).
 	failKeys map[string]bool
+	// failRun makes run (the defer toggle) fail.
+	failRun bool
 	// typing, when set, receives once per typeText call, and the call then
 	// blocks until release is closed: a write held mid-flight.
 	typing  chan string
@@ -112,6 +114,9 @@ func (f *fakeRemoteTmux) keys(pane string, keys ...string) error {
 func (f *fakeRemoteTmux) run(args []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failRun {
+		return errors.New("tmux down")
+	}
 	f.calls = append(f.calls, "run "+strings.Join(args, " "))
 	return nil
 }
@@ -162,9 +167,10 @@ func (f *fakeSuggester) count() int {
 // gatedSuggester holds each call until its episode's gate is closed, then
 // answers with an item naming that episode's Since.
 type gatedSuggester struct {
-	mu    sync.Mutex
-	gates map[time.Time]chan struct{}
-	done  int
+	mu      sync.Mutex
+	gates   map[time.Time]chan struct{}
+	started int
+	done    int
 }
 
 func (g *gatedSuggester) gate(since time.Time) chan struct{} {
@@ -177,12 +183,22 @@ func (g *gatedSuggester) gate(since time.Time) chan struct{} {
 }
 
 func (g *gatedSuggester) SuggestReplies(_ context.Context, sess swSession, _ string, _ []string) ([]remoteSuggestion, error) {
+	g.mu.Lock()
+	g.started++
+	g.mu.Unlock()
 	<-g.gate(sess.Since)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.done++
 	tag := sess.Since.UTC().Format(time.RFC3339)
 	return []remoteSuggestion{{Label: tag, Text: "reply for " + tag}}, nil
+}
+
+// begun is how many calls have reached the suggester (held or not).
+func (g *gatedSuggester) begun() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.started
 }
 
 func (g *gatedSuggester) finished() int {
@@ -421,6 +437,13 @@ func TestRemoteSetupErrorIsReported(t *testing.T) {
 		rec := remoteDoRaw(t, h, rt.method, rt.path, "Bearer "+testRemoteToken, routeBody(t, rt))
 		if rec.Code != http.StatusServiceUnavailable || remoteCode(t, rec) != "setup" {
 			t.Errorf("%s %s: got %d %s, want 503 setup", rt.method, rt.path, rec.Code, rec.Body)
+		}
+		// A plain error has no public reason: the fallback says where the
+		// details went.
+		var e remoteErrorBody
+		_ = json.Unmarshal(rec.Body.Bytes(), &e)
+		if e.Message != remoteSetupFallback || !strings.Contains(e.Message, "CLAUDEMUX_TEARDOWN_LOG") {
+			t.Errorf("%s %s: message %q, want the fallback naming CLAUDEMUX_TEARDOWN_LOG", rt.method, rt.path, e.Message)
 		}
 	}
 	if got := ft.log(); len(got) != 0 {
@@ -674,10 +697,11 @@ func TestRemoteSendTmuxFailures(t *testing.T) {
 			code:   "tmux", calls: nil,
 		},
 		{
+			// typeText may have written some of the text before it failed.
 			what: "type fails on an empty prompt", state: "Idle", screen: idleScreen(""),
 			req:    remoteSendReq{Text: "go"},
 			break_: func(f *fakeRemoteTmux) { f.failType = true },
-			code:   "tmux", calls: nil,
+			code:   "partial", calls: nil,
 		},
 		{
 			what: "type fails after the draft was cleared", state: "Idle", screen: idleScreen("draft"),
@@ -702,6 +726,12 @@ func TestRemoteSendTmuxFailures(t *testing.T) {
 			req:    remoteSendReq{Text: "go", Escape: true},
 			break_: func(f *fakeRemoteTmux) { f.failKeys = map[string]bool{"Escape": true} },
 			code:   "tmux", calls: nil,
+		},
+		{
+			what: "type fails after the dialog was dismissed", state: "Asking", screen: dialogScreen(),
+			req:    remoteSendReq{Text: "go", Escape: true},
+			break_: func(f *fakeRemoteTmux) { f.failType = true },
+			code:   "partial", calls: []string{"keys %1 Escape"},
 		},
 		{
 			what: "capture fails after the dialog was dismissed", state: "Asking", screen: dialogScreen(),
@@ -984,7 +1014,7 @@ func TestRemoteSessionEdges(t *testing.T) {
 		if v.ScreenError == "" || v.Screen != "" {
 			t.Errorf("screen_error = %q, screen = %q", v.ScreenError, v.Screen)
 		}
-		if v.Suggestions.Status != suggestStatusFailed || v.Suggestions.Error != suggestErrNoScreen {
+		if v.Suggestions.Status != suggestStatusError || v.Suggestions.Error != suggestErrNoScreen {
 			t.Errorf("suggestions = %+v, want error %q", v.Suggestions, suggestErrNoScreen)
 		}
 		if n := suggestEntryCount(r.suggest); n != 0 {
@@ -995,7 +1025,7 @@ func TestRemoteSessionEdges(t *testing.T) {
 		bare := swSession{Name: "a", State: "Idle", Since: rt0, Context: -1}
 		r, _, h := newTestRemote(t, testFleet(bare), gen)
 		v := decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
-		if v.Suggestions.Status != suggestStatusFailed || v.Suggestions.Error != suggestErrNoPane {
+		if v.Suggestions.Status != suggestStatusError || v.Suggestions.Error != suggestErrNoPane {
 			t.Errorf("suggestions = %+v, want error %q", v.Suggestions, suggestErrNoPane)
 		}
 		if n := suggestEntryCount(r.suggest); n != 0 {
@@ -1021,7 +1051,7 @@ func TestRemoteSuggestionsNewEpisodeRedrafts(t *testing.T) {
 	c.ensure(s, nil, func() string { return "screen" })
 	waitFor(t, "first draft", func() bool { return c.get(s).Status == suggestStatusReady })
 	s.Since = s.Since.Add(time.Minute)
-	if st := c.get(s).Status; st != suggestStatusWait {
+	if st := c.get(s).Status; st != suggestStatusPending {
 		t.Fatalf("new episode status = %q, want pending", st)
 	}
 	c.ensure(s, nil, func() string { return "screen" })
@@ -1047,7 +1077,7 @@ func TestRemoteSuggestionsDiscardStaleResult(t *testing.T) {
 	waitFor(t, "both calls in flight", func() bool { return len(c.sem) == 2 })
 	close(gen.gate(ep1.Since))
 	waitFor(t, "the stale call to finish", func() bool { return gen.finished() == 1 && len(c.sem) == 1 })
-	if st := c.get(ep2); st.Status != suggestStatusWait || len(st.Items) != 0 {
+	if st := c.get(ep2); st.Status != suggestStatusPending || len(st.Items) != 0 {
 		t.Fatalf("after the stale result: %+v, want pending with no items", st)
 	}
 	close(gen.gate(ep2.Since))
@@ -1067,7 +1097,7 @@ func TestRemoteSuggestionsRetryBackoff(t *testing.T) {
 	c := newRemoteSuggestions(failing)
 	c.now = clock.now
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusError })
 	if failing.count() != 1 {
 		t.Fatalf("calls = %d, want 1", failing.count())
 	}
@@ -1078,13 +1108,13 @@ func TestRemoteSuggestionsRetryBackoff(t *testing.T) {
 	// to pending synchronously).
 	clock.advance(suggestRetryAfter - time.Second)
 	c.ensure(s, nil, func() string { return "screen" })
-	if st := c.get(s).Status; st != suggestStatusFailed || failing.count() != 1 {
+	if st := c.get(s).Status; st != suggestStatusError || failing.count() != 1 {
 		t.Fatalf("retried inside the back-off: status %q, calls %d", st, failing.count())
 	}
 	// Past it, the next poll retries.
 	clock.advance(2 * time.Second)
 	c.ensure(s, nil, func() string { return "screen" })
-	waitFor(t, "the retry", func() bool { return failing.count() == 2 && c.get(s).Status == suggestStatusFailed })
+	waitFor(t, "the retry", func() bool { return failing.count() == 2 && c.get(s).Status == suggestStatusError })
 
 	// A ready answer is kept for the whole episode, however long it lasts.
 	ok := &fakeSuggester{out: []remoteSuggestion{{Label: "x", Text: "x"}}}
@@ -1307,6 +1337,7 @@ func TestRemoteWritesDroppedWhenClientGone(t *testing.T) {
 		{"POST", "/api/remote/send", remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "second"}},
 		{"POST", "/api/remote/key", remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"}},
 		{"POST", "/api/remote/key", remoteKeyReq{Name: "a", Key: "Escape"}},
+		{"POST", "/api/remote/defer", remoteDeferReq{Name: "a", On: true}},
 	}
 	recs := make([]*httptest.ResponseRecorder, len(routes))
 	var wg sync.WaitGroup
@@ -1325,6 +1356,7 @@ func TestRemoteWritesDroppedWhenClientGone(t *testing.T) {
 	}
 	waitWriteMuWaiters(t, "handleSend", 1)
 	waitWriteMuWaiters(t, "handleKey", 2)
+	waitWriteMuWaiters(t, "handleDefer", 1)
 	if got := ft.log(); !reflect.DeepEqual(got, []string{"type %1 first"}) {
 		t.Fatalf("queued requests wrote before the lock was free: %q", got)
 	}
@@ -1394,7 +1426,7 @@ func TestRemotePrefetchSkipsWhenNoCallIsDue(t *testing.T) {
 	r.suggest.now = clock.now
 	ft.screens["%2"] = idleScreen("")
 	r.prefetch(next)
-	waitFor(t, "the failed prefetch", func() bool { return r.suggest.get(next).Status == suggestStatusFailed })
+	waitFor(t, "the failed prefetch", func() bool { return r.suggest.get(next).Status == suggestStatusError })
 	clock.advance(suggestRetryAfter - time.Second)
 	r.prefetch(next)
 	if got := ft.captured(); len(got) != 1 || failing.count() != 1 {
@@ -1726,9 +1758,10 @@ func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
 	}
 }
 
-// One answer per episode: a second send, or a second option key, for the
-// same name+episode is refused as "moved" even before the session publishes
-// its new state. Moving around a dialog (and Escape) is not an answer.
+// One send per episode: a second send for the same name+episode is refused
+// as "moved" even before the session publishes its new state. Keys are not
+// covered (a multi-question dialog keeps one episode across its questions):
+// they rely on the episode check alone.
 func TestRemoteAnsweredEpisodeIsNotAnsweredTwice(t *testing.T) {
 	t.Run("send", func(t *testing.T) {
 		s := idleSession()
@@ -1759,55 +1792,207 @@ func TestRemoteAnsweredEpisodeIsNotAnsweredTwice(t *testing.T) {
 			t.Fatalf("calls = %q, want two full sends", got)
 		}
 	})
-	t.Run("keys", func(t *testing.T) {
+	t.Run("keys are never refused as answered", func(t *testing.T) {
 		s := idleSession()
 		s.State = "Awaiting"
 		_, ft, h := newTestRemote(t, testFleet(s), nil)
 		ft.screens["%1"] = dialogScreen()
-		key := func(k string) *httptest.ResponseRecorder {
-			return remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+		keys := []string{"Down", "Up", "Tab", "BTab", "Space", "1", "1", "2", "Enter", "Enter", "Escape"}
+		var want []string
+		for _, k := range keys {
+			rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
 				remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: k})
-		}
-		for _, k := range []string{"Down", "Down", "Up", "Tab", "BTab", "Space"} {
-			if rec := key(k); rec.Code != http.StatusOK {
-				t.Fatalf("%s: got %d %s, want 200 (moving is not answering)", k, rec.Code, rec.Body)
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s: got %d %s, want 200", k, rec.Code, rec.Body)
 			}
+			want = append(want, "keys %1 "+k)
 		}
-		if rec := key("1"); rec.Code != http.StatusOK {
-			t.Fatalf("first 1: %d %s", rec.Code, rec.Body)
-		}
-		for _, k := range []string{"1", "2", "Enter"} {
-			if rec := key(k); rec.Code != http.StatusConflict || remoteCode(t, rec) != "moved" {
-				t.Errorf("%s after an answer: got %d %s, want 409 moved", k, rec.Code, rec.Body)
-			}
-		}
-		for _, k := range []string{"Down", "Escape"} {
-			if rec := key(k); rec.Code != http.StatusOK {
-				t.Errorf("%s after an answer: got %d %s, want 200 (exempt)", k, rec.Code, rec.Body)
-			}
-		}
-		want := []string{"keys %1 Down", "keys %1 Down", "keys %1 Up", "keys %1 Tab", "keys %1 BTab", "keys %1 Space",
-			"keys %1 1", "keys %1 Down", "keys %1 Escape"}
 		if got := ft.log(); !reflect.DeepEqual(got, want) {
 			t.Fatalf("calls = %q, want %q", got, want)
 		}
 	})
-	t.Run("Enter answers too", func(t *testing.T) {
+	t.Run("a key does not block a send", func(t *testing.T) {
+		s := idleSession()
+		_, ft, h := newTestRemote(t, testFleet(s), nil)
+		ft.screens["%1"] = idleScreen("")
+		if rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+			remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"}); rec.Code != http.StatusOK {
+			t.Fatalf("key: %d %s", rec.Code, rec.Body)
+		}
+		if rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "go"}); rec.Code != http.StatusOK {
+			t.Fatalf("send after a key in the same episode: %d %s, want 200", rec.Code, rec.Body)
+		}
+	})
+}
+
+// A two-question AskUserQuestion dialog is ONE episode (one state, one
+// Since) across both questions: answering the first with a digit must not
+// lock out the second digit or the final Enter that submits.
+func TestRemoteMultiQuestionDialogKeys(t *testing.T) {
+	s := idleSession()
+	s.State = "Tool:AskUserQuestion"
+	_, ft, h := newTestRemote(t, testFleet(s), nil)
+	ft.screens["%1"] = dialogScreen()
+	for _, k := range []string{"1", "2", "Enter"} {
+		rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+			remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: k})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d %s, want 200 (same episode, next question)", k, rec.Code, rec.Body)
+		}
+	}
+	want := []string{"keys %1 1", "keys %1 2", "keys %1 Enter"}
+	if got := ft.log(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+// A write that failed is not an answer: the phone can retry it in the same
+// episode once tmux is back.
+func TestRemoteRetryAfterFailure(t *testing.T) {
+	t.Run("key", func(t *testing.T) {
 		s := idleSession()
 		s.State = "Awaiting"
 		_, ft, h := newTestRemote(t, testFleet(s), nil)
 		ft.screens["%1"] = dialogScreen()
-		for i, want := range []int{http.StatusOK, http.StatusConflict} {
-			rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
-				remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "Enter"})
-			if rec.Code != want {
-				t.Errorf("Enter #%d: got %d %s, want %d", i+1, rec.Code, rec.Body, want)
-			}
+		press := func() *httptest.ResponseRecorder {
+			return remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+				remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"})
 		}
-		if got := ft.log(); !reflect.DeepEqual(got, []string{"keys %1 Enter"}) {
-			t.Fatalf("calls = %q", got)
+		ft.set(func(f *fakeRemoteTmux) { f.failKeys = map[string]bool{"*": true} })
+		if rec := press(); rec.Code != http.StatusBadGateway || remoteCode(t, rec) != "tmux" {
+			t.Fatalf("failing press: got %d %s, want 502 tmux", rec.Code, rec.Body)
+		}
+		ft.set(func(f *fakeRemoteTmux) { f.failKeys = nil })
+		if rec := press(); rec.Code != http.StatusOK {
+			t.Fatalf("retry: got %d %s, want 200", rec.Code, rec.Body)
+		}
+		if got := ft.log(); !reflect.DeepEqual(got, []string{"keys %1 1"}) {
+			t.Fatalf("calls = %q, want the retried press only", got)
 		}
 	})
+	t.Run("send whose type failed", func(t *testing.T) {
+		s := idleSession()
+		_, ft, h := newTestRemote(t, testFleet(s), nil)
+		ft.screens["%1"] = idleScreen("")
+		send := func() *httptest.ResponseRecorder {
+			return remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+				remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "go"})
+		}
+		ft.set(func(f *fakeRemoteTmux) { f.failType = true })
+		if rec := send(); rec.Code != http.StatusBadGateway || remoteCode(t, rec) != "partial" {
+			t.Fatalf("failing send: got %d %s, want 502 partial", rec.Code, rec.Body)
+		}
+		ft.set(func(f *fakeRemoteTmux) { f.failType = false })
+		rec := send()
+		if rec.Code == http.StatusConflict && remoteCode(t, rec) == "moved" {
+			t.Fatalf("retry refused as moved: the failed send was recorded as answered")
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("retry: got %d %s, want 200", rec.Code, rec.Body)
+		}
+	})
+}
+
+// After the Esc that closed a dialog the screen behind it is re-read: a vim
+// NORMAL box or an unrecognised screen stops the send with its own code,
+// saying the dialog is already gone, and nothing is typed.
+func TestRemoteSendDismissedIntoAnUnusablePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		what   string
+		vim    bool
+		screen string
+		code   string
+	}{
+		{"vim NORMAL", true, idleScreen(""), "vim_normal"},
+		{"unrecognized", false, "Running the tests…\n", "unrecognized"},
+	} {
+		s := idleSession()
+		s.State = "Asking"
+		r, ft, h := newTestRemote(t, testFleet(s), nil)
+		r.vimMode = tc.vim
+		ft.screens["%1"] = dialogScreen()
+		ft.escapeScreen = tc.screen
+		rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "use postgres", Escape: true, Replace: true})
+		if rec.Code != http.StatusConflict || remoteCode(t, rec) != tc.code {
+			t.Errorf("%s: got %d %s, want 409 %s", tc.what, rec.Code, rec.Body, tc.code)
+			continue
+		}
+		var e remoteErrorBody
+		_ = json.Unmarshal(rec.Body.Bytes(), &e)
+		if !strings.Contains(e.Message, "dialog dismissed, but") {
+			t.Errorf("%s: message %q does not say the dialog was dismissed", tc.what, e.Message)
+		}
+		if got := ft.log(); !reflect.DeepEqual(got, []string{"keys %1 Escape"}) {
+			t.Errorf("%s: calls = %q, want the Escape only", tc.what, got)
+		}
+	}
+}
+
+// The answered record for a session that left the fleet is dropped at the
+// next queue poll: a session that comes back (same name, same episode) can
+// be sent to again.
+func TestRemoteQueuePrunesAnswered(t *testing.T) {
+	s := idleSession()
+	fleet := testFleet(s)
+	_, ft, h := newTestRemote(t, fleet, nil)
+	ft.screens["%1"] = idleScreen("")
+	send := func() *httptest.ResponseRecorder {
+		return remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "go"})
+	}
+	if rec := send(); rec.Code != http.StatusOK {
+		t.Fatalf("first send: %d %s", rec.Code, rec.Body)
+	}
+	fleet.publish(swSnapshot{}, RateLimits{}, false, nil, rt0)
+	if rec := remoteDo(t, h, "GET", "/api/remote/queue", testRemoteToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("queue: %d %s", rec.Code, rec.Body)
+	}
+	fleet.publish(swSnapshot{Sessions: []swSession{s}}, RateLimits{}, false, nil, rt0)
+	if rec := send(); rec.Code != http.StatusOK {
+		t.Fatalf("send after the prune: got %d %s, want 200", rec.Code, rec.Body)
+	}
+}
+
+// A defer whose tmux call fails answers 502 tmux.
+func TestRemoteDeferTmuxFailure(t *testing.T) {
+	_, ft, h := newTestRemote(t, testFleet(idleSession()), nil)
+	ft.set(func(f *fakeRemoteTmux) { f.failRun = true })
+	rec := remoteDo(t, h, "POST", "/api/remote/defer", testRemoteToken, remoteDeferReq{Name: "a", On: true})
+	if rec.Code != http.StatusBadGateway || remoteCode(t, rec) != "tmux" {
+		t.Fatalf("got %d %s, want 502 tmux", rec.Code, rec.Body)
+	}
+}
+
+// A single line goes in through send-keys -l: shell metacharacters and a
+// leading dash arrive literally, with no paste brackets. Empty text is an
+// error, not a no-op.
+func TestExecRemoteTmuxTypeTextSingleLine(t *testing.T) {
+	pane := tmuxIsolated(t, `printf '\033[?2004h'; stty raw -echo; echo READY; exec cat -v`)
+	tm := execRemoteTmux{}
+	waitFor(t, "the pane to be ready", func() bool {
+		s, err := tm.capture(pane, false, 0)
+		return err == nil && strings.Contains(s, "READY")
+	})
+	if err := tm.typeText(pane, "-x; ls"); err != nil {
+		t.Fatalf("typeText: %v", err)
+	}
+	if err := tm.keys(pane, "C-j"); err != nil {
+		t.Fatal(err)
+	}
+	var screen string
+	waitFor(t, "the text to show", func() bool {
+		s, err := tm.capture(pane, false, 0)
+		screen = s
+		return err == nil && strings.Contains(s, "-x; ls")
+	})
+	if strings.Contains(screen, "200~") || strings.Contains(screen, "201~") {
+		t.Fatalf("pane shows:\n%s\nwant the line typed literally, without paste brackets", screen)
+	}
+	if err := tm.typeText(pane, ""); err == nil {
+		t.Fatal("typeText of empty text: want an error")
+	}
 }
 
 // The defer reason is shown at the desk and on the phone: control characters
@@ -1835,7 +2020,8 @@ func TestRemoteDeferReason(t *testing.T) {
 }
 
 // Every error code the page branches on is one the server emits, and the
-// page names an episode on every send and key, which the server requires.
+// page's send and key calls carry an episode field, which the server
+// requires for everything but Escape.
 func TestRemotePageAndServerAgreeOnCodes(t *testing.T) {
 	page := string(webRemoteHTML)
 	src, err := os.ReadFile("webremote.go")

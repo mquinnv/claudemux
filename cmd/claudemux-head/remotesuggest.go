@@ -64,10 +64,6 @@ const (
 	suggestStatusPending suggestStatus = "pending"
 	suggestStatusReady   suggestStatus = "ready"
 	suggestStatusError   suggestStatus = "error"
-
-	// Older names, kept as aliases.
-	suggestStatusWait   = suggestStatusPending
-	suggestStatusFailed = suggestStatusError
 )
 
 // Failure reasons shown on the page (remoteSuggestState.Error). Short and
@@ -114,6 +110,9 @@ func suggestReason(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return suggestErrTimeout
 	}
+	if errors.Is(err, context.Canceled) {
+		return suggestErrInternal
+	}
 	// Transport failures: the request never got an HTTP answer. A timeout
 	// among them stays "timeout".
 	var ne net.Error
@@ -126,7 +125,7 @@ func suggestReason(err error) string {
 	if errors.As(err, &ue) || errors.As(err, &oe) || errors.As(err, &de) {
 		return suggestErrNetwork
 	}
-	return suggestErrAPI
+	return suggestErrInternal
 }
 
 var suggestSystemPrompt = `You draft one-tap replies that a developer sends from their PHONE to a Claude Code session that is waiting on them. You see the bottom of the session's terminal and its state.
@@ -358,8 +357,8 @@ func cleanSuggestionsCounted(in []remoteSuggestion, dialog bool, fixed []string)
 
 // hasControlRunes reports C0 controls other than newline and tab, DEL, and
 // C1 controls — what the remote's send path rejects. The single source of
-// truth for that rule: webremote.go's remoteHasControl and config.go's
-// replies validation call it too.
+// truth for that rule: webremote.go's send and defer paths and config.go's
+// replies validation call it.
 func hasControlRunes(s string) bool {
 	for _, r := range s {
 		if r == '\n' || r == '\t' {
@@ -493,7 +492,7 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 		}()
 		// The timeout covers the wait for a slot too, so a goroutine never
 		// queues forever behind stuck calls: time spent waiting for a slot
-		// comes out of the same suggestTimeout (20s) budget as the call.
+		// comes out of the same suggestTimeout budget as the call.
 		ctx, cancel := context.WithTimeout(context.Background(), suggestTimeout)
 		defer cancel()
 		select {

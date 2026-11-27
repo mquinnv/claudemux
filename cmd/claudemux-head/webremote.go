@@ -34,7 +34,7 @@ import (
 //
 // "Conduction" on the phone mirrors the lobby's conductor: the queue is the
 // same waitingQueue order (closing first, then oldest), and the page walks it
-// one session at a time. Haiku drafts replies for the session on screen
+// one session at a time. The summary model drafts replies for the session on screen
 // (remotesuggest.go); the keyboard is always there too.
 
 //go:embed webremote.html
@@ -189,10 +189,14 @@ type webRemote struct {
 	// writeMu serializes everything that types: two phones (or a double
 	// tap) must not interleave their keystrokes in one prompt.
 	writeMu sync.Mutex
-	// answered maps a session name to the episode a send or an answering key
-	// (a digit or Enter) last landed in, guarded by writeMu. A second answer
-	// to the same episode is refused: the first has not been acted on yet,
-	// and two would pile up in the prompt or pick two options.
+	// answeredMu guards answered. It is its own lock, not writeMu, so that
+	// queueView can prune the map without waiting behind a slow write.
+	answeredMu sync.Mutex
+	// answered maps a session name to the episode a send last landed in. A
+	// second send to the same episode is refused: the session has not
+	// published a new state since the first, so a second send would pile up
+	// in the prompt. Keys are not covered: a multi-question dialog keeps one
+	// episode across its questions, and a key may do nothing at all.
 	answered map[string]string
 }
 
@@ -209,7 +213,7 @@ func (e *remoteTokenError) Public() string { return e.public }
 
 // remoteSetupFallback is the public reason for a tokenErr that is not a
 // *remoteTokenError.
-const remoteSetupFallback = "the remote is not set up; see the lobby log"
+const remoteSetupFallback = "the remote is not set up; details go to the file named by CLAUDEMUX_TEARDOWN_LOG, if set"
 
 // remoteToken reads the secret. When it is unset or too short to trust it
 // returns "" and a *remoteTokenError saying why.
@@ -458,6 +462,7 @@ func (r *webRemote) queueView() remoteQueueView {
 		v.Sessions = append(v.Sessions, toRemoteSession(s, pos[s.Name]))
 	}
 	r.suggest.prune(names)
+	r.pruneAnswered(names)
 	return v
 }
 
@@ -475,8 +480,8 @@ func (r *webRemote) lookup(name string) (swSession, bool) {
 }
 
 // remoteSessionView is GET /api/remote/session?name=: the session, the
-// bottom of its claude pane, whether its prompt is empty, and Haiku's
-// suggestions for the current episode.
+// bottom of its claude pane, whether its prompt is empty, and the summary
+// model's suggestions for the current episode.
 type remoteSessionView struct {
 	Session     remoteSession      `json:"session"`
 	Screen      string             `json:"screen"`
@@ -521,9 +526,9 @@ func (r *webRemote) handleSession(w http.ResponseWriter, req *http.Request) {
 	case waiting && s.ClaudePane == "":
 		// Nothing to read, so nothing will ever be drafted: get would say
 		// pending forever.
-		v.Suggestions = remoteSuggestState{Status: suggestStatusFailed, Error: suggestErrNoPane}
+		v.Suggestions = remoteSuggestState{Status: suggestStatusError, Error: suggestErrNoPane}
 	case waiting && !captured:
-		v.Suggestions = remoteSuggestState{Status: suggestStatusFailed, Error: suggestErrNoScreen}
+		v.Suggestions = remoteSuggestState{Status: suggestStatusError, Error: suggestErrNoScreen}
 	default:
 		if waiting {
 			screen := v.Screen
@@ -541,7 +546,7 @@ func (r *webRemote) handleSession(w http.ResponseWriter, req *http.Request) {
 
 // prefetch drafts next's replies ahead of time. The capture happens here, not
 // lazily inside ensure, so a screen that can't be read is skipped (and the
-// real error logged) instead of being handed to Haiku as an empty capture;
+// real error logged) instead of being handed to the summary model as an empty capture;
 // the session's own visit retries it. Stops already drafted cost nothing.
 func (r *webRemote) prefetch(next swSession) {
 	if !r.suggest.needsCall(next) {
@@ -648,13 +653,13 @@ func decodeRemote(w http.ResponseWriter, req *http.Request, v any) bool {
 // the dialog closed, whichever it is now. A stale Esc can therefore interrupt
 // a turn that started after the page last polled.
 //
-// When answer is set (a send, or a digit/Enter key), the write is also
-// refused if an earlier answer already landed in this same episode (see
-// webRemote.answered). The caller holds writeMu.
-func (r *webRemote) target(w http.ResponseWriter, name, episode string, answer bool) (swSession, bool) {
+// When send is set (handleSend only), the write is also refused if an
+// earlier send already landed in this same episode (see webRemote.answered).
+// Keys rely on the plain episode check alone. The caller holds writeMu.
+func (r *webRemote) target(w http.ResponseWriter, name, episode string, send bool) (swSession, bool) {
 	s, ok := r.lookup(name)
 	if !ok {
-		delete(r.answered, name)
+		r.forgetAnswered(name)
 		remoteError(w, http.StatusNotFound, "gone", "no session named "+strconv.Quote(name))
 		return s, false
 	}
@@ -666,30 +671,46 @@ func (r *webRemote) target(w http.ResponseWriter, name, episode string, answer b
 		remoteError(w, http.StatusConflict, "moved", name+" has moved on since you looked: now "+webStateWord(s.State))
 		return s, false
 	}
-	if answer && episode != "" && r.answered[name] == episode {
+	if send && episode != "" && r.answeredEpisode(name) == episode {
 		remoteError(w, http.StatusConflict, "moved", "already answered; waiting for the session to move on")
 		return s, false
 	}
 	return s, true
 }
 
-// remoteAnswerKey reports a key that answers a question (an option digit or
-// Enter), which the answered-episode guard covers. Moving around a dialog
-// (Up, Down, Tab, BTab, Space) and Escape are exempt and never recorded.
-func remoteAnswerKey(key string) bool {
-	if key == "Enter" {
-		return true
-	}
-	return len(key) == 1 && key[0] >= '1' && key[0] <= '9'
+// answeredEpisode is the episode a send last landed in for name, or "".
+func (r *webRemote) answeredEpisode(name string) string {
+	r.answeredMu.Lock()
+	defer r.answeredMu.Unlock()
+	return r.answered[name]
 }
 
-// markAnswered records that an answer landed in name's episode. The caller
-// holds writeMu.
+// markAnswered records that a send landed in name's episode.
 func (r *webRemote) markAnswered(name, episode string) {
+	r.answeredMu.Lock()
+	defer r.answeredMu.Unlock()
 	if r.answered == nil {
 		r.answered = map[string]string{}
 	}
 	r.answered[name] = episode
+}
+
+// forgetAnswered drops name's record.
+func (r *webRemote) forgetAnswered(name string) {
+	r.answeredMu.Lock()
+	defer r.answeredMu.Unlock()
+	delete(r.answered, name)
+}
+
+// pruneAnswered drops records for sessions that no longer exist.
+func (r *webRemote) pruneAnswered(names map[string]bool) {
+	r.answeredMu.Lock()
+	defer r.answeredMu.Unlock()
+	for name := range r.answered {
+		if !names[name] {
+			delete(r.answered, name)
+		}
+	}
 }
 
 // remotePromptState classifies a capture-pane -e of the claude pane before
@@ -748,7 +769,7 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 		remoteError(w, http.StatusBadRequest, "long", fmt.Sprintf("message is over %d characters", remoteTextMaxRunes))
 		return
 	}
-	if remoteHasControl(text) {
+	if hasControlRunes(text) {
 		// A raw \x03 or \x1b would reach the pane through send-keys -l, and
 		// "\x1b[201~" would end a bracketed paste early and run the rest as
 		// keystrokes.
@@ -805,7 +826,14 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 			// The dialog is gone, and with it the episode the page saw: let it
 			// refetch and decide about the draft against the new screen.
 			teardownLogf("remote: send to %s stopped: dialog dismissed, but the prompt isn't empty (%s)", s.Name, code)
-			remoteError(w, http.StatusConflict, "dismissed_draft", "dialog dismissed, but the prompt isn't empty")
+			switch code {
+			case "draft":
+				remoteError(w, http.StatusConflict, "dismissed_draft", "dialog dismissed, but the prompt isn't empty")
+			case "vim_normal":
+				remoteError(w, http.StatusConflict, "vim_normal", "dialog dismissed, but claude's prompt is in vim NORMAL mode; nothing was typed")
+			default:
+				remoteError(w, http.StatusConflict, "unrecognized", "dialog dismissed, but the remote doesn't recognise the screen now; nothing was typed")
+			}
 			return
 		}
 		switch code {
@@ -843,6 +871,13 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if err := r.tmux.typeText(pane, text); err != nil {
+		if done == "" {
+			// typeText may have written some of the text before failing, so
+			// the prompt is no longer known to be untouched.
+			teardownLogf("remote: send to %s failed at type: %v", s.Name, err)
+			remoteError(w, http.StatusBadGateway, "partial", "typing may have partly landed; check the screen")
+			return
+		}
 		fail("type", err)
 		return
 	}
@@ -856,11 +891,6 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 	r.markAnswered(s.Name, body.Episode)
 	teardownLogf("remote: sent %d chars to %s", len(text), s.Name)
 	remoteJSON(w, remoteOK{OK: true})
-}
-
-// remoteHasControl: see hasControlRunes.
-func remoteHasControl(text string) bool {
-	return hasControlRunes(text)
 }
 
 func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
@@ -882,8 +912,7 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 		teardownLogf("remote: key %s for %s dropped, client gone: %v", body.Key, body.Name, err)
 		return
 	}
-	answer := remoteAnswerKey(body.Key)
-	s, ok := r.target(w, body.Name, body.Episode, answer)
+	s, ok := r.target(w, body.Name, body.Episode, false)
 	if !ok {
 		return
 	}
@@ -891,9 +920,6 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 		teardownLogf("remote: key %s in %s failed: %v", body.Key, s.Name, err)
 		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
 		return
-	}
-	if answer {
-		r.markAnswered(s.Name, body.Episode)
 	}
 	teardownLogf("remote: pressed %s in %s", body.Key, s.Name)
 	remoteJSON(w, remoteOK{OK: true})

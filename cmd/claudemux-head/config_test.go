@@ -717,7 +717,8 @@ func TestLoadConfigWebZeroHeadlineIntervalIsAllowed(t *testing.T) {
 }
 
 // The phone remote's keys load from the file, and a reply must be one line:
-// a newline would submit half of it, a tab would move focus.
+// replies are one-line chips, for display and so a tap is predictable. (A
+// newline or tab would arrive inside a bracketed paste, not submit early.)
 func TestLoadConfigWebRemote(t *testing.T) {
 	writeConfig(t, "web:\n  control: true\n  replies: [\"ship it\"]\n")
 	cfg, err := loadConfig()
