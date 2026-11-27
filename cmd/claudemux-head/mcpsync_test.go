@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -125,5 +126,37 @@ func TestSyncMCPLeavesProjectServers(t *testing.T) {
 	p := readObj(t, dst)["projects"].(map[string]any)["/p"].(map[string]any)["mcpServers"].(map[string]any)
 	if p["dstproj"] == nil || p["srcproj"] != nil || len(p) != 1 {
 		t.Fatalf("projects=%v", p)
+	}
+}
+
+// An existing dst that is empty, blank, null or truncated is refused: treating
+// it as {} would replace it with only mcpServers and wipe the login and trust.
+func TestSyncMCPRefusesUnusableDst(t *testing.T) {
+	for _, body := range []string{``, "  \n\t", `null`, ` null `, `{"oauthAccount":`} {
+		src, dst, state := syncEnv(t)
+		writeF(t, src, `{"mcpServers":{"a":{"command":"a"}}}`)
+		writeF(t, dst, body)
+		if _, _, err := syncMCP(src, dst, state); err == nil {
+			t.Errorf("dst %q: want an error", body)
+		}
+		if got, _ := os.ReadFile(dst); string(got) != body {
+			t.Errorf("dst %q rewritten to %q", body, got)
+		}
+		if _, err := os.Stat(state); err == nil {
+			t.Errorf("dst %q: state written", body)
+		}
+	}
+}
+
+func TestSyncMCPNoHTMLEscape(t *testing.T) {
+	src, dst, state := syncEnv(t)
+	writeF(t, src, `{"mcpServers":{"a":{"command":"x","args":["a&b","<c>"]}}}`)
+	writeF(t, dst, `{"numStartups":1}`)
+	if _, _, err := syncMCP(src, dst, state); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(dst)
+	if !strings.Contains(string(b), `"a&b"`) || !strings.Contains(string(b), `"<c>"`) {
+		t.Errorf("servers HTML-escaped: %s", b)
 	}
 }

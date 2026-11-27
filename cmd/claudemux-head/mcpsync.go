@@ -30,6 +30,41 @@ func readJSONObject(path string) (map[string]json.RawMessage, bool, error) {
 	return m, true, nil
 }
 
+// readDstJSONObject is readJSONObject for a file syncMCP will rewrite. An
+// existing file that is empty, blank or the literal null is refused rather
+// than read as {}: rewriting it would keep only mcpServers and wipe the
+// account's oauthAccount and project trust (a half-written file from a live
+// claude looks exactly like that). A missing file is fine.
+func readDstJSONObject(path string) (map[string]json.RawMessage, bool, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if t := bytes.TrimSpace(b); len(t) == 0 || string(t) == "null" {
+		return nil, true, fmt.Errorf("%s: not a JSON object (empty or null); left untouched", path)
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, true, fmt.Errorf("%s: %w", path, err)
+	}
+	return m, true, nil
+}
+
+// marshalNoEscape is json.Marshal without HTML escaping, so &, < and > in
+// server commands stay as written.
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 func readServers(obj map[string]json.RawMessage, path string) (map[string]json.RawMessage, error) {
 	servers := map[string]json.RawMessage{}
 	if raw, ok := obj["mcpServers"]; ok && string(bytes.TrimSpace(raw)) != "null" {
@@ -62,7 +97,7 @@ func syncMCP(srcJSON, dstJSON, statePath string) (added, removed []string, err e
 	}
 
 	// Read dst as late as possible to minimise the race with a live claude.
-	dst, dstFound, err := readJSONObject(dstJSON)
+	dst, dstFound, err := readDstJSONObject(dstJSON)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -99,7 +134,7 @@ func syncMCP(srcJSON, dstJSON, statePath string) (added, removed []string, err e
 	sort.Strings(removed)
 
 	if changed {
-		sb, err := json.Marshal(dstServers)
+		sb, err := marshalNoEscape(dstServers)
 		if err != nil {
 			return nil, nil, err
 		}
