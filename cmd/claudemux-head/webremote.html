@@ -316,8 +316,10 @@ const TOKEN_KEY = 'claudemux.remote.token';
 const NO_STORE_MSG = 'This browser won’t let the page remember the token, so you’ll need to enter it again next time.';
 
 // A token in the URL fragment (#token=...) is taken once and stripped, so
-// the link can be opened from a password manager or a QR code without
-// leaving the secret in history. Fragments never reach the server.
+// the link can be opened from a password manager or a QR code. Stripping
+// removes it from the address bar and this page's history entry, but the
+// browser's global history may still hold the original URL. Fragments never
+// reach the server.
 let hashToken = '', hashTokenError = '', storeFailed = false;
 (function adoptHashToken() {
   const m = location.hash.match(/token=([^&]+)/);
@@ -510,6 +512,8 @@ const isGlobalFailure = e => e.code === 'token' || e.code === 'setup' || e.code 
 // Only a network failure means "offline": anything else the lobby
 // answered keeps the connection state and says what went wrong.
 function handleApiFailure(e) {
+  // Any HTTP answer proves the lobby is reachable, even after an offline poll.
+  if (e.status > 0) S.online = true;
   if (e.code === 'token') { token = ''; store.del(TOKEN_KEY); S.setupError = 'That token was refused.'; render(); return; }
   if (e.code === 'setup') { S.setupError = e.message; renderSetup(true); return; }
   if (e.code === 'offline') { S.online = false; render(); return; }
@@ -672,7 +676,7 @@ function renderSetup(isSetupErr) {
     box.append(el('p', null, 'The lobby isn’t ready for remote control yet:'));
     box.append(el('p', 'mono', S.setupError));
     box.append(el('p', null, 'Full details go to the file named by CLAUDEMUX_TEARDOWN_LOG, if you set it before starting the lobby.'));
-    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ bytes, e.g. `openssl rand -hex 16`) in the lobby’s environment or in its summary.api_key_file, then restart the lobby.'));
+    box.append(el('p', null, 'Set CLAUDEMUX_REMOTE_TOKEN (16+ bytes, e.g. openssl rand -hex 16) in the lobby’s environment or in its summary.api_key_file, then restart the lobby.'));
     m.append(box); return;
   }
   box.append(el('p', null, 'Paste the CLAUDEMUX_REMOTE_TOKEN you set for the lobby. It is kept on this phone only.'));
@@ -796,9 +800,13 @@ function renderDetail() {
     } else if (sg.status === 'error' && sg.error === 'auth') {
       box.append(el('div', 'note bad', 'Suggestions failed: the API key was refused (check ANTHROPIC_API_KEY / summary.api_key_file).'));
     } else if (sg.status === 'error' && sg.error === 'rate limit') {
-      box.append(el('div', 'note bad', 'Suggestions are rate-limited; retrying in a while.'));
+      box.append(el('div', 'note bad', 'Suggestions are rate-limited; retrying shortly.'));
     } else if (sg.status === 'error' && sg.error === 'network') {
       box.append(el('div', 'note bad', 'Suggestions failed (can’t reach the API) — retrying shortly.'));
+    } else if (sg.status === 'error' && sg.error && sg.error.startsWith('api error 4')) {
+      box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request — check summary.model. Retrying in a few minutes.'));
+    } else if (sg.status === 'error' && sg.error === 'busy') {
+      box.append(el('div', 'note', 'Suggestions are queued behind other drafts — retrying shortly.'));
     } else if (sg.status === 'error' && sg.error !== 'no usable replies') {
       box.append(el('div', 'note bad', 'Suggestions failed (' + (sg.error || 'unknown') + ') — retrying shortly.'));
     } else if (sg.status === 'error' || !sg.items || !sg.items.length) {

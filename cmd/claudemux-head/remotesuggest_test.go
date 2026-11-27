@@ -231,6 +231,8 @@ func TestSuggestRepliesAPIErrors(t *testing.T) {
 		{401, "authentication_error", suggestErrAuth},
 		{403, "permission_error", suggestErrAuth},
 		{429, "rate_limit_error", suggestErrRateLimit},
+		{404, "not_found_error", "api error 404"},
+		{400, "invalid_request_error", "api error 400"},
 	} {
 		api := newFakeMessagesAPI(t, tc.status, apiErrorBody(tc.kind))
 		_, err := api.summarizer().SuggestReplies(context.Background(), waitingSession("Idle"), "screen", nil)
@@ -258,7 +260,10 @@ func TestSuggestReason(t *testing.T) {
 		{"429", &anthropic.Error{StatusCode: 429}, suggestErrRateLimit},
 		{"408", &anthropic.Error{StatusCode: 408}, suggestErrTimeout},
 		{"504", &anthropic.Error{StatusCode: 504}, suggestErrTimeout},
-		{"500", &anthropic.Error{StatusCode: 500}, suggestErrAPI},
+		{"400", &anthropic.Error{StatusCode: 400}, "api error 400"},
+		{"404", &anthropic.Error{StatusCode: 404}, "api error 404"},
+		{"500", &anthropic.Error{StatusCode: 500}, "api error 500"},
+		{"wrapped 404", fmt.Errorf("call: %w", &anthropic.Error{StatusCode: 404}), "api error 404"},
 		{"wrapped 401", fmt.Errorf("call: %w", &anthropic.Error{StatusCode: 401}), suggestErrAuth},
 		{"deadline", context.DeadlineExceeded, suggestErrTimeout},
 		{"wrapped deadline", fmt.Errorf("waiting for a call slot: %w", context.DeadlineExceeded), suggestErrTimeout},
@@ -273,6 +278,106 @@ func TestSuggestReason(t *testing.T) {
 		if got := suggestReason(tc.err); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.what, got, tc.want)
 		}
+	}
+}
+
+// A 4xx other than auth, rate limit or timeout is a configuration problem
+// (wrong model, bad request) that won't fix itself: it waits out
+// suggestConfigRetry. A 5xx is the API's own trouble: the ordinary back-off.
+func TestSuggestBackoffAPIErrors(t *testing.T) {
+	if suggestConfigRetry != 5*time.Minute {
+		t.Errorf("suggestConfigRetry = %v, want 5m", suggestConfigRetry)
+	}
+	for _, tc := range []struct {
+		reason string
+		want   time.Duration
+	}{
+		{"api error 404", suggestConfigRetry},
+		{suggestReason(&anthropic.Error{StatusCode: 404}), suggestConfigRetry},
+		{"api error 500", suggestRetryAfter},
+		{suggestReason(&anthropic.Error{StatusCode: 500}), suggestRetryAfter},
+		{suggestErrAuth, suggestAuthRetry},
+		{suggestErrNoReplies, suggestNoRepliesRetry},
+		{suggestErrNetwork, suggestRetryAfter},
+	} {
+		if got := suggestBackoff(tc.reason); got != tc.want {
+			t.Errorf("suggestBackoff(%q) = %v, want %v", tc.reason, got, tc.want)
+		}
+	}
+}
+
+// A key press puts the session's entry on hold: the screen is about to
+// change, so the chips go back to pending and no call starts until
+// suggestKeyHold has passed.
+func TestRemoteSuggestionsKeyPressedHold(t *testing.T) {
+	var nilC *remoteSuggestions
+	nilC.keyPressed("a") // must not panic
+
+	clock := &fakeClock{t: rt0}
+	s := idleSession()
+	gen := &fakeSuggester{out: []remoteSuggestion{{Label: "x", Text: "do x"}}}
+	c := newRemoteSuggestions(gen)
+	c.now = clock.now
+	c.keyPressed("ghost") // no entry: a no-op
+	if n := suggestEntryCount(c); n != 0 {
+		t.Fatalf("keyPressed on an unknown session made %d entries", n)
+	}
+
+	c.ensure(s, nil, func() string { return "screen" })
+	waitFor(t, "the draft", func() bool { return c.get(s).Status == suggestStatusReady })
+
+	c.keyPressed(s.Name)
+	if st := c.get(s); st.Status != suggestStatusPending || len(st.Items) != 0 {
+		t.Fatalf("after keyPressed: %+v, want pending with no items", st)
+	}
+	if c.needsCall(s) {
+		t.Error("needsCall during the key hold")
+	}
+	c.ensure(s, nil, func() string { return "screen" })
+	if n := gen.count(); n != 1 {
+		t.Fatalf("ensure during the key hold made a call: %d calls", n)
+	}
+	clock.advance(suggestKeyHold - time.Millisecond)
+	if c.needsCall(s) {
+		t.Error("needsCall just before the key hold ends")
+	}
+	clock.advance(time.Millisecond)
+	if !c.needsCall(s) {
+		t.Fatal("needsCall false once the key hold has passed")
+	}
+	c.ensure(s, nil, func() string { return "screen" })
+	waitFor(t, "the redraft", func() bool { return c.get(s).Status == suggestStatusReady })
+	if n := gen.count(); n != 2 {
+		t.Fatalf("calls = %d, want 2", n)
+	}
+	if st := c.get(s); !reflect.DeepEqual(st.Items, gen.out) {
+		t.Errorf("items = %+v, want %+v", st.Items, gen.out)
+	}
+}
+
+// A call already running when a key is pressed answers for the old screen:
+// finish discards it and the hold stays.
+func TestRemoteSuggestionsKeyPressedDiscardsInFlight(t *testing.T) {
+	clock := &fakeClock{t: rt0}
+	s := idleSession()
+	gen := &gatedSuggester{gates: map[time.Time]chan struct{}{}}
+	c := newRemoteSuggestions(gen)
+	c.now = clock.now
+	c.ensure(s, nil, func() string { return "screen" })
+	waitFor(t, "the call to start", func() bool { return gen.begun() == 1 })
+	c.keyPressed(s.Name)
+	close(gen.gate(s.Since))
+	// The slot is given back only after finish has run.
+	waitFor(t, "the call to finish", func() bool { return gen.finished() == 1 && len(c.sem) == 0 })
+	if st := c.get(s); st.Status != suggestStatusPending || len(st.Items) != 0 {
+		t.Fatalf("the in-flight result survived the key press: %+v", st)
+	}
+	if c.needsCall(s) {
+		t.Error("needsCall during the key hold after the stale result")
+	}
+	clock.advance(suggestKeyHold)
+	if !c.needsCall(s) {
+		t.Error("needsCall false once the key hold has passed")
 	}
 }
 
@@ -435,8 +540,9 @@ func TestCleanSuggestions(t *testing.T) {
 		{Label: "long", Text: strings.Repeat("a", suggestTextRunes+1)},
 		{Label: "five", Text: "five"},
 		{Label: "six", Text: "six"},
+		{Label: "seven", Text: "seven"},
 	}
-	got := cleanSuggestions(in, false, []string{"Continue"})
+	got, drops := cleanSuggestionsCounted(in, false, []string{"Continue"})
 	want := []remoteSuggestion{
 		{Label: "Run tests", Text: "run the tests"},
 		{Label: "ship it", Text: "ship it"},
@@ -445,6 +551,12 @@ func TestCleanSuggestions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("prompt:\n got %+v\nwant %+v", got, want)
+	}
+	if len(got) != suggestMax {
+		t.Errorf("kept %d, want suggestMax (%d)", len(got), suggestMax)
+	}
+	if n := drops[suggestDropOverMax]; n != 1 {
+		t.Errorf("drops[%q] = %d, want 1 (drops: %v)", suggestDropOverMax, n, drops)
 	}
 
 	dialog := cleanSuggestions([]remoteSuggestion{

@@ -16,13 +16,20 @@ import (
 )
 
 // Replies for the phone remote, drafted by the summary model (Haiku by
-// default). At most one successful call per
-// WAITING EPISODE (a session's state + since); a failed call is retried after
-// a back-off. The screen of a session parked on a question does not change
-// until it is answered, so the episode is the right cache key — it costs
-// nothing to compute, never churns on a spinner or a clock, and a new
-// question is in practice a new episode (since has 1-second resolution, so
-// only two waits in the same state starting within one second would collide).
+// default). At most one successful call per screen of a WAITING EPISODE (a
+// session's state + since); a failed call is retried after a back-off. The
+// episode is the cache key: it costs nothing to compute and never churns on a
+// spinner or a clock. A session parked on a single question shows the same
+// screen until it is answered, and the answer ends the episode (since has
+// 1-second resolution, so only two waits in the same state starting within
+// one second would collide).
+//
+// The exception is a multi-question dialog (AskUserQuestion with several
+// questions): answering question 1 shows question 2 in the SAME episode. So
+// when the remote presses a key, keyPressed drops the episode's chips and
+// holds it for suggestKeyHold, which gives the pane time to redraw; once the
+// hold passes, a call drafts from the new screen. A call still in flight from
+// before the key press is discarded when it finishes (see finishCall).
 
 // remoteSuggestion is one reply chip. Exactly one of Text and Key is set:
 // Text is typed as a prompt and submitted; Key is pressed in an open dialog
@@ -49,11 +56,20 @@ const (
 	suggestTimeout     = 20 * time.Second
 	suggestRetryAfter  = 30 * time.Second
 	suggestAuthRetry   = 5 * time.Minute
+	// suggestConfigRetry is the back-off after a 4xx API error other than
+	// auth, rate limit and timeout: usually a bad summary.model or a malformed
+	// request, which won't fix itself.
+	suggestConfigRetry = 5 * time.Minute
 	// suggestNoRepliesRetry is the back-off after a call whose replies were
-	// all dropped: the screen of a parked session does not change, so a quick
-	// retry would most likely be another billed call with the same outcome.
+	// all dropped: a parked session's screen does not change until a key or
+	// prompt reaches it (a key pressed from the remote ends the back-off, see
+	// keyPressed), so a quick retry would most likely be another billed call
+	// with the same outcome.
 	suggestNoRepliesRetry = 10 * time.Minute
 	suggestMaxInFlight    = 2
+	// suggestKeyHold is how long keyPressed waits before a new call, so the
+	// pane can redraw a dialog's next question before its screen is captured.
+	suggestKeyHold = 1500 * time.Millisecond
 )
 
 // suggestStatus is a session's suggestion state as the page sees it.
@@ -67,11 +83,15 @@ const (
 )
 
 // Failure reasons shown on the page (remoteSuggestState.Error). Short and
-// sanitized: the full error goes to the log only.
+// sanitized: the full error goes to the log only. suggestErrAPI is a prefix:
+// the reason is "api error <status>", e.g. "api error 404", for an API status
+// with no reason of its own. suggestErrBusy is running out of time while
+// waiting for a call slot, as distinct from a slow API call (timeout).
 const (
 	suggestErrAuth      = "auth"
 	suggestErrRateLimit = "rate limit"
 	suggestErrTimeout   = "timeout"
+	suggestErrBusy      = "busy"
 	suggestErrNetwork   = "network"
 	suggestErrAPI       = "api error"
 	suggestErrNoScreen  = "no screen"
@@ -105,7 +125,7 @@ func suggestReason(err error) string {
 		case 408, 504:
 			return suggestErrTimeout
 		}
-		return suggestErrAPI
+		return fmt.Sprintf("%s %d", suggestErrAPI, ae.StatusCode)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return suggestErrTimeout
@@ -356,9 +376,8 @@ func cleanSuggestionsCounted(in []remoteSuggestion, dialog bool, fixed []string)
 }
 
 // hasControlRunes reports C0 controls other than newline and tab, DEL, and
-// C1 controls — what the remote's send path rejects. The single source of
-// truth for that rule: webremote.go's send and defer paths and config.go's
-// replies validation call it.
+// C1 controls. It is the single source of truth for what the remote refuses
+// to type.
 func hasControlRunes(s string) bool {
 	for _, r := range s {
 		if r == '\n' || r == '\t' {
@@ -382,11 +401,14 @@ func tailRunes(s string, n int) string {
 
 // remoteSuggestState is what the page gets. Status is one of:
 //   - off: no API key, summaries disabled, or the session isn't waiting;
-//   - pending: a call is queued or running for the current episode;
+//   - pending: a call is queued or running for the current episode, or a
+//     key was just pressed and the next call waits out suggestKeyHold;
 //   - ready: Items holds the drafted replies;
-//   - error: Error is the short reason, a suggestErr* value. Besides the
-//     call's own failures this includes "no pane" and "no screen", which
-//     handleSession sets when there is nothing to draft from.
+//   - error: Error is the short reason, a suggestErr* value ("api error"
+//     carries the HTTP status, e.g. "api error 404"). Besides the call's own
+//     failures this includes "no pane" and "no screen", which handleSession
+//     sets when there is nothing to draft from; SuggestReplies also returns
+//     "no screen" for an empty capture.
 type remoteSuggestState struct {
 	Status suggestStatus      `json:"status"`
 	Items  []remoteSuggestion `json:"items,omitempty"`
@@ -399,6 +421,12 @@ type remoteSuggestEntry struct {
 	reason  string
 	items   []remoteSuggestion
 	at      time.Time
+	// hold, when non-zero, was set by keyPressed: the entry is pending with
+	// no call running for the current screen, and a call is due at hold.
+	hold time.Time
+	// call identifies the call that owns the entry, so a call superseded by
+	// a key press cannot write its result over a later call's.
+	call uint64
 }
 
 // remoteSuggestions caches one entry per session, for its current episode,
@@ -409,6 +437,7 @@ type remoteSuggestions struct {
 	entries map[string]*remoteSuggestEntry
 	sem     chan struct{}
 	now     func() time.Time
+	calls   uint64 // the last call id handed out; guarded by mu
 }
 
 func newRemoteSuggestions(gen remoteSuggester) *remoteSuggestions {
@@ -455,15 +484,43 @@ func (c *remoteSuggestions) needsCall(sess swSession) bool {
 }
 
 // needsCallLocked is the decision ensure and needsCall share: a waiting
-// session needs a call unless its episode's entry is ready, pending, or
-// failed less than its back-off ago (see suggestBackoff). c.mu must
-// be held; the caller has checked enabled and isWaiting.
+// session needs a call unless its episode's entry is ready, pending with a
+// call in flight, failed less than its back-off ago (see suggestBackoff), or
+// held by keyPressed until a time not yet reached. c.mu must be held; the
+// caller has checked enabled and isWaiting.
 func (c *remoteSuggestions) needsCallLocked(sess swSession, ep string) bool {
 	e, ok := c.entries[sess.Name]
 	if !ok || e.episode != ep {
 		return true
 	}
+	if !e.hold.IsZero() {
+		return !c.now().Before(e.hold)
+	}
 	return e.status == suggestStatusError && c.now().Sub(e.at) >= suggestBackoff(e.reason)
+}
+
+// keyPressed drops the chips of name's episode after the remote pressed a
+// key in its pane: a multi-question dialog keeps one episode across its
+// questions, so the chips drafted for one question would otherwise stay up
+// for the next. The entry goes pending and is held for suggestKeyHold, so
+// the pane can redraw before a new screen is captured; once the hold has
+// passed, the next ensure starts a call. The episode is unchanged. A call in
+// flight from before the key press is discarded when it finishes. No-op
+// when name has no entry or suggestions are off.
+func (c *remoteSuggestions) keyPressed(name string) {
+	if !c.enabled() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[name]
+	if !ok {
+		return
+	}
+	e.status = suggestStatusPending
+	e.items = nil
+	e.reason = ""
+	e.hold = c.now().Add(suggestKeyHold)
 }
 
 // ensure starts a call for sess's episode when needsCall says one is due.
@@ -480,14 +537,18 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 		c.mu.Unlock()
 		return
 	}
-	c.entries[sess.Name] = &remoteSuggestEntry{episode: ep, status: suggestStatusPending, at: c.now()}
+	// A fresh entry, so hold is zero and the normal pending/ready/error logic
+	// applies until the next keyPressed.
+	c.calls++
+	call := c.calls
+	c.entries[sess.Name] = &remoteSuggestEntry{episode: ep, status: suggestStatusPending, at: c.now(), call: call}
 	c.mu.Unlock()
 
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {
 				teardownLogf("remote: suggest panic for %s: %v", sess.Name, p)
-				c.finish(sess.Name, ep, nil, &suggestError{suggestErrInternal, fmt.Sprintf("panic: %v", p)})
+				c.finishCall(sess.Name, ep, call, nil, &suggestError{suggestErrInternal, fmt.Sprintf("panic: %v", p)})
 			}
 		}()
 		// The timeout covers the wait for a slot too, so a goroutine never
@@ -498,16 +559,27 @@ func (c *remoteSuggestions) ensure(sess swSession, fixed []string, screen func()
 		select {
 		case c.sem <- struct{}{}:
 		case <-ctx.Done():
-			c.finish(sess.Name, ep, nil, fmt.Errorf("waiting for a call slot: %w", ctx.Err()))
+			c.finishCall(sess.Name, ep, call, nil, &suggestError{suggestErrBusy, fmt.Sprintf("waiting for a call slot: %v", ctx.Err())})
 			return
 		}
 		defer func() { <-c.sem }()
 		items, err := c.gen.SuggestReplies(ctx, sess, screen(), fixed)
-		c.finish(sess.Name, ep, items, err)
+		c.finishCall(sess.Name, ep, call, items, err)
 	}()
 }
 
+// finish records a call's outcome for name's episode, whichever call owns
+// the entry. See finishCall.
 func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, err error) {
+	c.finishCall(name, ep, 0, items, err)
+}
+
+// finishCall records the outcome of call (0 matches any call) for name's
+// episode. The result is discarded when the session moved on, when the
+// entry is held by keyPressed (the hold wins: the result was drafted from
+// the screen before the key, i.e. the previous question), or when a later
+// call owns the entry (one started after the hold passed).
+func (c *remoteSuggestions) finishCall(name, ep string, call uint64, items []remoteSuggestion, err error) {
 	reason := ""
 	if err != nil {
 		reason = suggestReason(err)
@@ -520,6 +592,9 @@ func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, er
 	e, ok := c.entries[name]
 	if !ok || e.episode != ep {
 		return // the session moved on while the call ran
+	}
+	if !e.hold.IsZero() || (call != 0 && e.call != call) {
+		return // a key was pressed while the call ran; its screen is gone
 	}
 	e.at = c.now()
 	if err != nil {
@@ -534,15 +609,20 @@ func (c *remoteSuggestions) finish(name, ep string, items []remoteSuggestion, er
 }
 
 // suggestBackoff is how long a failed episode waits before a retry: long
-// for an auth failure, which won't fix itself quickly, and longer still for
-// "no usable replies", since the unchanged screen would most likely draw the
-// same replies again; suggestRetryAfter otherwise.
+// for an auth failure, which won't fix itself quickly; as long for any other
+// "api error 4xx" (usually a bad summary.model or a malformed request); longer
+// still for "no usable replies", since the unchanged screen would most likely
+// draw the same replies again; suggestRetryAfter otherwise, including
+// "api error 5xx" and "busy".
 func suggestBackoff(reason string) time.Duration {
 	switch reason {
 	case suggestErrAuth:
 		return suggestAuthRetry
 	case suggestErrNoReplies:
 		return suggestNoRepliesRetry
+	}
+	if strings.HasPrefix(reason, suggestErrAPI+" 4") {
+		return suggestConfigRetry
 	}
 	return suggestRetryAfter
 }

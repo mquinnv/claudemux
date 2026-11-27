@@ -52,7 +52,8 @@ func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []
 	// Filtered here, before anything reads it, so hidden sessions reach
 	// neither the page, its counts, nor the headline model's prompt. w.all
 	// keeps the unfiltered list for the token-gated remote only (see the all
-	// field). snap is a copy; reassigning its slice leaves the lobby's own
+	// field); the remote does send those sessions' screens to the summary
+	// model when drafting replies. snap is a copy; reassigning its slice leaves the lobby's own
 	// untouched.
 	all := append([]swSession(nil), snap.Sessions...)
 	snap.Sessions = w.privacy.visible(snap.Sessions)

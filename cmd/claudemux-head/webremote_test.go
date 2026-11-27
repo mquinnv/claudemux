@@ -688,6 +688,7 @@ func TestRemoteSendTmuxFailures(t *testing.T) {
 		req    remoteSendReq
 		break_ func(f *fakeRemoteTmux)
 		code   string
+		msg    string // a substring the message must hold ("" = unchecked)
 		calls  []string
 	}{
 		{
@@ -701,7 +702,8 @@ func TestRemoteSendTmuxFailures(t *testing.T) {
 			what: "type fails on an empty prompt", state: "Idle", screen: idleScreen(""),
 			req:    remoteSendReq{Text: "go"},
 			break_: func(f *fakeRemoteTmux) { f.failType = true },
-			code:   "partial", calls: nil,
+			// The tmux error is in the message, not only in the log.
+			code: "partial", msg: "tmux down", calls: nil,
 		},
 		{
 			what: "type fails after the draft was cleared", state: "Idle", screen: idleScreen("draft"),
@@ -749,6 +751,13 @@ func TestRemoteSendTmuxFailures(t *testing.T) {
 		rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken, tc.req)
 		if rec.Code != http.StatusBadGateway || remoteCode(t, rec) != tc.code {
 			t.Errorf("%s: got %d %s, want 502 %s", tc.what, rec.Code, rec.Body, tc.code)
+		}
+		if tc.msg != "" {
+			var e remoteErrorBody
+			_ = json.Unmarshal(rec.Body.Bytes(), &e)
+			if !strings.Contains(e.Message, tc.msg) {
+				t.Errorf("%s: message %q does not contain %q", tc.what, e.Message, tc.msg)
+			}
 		}
 		if got := ft.log(); !reflect.DeepEqual(got, tc.calls) {
 			t.Errorf("%s: calls = %q, want %q (never Enter after a failure)", tc.what, got, tc.calls)
@@ -1222,7 +1231,8 @@ func TestRemoteTrimPromptBox(t *testing.T) {
 }
 
 // A send must name the episode it answers; a key too, except Escape, which
-// is safe whatever the session is doing now.
+// acts on whatever the session is doing now (closing a dialog or
+// interrupting a turn).
 func TestRemoteWritesNeedAnEpisode(t *testing.T) {
 	s := idleSession()
 	_, ft, h := newTestRemote(t, testFleet(s), nil)
@@ -1719,6 +1729,7 @@ func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
 		replace     bool
 		status      int
 		code        string
+		msg         string // a substring the message must hold ("" = unchecked)
 		calls       []string
 	}{
 		{what: "vim NORMAL, empty box", vim: true, screen: idleScreen(""),
@@ -1737,8 +1748,12 @@ func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
 			status: http.StatusConflict, code: "unrecognized"},
 		{what: "no input box, replace", screen: "Running the tests…\n", replace: true,
 			status: http.StatusConflict, code: "unrecognized"},
+		// A box between two rules whose first line has no ❯ is not the input
+		// box (a numbered dialog drawn in a frame, say).
+		{what: "box without the prompt glyph, replace", screen: strings.Repeat("─", 30) + "\n  1. Yes\n" + strings.Repeat("─", 30) + "\n", replace: true,
+			status: http.StatusConflict, code: "unrecognized"},
 		{what: "draft, replace, C-u clears nothing", screen: idleScreen("half"), clearScreen: idleScreen("half"), replace: true,
-			status: http.StatusConflict, code: "not_cleared", calls: []string{"keys %1 C-u"}},
+			status: http.StatusConflict, code: "not_cleared", msg: "not typed", calls: []string{"keys %1 C-u"}},
 		{what: "draft, replace, C-u clears it", screen: idleScreen("half"), replace: true,
 			status: http.StatusOK, calls: []string{"keys %1 C-u", "type %1 go", "keys %1 Enter"}},
 	} {
@@ -1751,6 +1766,13 @@ func TestRemoteSendVimAndReplaceSafety(t *testing.T) {
 			remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "go", Replace: tc.replace})
 		if rec.Code != tc.status || (tc.code != "" && remoteCode(t, rec) != tc.code) {
 			t.Errorf("%s: got %d %s, want %d %s", tc.what, rec.Code, rec.Body, tc.status, tc.code)
+		}
+		if tc.msg != "" {
+			var e remoteErrorBody
+			_ = json.Unmarshal(rec.Body.Bytes(), &e)
+			if !strings.Contains(e.Message, tc.msg) {
+				t.Errorf("%s: message %q does not contain %q", tc.what, e.Message, tc.msg)
+			}
 		}
 		if got := ft.log(); !reflect.DeepEqual(got, tc.calls) {
 			t.Errorf("%s: calls = %q, want %q", tc.what, got, tc.calls)
@@ -1824,6 +1846,58 @@ func TestRemoteAnsweredEpisodeIsNotAnsweredTwice(t *testing.T) {
 			t.Fatalf("send after a key in the same episode: %d %s, want 200", rec.Code, rec.Body)
 		}
 	})
+}
+
+// A key can move a dialog on to its next question in the same episode, so
+// the chips drafted for the old question are dropped: the next poll shows
+// pending with no items rather than replies to a question that is gone.
+func TestRemoteKeyDropsSuggestions(t *testing.T) {
+	s := idleSession()
+	s.State = "Tool:AskUserQuestion"
+	gen := &fakeSuggester{out: []remoteSuggestion{{Label: "postgres", Text: "use postgres"}}}
+	r, ft, h := newTestRemote(t, testFleet(s), gen)
+	// A frozen clock keeps the post-key hold from expiring mid-test.
+	clock := &fakeClock{t: rt0}
+	r.suggest.now = clock.now
+	ft.screens["%1"] = dialogScreen()
+
+	decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+	waitFor(t, "suggestions for a", func() bool { return r.suggest.get(s).Status == suggestStatusReady })
+	v := decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+	if v.Suggestions.Status != suggestStatusReady || len(v.Suggestions.Items) != 1 {
+		t.Fatalf("before the key: suggestions = %+v, want ready with one item", v.Suggestions)
+	}
+
+	rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+		remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("key: got %d %s", rec.Code, rec.Body)
+	}
+	v = decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+	if v.Suggestions.Status != suggestStatusPending || len(v.Suggestions.Items) != 0 {
+		t.Fatalf("after the key: suggestions = %+v, want pending with no items", v.Suggestions)
+	}
+}
+
+// A send to a session mid-turn (not waiting) with an empty prompt types and
+// submits: claude queues the message for after the turn.
+func TestRemoteSendToBusySession(t *testing.T) {
+	s := idleSession()
+	s.State = "Thinking"
+	if isWaiting(s.State) {
+		t.Fatalf("%q counts as waiting; pick a busy state", s.State)
+	}
+	_, ft, h := newTestRemote(t, testFleet(s), nil)
+	ft.screens["%1"] = idleScreen("")
+	rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+		remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "also check the docs"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d %s, want 200", rec.Code, rec.Body)
+	}
+	want := []string{"type %1 also check the docs", "keys %1 Enter"}
+	if got := ft.log(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
 }
 
 // A two-question AskUserQuestion dialog is ONE episode (one state, one

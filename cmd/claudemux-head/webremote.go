@@ -35,7 +35,8 @@ import (
 // "Conduction" on the phone mirrors the lobby's conductor: the queue is the
 // same waitingQueue order (closing first, then oldest), and the page walks it
 // one session at a time. The summary model drafts replies for the session on screen
-// (remotesuggest.go); the keyboard is always there too.
+// and prefetches drafts for the next stop in the queue, so each open can cost
+// two billed calls (remotesuggest.go); the keyboard is always there too.
 
 //go:embed webremote.html
 var webRemoteHTML []byte
@@ -531,6 +532,9 @@ func (r *webRemote) handleSession(w http.ResponseWriter, req *http.Request) {
 		v.Suggestions = remoteSuggestState{Status: suggestStatusError, Error: suggestErrNoScreen}
 	default:
 		if waiting {
+			// Drafted from the unfiltered fleet on purpose: hide_private_orgs
+			// screens still go to the summary model, because the remote is
+			// token-gated and shows those sessions anyway.
 			screen := v.Screen
 			r.suggest.ensure(s, r.replies, func() string { return screen })
 			// Conduction is a walk down the queue, so draft the next stop's
@@ -866,7 +870,7 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 		}
 		if empty, code := remotePromptState(raw, r.vimMode); !empty {
 			teardownLogf("remote: send to %s stopped: sent C-u, but the prompt still isn't empty (%s)", s.Name, code)
-			remoteError(w, http.StatusConflict, "not_cleared", "tried to clear the draft but the prompt still isn't empty; nothing was typed")
+			remoteError(w, http.StatusConflict, "not_cleared", "sent Ctrl-U to clear the draft, but the prompt still isn't empty (part of the draft may be gone); your message was not typed")
 			return
 		}
 	}
@@ -875,7 +879,7 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 			// typeText may have written some of the text before failing, so
 			// the prompt is no longer known to be untouched.
 			teardownLogf("remote: send to %s failed at type: %v", s.Name, err)
-			remoteError(w, http.StatusBadGateway, "partial", "typing may have partly landed; check the screen")
+			remoteError(w, http.StatusBadGateway, "partial", "typing may have partly landed ("+err.Error()+"); check the screen")
 			return
 		}
 		fail("type", err)
@@ -921,6 +925,9 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
 		return
 	}
+	// The key may have moved a dialog on to its next question in the same
+	// episode, so the cached chips can belong to a question that is gone.
+	r.suggest.keyPressed(s.Name)
 	teardownLogf("remote: pressed %s in %s", body.Key, s.Name)
 	remoteJSON(w, remoteOK{OK: true})
 }

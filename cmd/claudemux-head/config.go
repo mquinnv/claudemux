@@ -252,7 +252,8 @@ type WebConfig struct {
 	// first, then summary.api_key_file).
 	// The status page is for teammates; the remote is for you.
 	Control bool `yaml:"control"`
-	// Replies are the canned answers the remote offers at an empty prompt,
+	// Replies are the canned answers the remote offers when a session is
+	// waiting at its prompt (not in a dialog),
 	// next to the suggested replies from the summary model (Haiku by
 	// default), in order. Empty keeps defaultRemoteReplies.
 	// Each is one line: no newlines or tabs.
