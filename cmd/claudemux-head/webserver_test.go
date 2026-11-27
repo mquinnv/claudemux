@@ -76,6 +76,12 @@ func TestWebHandlerServesPage(t *testing.T) {
 	if got := rec.Header().Get("Content-Security-Policy"); got != webContentSecurityPolicy {
 		t.Errorf("Content-Security-Policy = %q, want %q", got, webContentSecurityPolicy)
 	}
+	if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Errorf("Content-Security-Policy = %q, want frame-ancestors 'none'", got)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
 	body := rec.Body.String()
 	for _, want := range []string{"<title>", "/api/fleet", "read-only"} {
 		if !strings.Contains(body, want) {

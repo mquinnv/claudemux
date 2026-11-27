@@ -28,25 +28,40 @@ const (
 	webWriteTimeout      = 10 * time.Second
 	webShutdownBudget    = time.Second
 
-	// webContentSecurityPolicy locks the page route to its own origin: no
+	// webContentSecurityPolicy locks the pages (status and remote) and the
+	// remote's API responses to their own origin: no
 	// external scripts, styles or images (data: URIs excepted for the
 	// gauges), matching the spec's "no external requests" rule.
-	webContentSecurityPolicy = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:"
+	// frame-ancestors 'none' (with webFrameOptions for older browsers) keeps
+	// other sites from framing the pages: a framed /remote would already hold
+	// its token (localStorage) and could be clickjacked into typing.
+	webContentSecurityPolicy = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
+	webFrameOptions          = "DENY"
 )
 
-// webHandler routes the two paths. Method patterns make the mux answer 405
-// for a POST to a known path and 404 for everything else; "/{$}" matches
-// the root only, so "/index.html" is not quietly the page. allow is the
-// tailnet's MagicDNS suffix and this node's own short name (weblisten.go);
-// see webGuard.
+// webHandler is webHandlerWith with no extra routes.
 func webHandler(f *webFleet, allow webAllow) http.Handler {
+	return webHandlerWith(f, allow, nil)
+}
+
+// webHandlerWith routes the page and /api/fleet, plus any extra routes (the
+// phone remote, webremote.go), all on one mux behind the same guard. Method
+// patterns make the mux answer 405 for a POST to a known path and 404 for
+// everything else; "/{$}" matches the root only, so "/index.html" is not
+// quietly the page. allow is the tailnet's MagicDNS suffix and this node's
+// own short name (weblisten.go); see webGuard.
+func webHandlerWith(f *webFleet, allow webAllow, extra func(*http.ServeMux)) http.Handler {
 	page := renderWebPage(f.title)
 	mux := http.NewServeMux()
+	if extra != nil {
+		extra(mux)
+	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
+		w.Header().Set("X-Frame-Options", webFrameOptions)
 		_, _ = w.Write(page)
 	})
 	mux.HandleFunc("GET /api/fleet", func(w http.ResponseWriter, r *http.Request) {
@@ -279,12 +294,26 @@ func startSwitchboardWeb(cfg Config, tailscaleIP func() (string, error), statusA
 		fleet.title = t
 	}
 	fleet.privacy = newWebPrivacy(cfg.Web.HidePrivateOrgs)
-	server, err := startWebServer(addr, webHandler(fleet, allow))
+	summarizer := newSummarizer(cfg.Summary)
+	var extra func(*http.ServeMux)
+	if cfg.Web.Control {
+		// register logs tokenErr; passing it through is enough here.
+		token, tokenErr := remoteToken(cfg)
+		// A nil *Summarizer must stay a nil interface, or the remote would
+		// think suggestions are on and call through a nil client.
+		var gen remoteSuggester
+		if summarizer != nil {
+			gen = summarizer
+		}
+		remote := newWebRemote(fleet, cfg, token, gen)
+		extra = func(mux *http.ServeMux) { remote.register(mux, tokenErr) }
+	}
+	server, err := startWebServer(addr, webHandlerWith(fleet, allow, extra))
 	if err != nil {
 		return nil, err
 	}
 	fleet.privacy.start()
-	worker := startHeadlineWorker(fleet, newSummarizer(cfg.Summary), cfg.Web.HeadlineInterval.Duration)
+	worker := startHeadlineWorker(fleet, summarizer, cfg.Web.HeadlineInterval.Duration)
 	return &swWeb{fleet: fleet, worker: worker, server: server}, nil
 }
 

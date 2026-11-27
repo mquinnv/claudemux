@@ -32,6 +32,12 @@ type webFleet struct {
 	taken    time.Time
 	headline webHeadline
 
+	// all is the snapshot BEFORE privacy filtering. Only the remote control
+	// API reads it (webremote.go), and only behind its token: the owner
+	// answering their own sessions from a phone must see every one of them,
+	// including the private repos teammates are kept away from.
+	all []swSession
+
 	// title is the page's heading (web.title); privacy drops sessions the
 	// page must not show (web.hide_private_orgs). Both are set once at
 	// construction and never change.
@@ -44,11 +50,16 @@ func newWebFleet() *webFleet { return &webFleet{title: defaultWebTitle} }
 // publish replaces the fleet facts. Only the lobby's Update calls it.
 func (w *webFleet) publish(snap swSnapshot, rl RateLimits, rlOK bool, windows []ModelWindow, taken time.Time) {
 	// Filtered here, before anything reads it, so hidden sessions reach
-	// neither the page, its counts, nor the headline model's prompt. snap is
-	// a copy; reassigning its slice leaves the lobby's own untouched.
+	// neither the page, its counts, nor the headline model's prompt. w.all
+	// keeps the unfiltered list for the token-gated remote only (see the all
+	// field); the remote does send those sessions' screens to the summary
+	// model when drafting replies. snap is a copy; reassigning its slice leaves the lobby's own
+	// untouched.
+	all := append([]swSession(nil), snap.Sessions...)
 	snap.Sessions = w.privacy.visible(snap.Sessions)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.all = all
 	w.snap = snap
 	w.rl = rl
 	w.rlOK = rlOK
@@ -68,6 +79,14 @@ func (w *webFleet) sessions() []swSession {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return append([]swSession(nil), w.snap.Sessions...)
+}
+
+// allSessions is a copy of the UNFILTERED fleet, for the remote control API
+// only (see the all field).
+func (w *webFleet) allSessions() []swSession {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return append([]swSession(nil), w.all...)
 }
 
 // view is the JSON shape of the current facts, built under the read lock so

@@ -715,3 +715,34 @@ func TestLoadConfigWebZeroHeadlineIntervalIsAllowed(t *testing.T) {
 		t.Fatalf("loadConfig() err = %v, want nil — zero is the documented opt-out", err)
 	}
 }
+
+// The phone remote's keys load from the file, and a reply must be one line:
+// replies are one-line chips, for display and so a tap is predictable. (A
+// newline or tab would arrive inside a bracketed paste, not submit early.)
+func TestLoadConfigWebRemote(t *testing.T) {
+	writeConfig(t, "web:\n  control: true\n  replies: [\"ship it\"]\n")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if !cfg.Web.Control {
+		t.Error("Web.Control = false, want true from the file")
+	}
+	if len(cfg.Web.Replies) != 1 || cfg.Web.Replies[0] != "ship it" {
+		t.Errorf("Web.Replies = %q, want [\"ship it\"]", cfg.Web.Replies)
+	}
+
+	for _, bad := range []string{`"ship\nit"`, `"ship\tit"`} {
+		writeConfig(t, "web:\n  control: true\n  replies: ["+bad+"]\n")
+		if _, err := loadConfig(); err == nil {
+			t.Errorf("replies [%s]: loadConfig() error = nil, want a one-line refusal", bad)
+		}
+	}
+	cfg = defaultConfig()
+	for _, r := range []string{"ship\nit", "ship\tit"} {
+		cfg.Web.Replies = []string{r}
+		if err := cfg.validate(); err == nil {
+			t.Errorf("reply %q: validate() = nil, want an error", r)
+		}
+	}
+}
