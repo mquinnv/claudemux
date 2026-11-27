@@ -248,9 +248,10 @@ type model struct {
 	// fallback while ours does not exist yet, or CLAUDEMUX_RATE_LIMITS_PATH.
 	// Re-resolved on every tick while it holds the fallback — see
 	// refreshedRateLimitsPath.
-	rateLimitsPath string
-	usageCachePath string      // ~/.claude/claudemux/usage.json or override
-	pctSamples     []pctSample // 5h-window snapshots over time, for burn-rate
+	rateLimitsPath  string
+	claudeConfigDir string      // CLAUDE_CONFIG_DIR of this pane's account; "" = ~/.claude
+	usageCachePath  string      // ~/.claude/claudemux/usage.json or override
+	pctSamples      []pctSample // 5h-window snapshots over time, for burn-rate
 
 	// Latest snapshot
 	state       State
@@ -577,6 +578,8 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 	seeded, _ := r.Seeded()
 
 	summarizer := newSummarizer(cfg.Summary)
+	acct, acctDir := sessionAccountFor(cfg.Claude)
+	multi := cfg.Claude.Multi()
 
 	m := model{
 		jsonlPath:    jsonlPath,
@@ -590,8 +593,9 @@ func newModel(cfg Config, jsonlPath, sessionID string, followActive bool) model 
 		reader:           r,
 		allEvents:        seeded,
 		bg:               newBgTracker(),
-		rateLimitsPath:   defaultRateLimitsPath(),
-		usageCachePath:   defaultUsageCachePath(),
+		rateLimitsPath:   sessionRateLimitsPath(acct, multi),
+		usageCachePath:   usageCachePathFor(acct, multi),
+		claudeConfigDir:  acctDir,
 		firstPrompt:      r.FirstPrompt(),
 		firstReply:       r.FirstReply(),
 		carriedTopic:     recordedTopic(sessionRecordDir(), sessionID),
@@ -1036,7 +1040,7 @@ func (m model) Init() tea.Cmd {
 	// first poll lands, so usageMaySpawn says no. That is the right answer
 	// anyway — a fleet coming up together would otherwise race to spawn before
 	// any of them knows whether it can render a meter line at all.
-	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))}
+	cmds := []tea.Cmd{m.pollData(), m.tick(), usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageMaySpawn(time.Now()))}
 	// The project color is static for the life of a session, so it is published
 	// once here rather than from the per-tick publish path.
 	if c := publishColorCmd(m.selfPane, m.workDir); c != nil {
@@ -1139,7 +1143,7 @@ func (m model) usageMaySpawn(now time.Time) bool {
 // The whole loop is additive: it feeds the per-model rows and nothing else, so
 // every failure mode here degrades to no model rows and never touches the
 // 5h/wk gauges.
-func usageCmd(cachePath string, allowSpawn bool) tea.Cmd {
+func usageCmd(cachePath, configDir string, allowSpawn bool) tea.Cmd {
 	return func() tea.Msg {
 		if cachePath == "" {
 			// No home directory to cache under. Refusing here matters: with an
@@ -1152,7 +1156,7 @@ func usageCmd(cachePath string, allowSpawn bool) tea.Cmd {
 		if fresh || !allowSpawn {
 			return usageMsg{usage: cached}
 		}
-		usage, err := refreshUsageCache(context.Background(), cachePath, usageClaudeBin(), now)
+		usage, err := refreshUsageCache(context.Background(), cachePath, usageClaudeBin(), configDir, now)
 		return usageMsg{usage: usage, err: err}
 	}
 }
@@ -1838,7 +1842,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// After the recompute, so the watcher judges this session by the state
 		// this poll just read; folded into allPub so every return below keeps it.
 		deferCmd := m.watchDefer(msg.time, msg.deferMarkOK)
-		allPub := tea.Batch(append(infoCmds, pubCmd, deferCmd, startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.time))...)
+		allPub := tea.Batch(append(infoCmds, pubCmd, deferCmd, startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.time, m.claudeConfigDir))...)
 		m.lastUpdate = msg.time
 		m.autoArmTeardown(prevTyped, msg.time)
 		// A ready gate is evidence gathered at the moment it opened, not a
@@ -2087,7 +2091,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The tick itself never stops: it is a file read, and it is how a pane
 		// picks up rows another pane fetched. Whether it may also SPAWN is the
 		// single gate in usageMaySpawn.
-		return m, usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))
+		return m, usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageMaySpawn(time.Now()))
 
 	case usageMsg:
 		if msg.err != nil {

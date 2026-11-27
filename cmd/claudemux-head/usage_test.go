@@ -67,7 +67,7 @@ func TestFetchPlanUsageParsesModelWindows(t *testing.T) {
 ` + fixture(t, "get_usage_response.json")
 
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	got, err := fetchPlanUsage(context.Background(), fakeClaude(t, body, 0, 0), now)
+	got, err := fetchPlanUsage(context.Background(), fakeClaude(t, body, 0, 0), "", now)
 	if err != nil {
 		t.Fatalf("fetchPlanUsage: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestFetchPlanUsageReturnsPromptlyDespiteLingeringChild(t *testing.T) {
 	path := fakeClaudeLingering(t, fixture(t, "get_usage_response.json"), lingerSecs)
 
 	start := time.Now()
-	got, err := fetchPlanUsage(context.Background(), path, time.Now())
+	got, err := fetchPlanUsage(context.Background(), path, "", time.Now())
 	if err != nil {
 		t.Fatalf("fetchPlanUsage: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestFetchPlanUsageTimesOut(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if _, err := fetchPlanUsage(ctx, fakeClaude(t, "", 9, 0), time.Now()); err == nil {
+	if _, err := fetchPlanUsage(ctx, fakeClaude(t, "", 9, 0), "", time.Now()); err == nil {
 		t.Fatal("fetchPlanUsage returned nil error on a hung child, want an error")
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
@@ -172,7 +172,7 @@ func TestFetchPlanUsageTimesOut(t *testing.T) {
 // A claude that dies without answering is an error, not an empty success —
 // empty success would be cached as "no model rows" for the full TTL.
 func TestFetchPlanUsageChildFails(t *testing.T) {
-	if _, err := fetchPlanUsage(context.Background(), fakeClaude(t, "", 0, 1), time.Now()); err == nil {
+	if _, err := fetchPlanUsage(context.Background(), fakeClaude(t, "", 0, 1), "", time.Now()); err == nil {
 		t.Fatal("fetchPlanUsage returned nil error for a failing child, want an error")
 	}
 }
@@ -262,7 +262,7 @@ func TestRefreshUsageCacheIsSingleFlight(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		go func() {
 			defer signalDone(done)
-			_, _ = refreshUsageCache(context.Background(), path, bin, now)
+			_, _ = refreshUsageCache(context.Background(), path, bin, "", now)
 		}()
 	}
 	for i := 0; i < 5; i++ {
@@ -331,7 +331,7 @@ func TestRefreshUsageCacheBacksOffAfterFailure(t *testing.T) {
 	bin := countingClaude(t, counter, "", 1)
 
 	now := time.Now()
-	if _, err := refreshUsageCache(context.Background(), path, bin, now); err == nil {
+	if _, err := refreshUsageCache(context.Background(), path, bin, "", now); err == nil {
 		t.Fatal("refreshUsageCache returned nil error for a failing fetch, want an error")
 	}
 	if n := spawnCount(t, counter); n != 1 {
@@ -341,7 +341,7 @@ func TestRefreshUsageCacheBacksOffAfterFailure(t *testing.T) {
 	// Every later attempt inside the window — this process's next tick, and
 	// any other pane's — must not spawn.
 	for _, after := range []time.Duration{time.Minute, 5 * time.Minute, usageTTL - time.Second} {
-		if _, err := refreshUsageCache(context.Background(), path, bin, now.Add(after)); err != nil {
+		if _, err := refreshUsageCache(context.Background(), path, bin, "", now.Add(after)); err != nil {
 			t.Errorf("refreshUsageCache at +%s returned %v, want the backoff reported as a plain cache read", after, err)
 		}
 		if n := spawnCount(t, counter); n != 1 {
@@ -350,7 +350,7 @@ func TestRefreshUsageCacheBacksOffAfterFailure(t *testing.T) {
 	}
 
 	// Past the window it tries again — the backoff is a delay, not a latch.
-	if _, err := refreshUsageCache(context.Background(), path, bin, now.Add(usageTTL+time.Minute)); err == nil {
+	if _, err := refreshUsageCache(context.Background(), path, bin, "", now.Add(usageTTL+time.Minute)); err == nil {
 		t.Error("refreshUsageCache past the backoff window returned nil error, want the failing fetch's error")
 	}
 	if n := spawnCount(t, counter); n != 2 {
@@ -375,7 +375,7 @@ func TestRefreshUsageCacheFailureKeepsGoodCache(t *testing.T) {
 	}
 
 	bin := countingClaude(t, counter, "", 1)
-	if _, err := refreshUsageCache(context.Background(), path, bin, now); err == nil {
+	if _, err := refreshUsageCache(context.Background(), path, bin, "", now); err == nil {
 		t.Fatal("want an error from the failing fetch")
 	}
 	got, _ := readUsageCache(path, now)
@@ -385,7 +385,7 @@ func TestRefreshUsageCacheFailureKeepsGoodCache(t *testing.T) {
 
 	// And during the backoff the stored rows are what callers get back, so a
 	// pane that restarts mid-outage still shows them.
-	served, err := refreshUsageCache(context.Background(), path, bin, now.Add(time.Minute))
+	served, err := refreshUsageCache(context.Background(), path, bin, "", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("refreshUsageCache inside the backoff = %v, want nil", err)
 	}
@@ -405,7 +405,7 @@ func TestRefreshUsageCacheSuccessClearsBackoff(t *testing.T) {
 	counter := filepath.Join(dir, "spawns")
 	now := time.Now()
 
-	if _, err := refreshUsageCache(context.Background(), path, countingClaude(t, counter, "", 1), now); err == nil {
+	if _, err := refreshUsageCache(context.Background(), path, countingClaude(t, counter, "", 1), "", now); err == nil {
 		t.Fatal("want an error from the failing fetch")
 	}
 	if !usageBackoffActive(path, now.Add(time.Minute)) {
@@ -413,7 +413,7 @@ func TestRefreshUsageCacheSuccessClearsBackoff(t *testing.T) {
 	}
 
 	good := countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0)
-	if _, err := refreshUsageCache(context.Background(), path, good, now.Add(usageTTL+time.Minute)); err != nil {
+	if _, err := refreshUsageCache(context.Background(), path, good, "", now.Add(usageTTL+time.Minute)); err != nil {
 		t.Fatalf("refreshUsageCache after the window: %v", err)
 	}
 	if usageBackoffActive(path, now.Add(usageTTL+time.Minute)) {
@@ -462,7 +462,7 @@ func TestRefreshUsageCacheKeepsSharedRowsWhenUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := refreshUsageCache(context.Background(), path, unavailableClaude(t, counter), now)
+	got, err := refreshUsageCache(context.Background(), path, unavailableClaude(t, counter), "", now)
 	if err != nil {
 		t.Fatalf("refreshUsageCache: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestRefreshUsageCacheUnavailableArmsNoBackoff(t *testing.T) {
 	counter := filepath.Join(dir, "spawns")
 	now := time.Now()
 
-	if _, err := refreshUsageCache(context.Background(), path, unavailableClaude(t, counter), now); err != nil {
+	if _, err := refreshUsageCache(context.Background(), path, unavailableClaude(t, counter), "", now); err != nil {
 		t.Fatalf("refreshUsageCache: %v", err)
 	}
 	if usageBackoffActive(path, now.Add(time.Second)) {
@@ -503,7 +503,7 @@ func TestRefreshUsageCacheUnavailableArmsNoBackoff(t *testing.T) {
 	}
 
 	good := countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0)
-	got, err := refreshUsageCache(context.Background(), path, good, now.Add(time.Second))
+	got, err := refreshUsageCache(context.Background(), path, good, "", now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("refreshUsageCache from a subscriber pane: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestUsageWindowsAgreeAcrossABackwardClockJump(t *testing.T) {
 	// the real clock: nothing may spawn while a future-stamped cache is inside
 	// the window.
 	t.Setenv("CLAUDEMUX_CLAUDE_BIN", countingClaude(t, counter, fixture(t, "get_usage_response.json"), 0))
-	_ = usageCmd(path, true)()
+	_ = usageCmd(path, "", true)()
 	if n := spawnCount(t, counter); n != 0 {
 		t.Errorf("spawned %d times against a future-stamped cache, want 0", n)
 	}
@@ -576,15 +576,74 @@ func TestUsageWindowsAgreeAcrossABackwardClockJump(t *testing.T) {
 	if usageStampFresh(now.Add(24*time.Hour), now) {
 		t.Error("usageStampFresh accepts a day-ahead stamp; a backoff marker carrying one could then wedge the poller off")
 	}
-	_ = usageCmd(ahead, true)()
+	_ = usageCmd(ahead, "", true)()
 	if n := spawnCount(t, counter); n != 1 {
 		t.Fatalf("spawned %d times for the day-ahead cache, want exactly 1", n)
 	}
 	if _, fresh := readUsageCache(ahead, now); !fresh {
 		t.Error("the refetch did not re-stamp the cache against the current clock: the machine would spawn again on the very next check")
 	}
-	_ = usageCmd(ahead, true)()
+	_ = usageCmd(ahead, "", true)()
 	if n := spawnCount(t, counter); n != 1 {
 		t.Errorf("spawned %d times by the second check, want still 1", n)
+	}
+}
+
+// childEnvClaude records whether CLAUDE_CONFIG_DIR reached the child, and its
+// value, then answers with a plain usage reply.
+func childEnvClaude(t *testing.T, out string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-claude")
+	script := "#!/bin/sh\n" +
+		"if [ \"${CLAUDE_CONFIG_DIR+set}\" = set ]; then echo \"set:$CLAUDE_CONFIG_DIR\" > " + out + "; else echo unset > " + out + "; fi\n" +
+		"cat <<'FAKEEOF'\n" + fixture(t, "get_usage_response.json") + "\nFAKEEOF\ncat >/dev/null\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestFetchPlanUsageSetsConfigDir(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/inherited/from/pane")
+	out := filepath.Join(t.TempDir(), "env")
+	bin := childEnvClaude(t, out)
+	now := time.Now()
+
+	if _, err := fetchPlanUsage(context.Background(), bin, "/accounts/bespoke", now); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(out); strings.TrimSpace(string(b)) != "set:/accounts/bespoke" {
+		t.Errorf("child env = %q, want CLAUDE_CONFIG_DIR=/accounts/bespoke", b)
+	}
+	if _, err := fetchPlanUsage(context.Background(), bin, "", now); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(out); strings.TrimSpace(string(b)) != "unset" {
+		t.Errorf("child env = %q, want CLAUDE_CONFIG_DIR removed for the ~/.claude account", b)
+	}
+}
+
+func TestUsageLocksAreSeparate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDEMUX_USAGE_CACHE_PATH", "")
+	a := usageCachePathFor("ameriglide", true)
+	b := usageCachePathFor("bespoke", true)
+	if a == b || a+".lock" == b+".lock" || usageFailMarkerPath(a) == usageFailMarkerPath(b) {
+		t.Fatalf("accounts share paths: %q %q", a, b)
+	}
+	if got, want := usageCachePathFor("x", false), filepath.Join(home, ".claude", "claudemux", "usage.json"); got != want {
+		t.Errorf("single = %q, want %q", got, want)
+	}
+	now := time.Now()
+	if err := os.MkdirAll(filepath.Dir(a), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markUsageFailure(a, now)
+	if !usageBackoffActive(a, now.Add(time.Second)) {
+		t.Fatal("failure marker did not back off its own account")
+	}
+	if usageBackoffActive(b, now.Add(time.Second)) {
+		t.Error("one account's failure marker blocks the other")
 	}
 }

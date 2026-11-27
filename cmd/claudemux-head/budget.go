@@ -398,8 +398,21 @@ func defaultRateLimitsPath() string {
 // to migrate to, and a stat per tick for the rest of the process would buy
 // nothing. Only a panel still holding the fallback pays for the re-resolve.
 func refreshedRateLimitsPath(cur string) string {
-	if cur == "" || cur == defaultStatuslineCachePath() {
+	// Only the abtop fallback is ever migrated away from, and it exists only
+	// for the legacy single-account path; per-account paths have no fallback.
+	home, err := os.UserHomeDir()
+	if cur == "" || err != nil || cur != filepath.Join(home, ".claude", "abtop-rate-limits.json") {
 		return cur
+	}
+	return defaultRateLimitsPath()
+}
+
+// sessionRateLimitsPath is the rate-limit cache a head or lobby reads for an
+// account. With several accounts it is that account's own file; otherwise the
+// legacy path with its abtop fallback.
+func sessionRateLimitsPath(account string, multi bool) string {
+	if multi && os.Getenv("CLAUDEMUX_RATE_LIMITS_PATH") == "" {
+		return rateLimitsPathFor(account, true)
 	}
 	return defaultRateLimitsPath()
 }

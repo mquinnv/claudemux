@@ -66,7 +66,7 @@ const usageTimeout = 20 * time.Second
 // no inference — the probe that established this returned total_cost_usd 0 and
 // an empty model_usage — so it spends no tokens and none of the limit it
 // reports.
-func fetchPlanUsage(ctx context.Context, claudeBin string, now time.Time) (PlanUsage, error) {
+func fetchPlanUsage(ctx context.Context, claudeBin, configDir string, now time.Time) (PlanUsage, error) {
 	ctx, cancel := context.WithTimeout(ctx, usageTimeout)
 	defer cancel()
 
@@ -84,7 +84,14 @@ func fetchPlanUsage(ctx context.Context, claudeBin string, now time.Time) (PlanU
 	// spawned from a head pane writes a phantom session into that pane's map
 	// entry. Everything else in the environment is kept — the OAuth profile
 	// resolution depends on HOME and CLAUDE_CONFIG_DIR.
-	cmd.Env = filterEnv(os.Environ(), "TMUX_PANE")
+	//
+	// CLAUDE_CONFIG_DIR is set to the account's dir, or removed for the
+	// ~/.claude account, so the poll reads the account the cache is keyed by
+	// rather than whatever the spawning pane happened to inherit.
+	cmd.Env = filterEnv(filterEnv(os.Environ(), "TMUX_PANE"), "CLAUDE_CONFIG_DIR")
+	if configDir != "" {
+		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+configDir)
+	}
 	// Run the child in its own process group so a timeout can kill the whole
 	// tree, not just the immediate child. Without this, a shelled-out claude
 	// wrapper (or the fake claude our tests use) can fork a descendant that
@@ -287,6 +294,24 @@ func usageClaudeBin() string {
 	return "claude"
 }
 
+// usageCachePathFor is the usage cache for an account: the legacy usage.json
+// when only one account exists, usage-<account>.json otherwise. The lock and
+// failure markers derive from it, so accounts never block one another.
+// CLAUDEMUX_USAGE_CACHE_PATH overrides everything.
+func usageCachePathFor(account string, multi bool) string {
+	if !multi {
+		return defaultUsageCachePath()
+	}
+	if p := os.Getenv("CLAUDEMUX_USAGE_CACHE_PATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "claudemux", "usage-"+account+".json")
+}
+
 func defaultUsageCachePath() string {
 	if p := os.Getenv("CLAUDEMUX_USAGE_CACHE_PATH"); p != "" {
 		return p
@@ -415,7 +440,7 @@ func clearUsageFailure(path string) { _ = os.Remove(usageFailMarkerPath(path)) }
 // race returns the current cache immediately instead of waiting. A caller
 // arriving inside the post-failure backoff window does the same, without
 // spawning anything.
-func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Time) (PlanUsage, error) {
+func refreshUsageCache(ctx context.Context, path, claudeBin, configDir string, now time.Time) (PlanUsage, error) {
 	lock := path + ".lock"
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return PlanUsage{}, err
@@ -441,7 +466,7 @@ func refreshUsageCache(ctx context.Context, path, claudeBin string, now time.Tim
 	f.Close()
 	defer os.Remove(lock)
 
-	usage, err := fetchPlanUsage(ctx, claudeBin, now)
+	usage, err := fetchPlanUsage(ctx, claudeBin, configDir, now)
 	if err != nil {
 		markUsageFailure(path, now)
 		return PlanUsage{}, err

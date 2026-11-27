@@ -68,10 +68,15 @@ func runStatusline(stdin io.Reader) int {
 		out.SevenDay.ResetsAt = w.ResetsAt
 	}
 
-	path := defaultStatuslineCachePath()
-	if path == "" {
-		return 0
+	for _, path := range statuslineWritePaths(loadClaudeConfig(), os.Getenv("CLAUDE_CONFIG_DIR")) {
+		writeRateLimitsCache(path, out)
 	}
+	return 0
+}
+
+// writeRateLimitsCache merges out into the cache at path (see
+// mergeRateLimitWrite) and installs the result atomically.
+func writeRateLimitsCache(path string, out rawRateLimitsFile) {
 	var prev *rawRateLimitsFile
 	if data, err := os.ReadFile(path); err == nil {
 		var p rawRateLimitsFile
@@ -81,12 +86,55 @@ func runStatusline(stdin io.Reader) int {
 	}
 	merged, write := mergeRateLimitWrite(prev, out, time.Now())
 	if !write {
-		return 0
+		return
 	}
-	if err := writeJSONAtomic(path, merged); err != nil {
-		return 0
+	_ = writeJSONAtomic(path, merged)
+}
+
+// statuslineWritePaths lists the caches this render belongs in. Implicit
+// single-account mode (and the explicit override) writes the legacy file
+// whatever CLAUDE_CONFIG_DIR says. With several accounts the render is
+// attributed by its config dir; the default account also feeds the legacy
+// file, and a dir that maps to no account writes nothing: never guess, or one
+// account's numbers land on another's meters.
+func statuslineWritePaths(cc ClaudeConfig, envDir string) []string {
+	if os.Getenv("CLAUDEMUX_RATE_LIMITS_PATH") != "" || !cc.Multi() {
+		if p := defaultStatuslineCachePath(); p != "" {
+			return []string{p}
+		}
+		return nil
 	}
-	return 0
+	acct, ok := cc.ForConfigDir(envDir)
+	if !ok {
+		return nil
+	}
+	var paths []string
+	if p := rateLimitsPathFor(acct, true); p != "" {
+		paths = append(paths, p)
+	}
+	if acct == cc.Default() {
+		if p := defaultStatuslineCachePath(); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// rateLimitsPathFor is the rate-limit cache for an account: the legacy
+// rate-limits.json when only one account exists, rate-limits-<account>.json
+// otherwise. CLAUDEMUX_RATE_LIMITS_PATH overrides everything.
+func rateLimitsPathFor(account string, multi bool) string {
+	if !multi {
+		return defaultStatuslineCachePath()
+	}
+	if p := os.Getenv("CLAUDEMUX_RATE_LIMITS_PATH"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "claudemux", "rate-limits-"+account+".json")
 }
 
 // statuslineLagWindow is how long a higher percentage outranks a lower one

@@ -396,3 +396,20 @@ func TestTrimSamplesKeepsBaseline(t *testing.T) {
 		t.Fatalf("trimSamples = %+v, want the -90m baseline and the -30m sample", got)
 	}
 }
+
+func TestRateLimitsPathFor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+	base := filepath.Join(home, ".claude", "claudemux")
+	if got, want := rateLimitsPathFor("default", false), filepath.Join(base, "rate-limits.json"); got != want {
+		t.Errorf("single = %q, want %q", got, want)
+	}
+	if got, want := rateLimitsPathFor("bespoke", true), filepath.Join(base, "rate-limits-bespoke.json"); got != want {
+		t.Errorf("multi = %q, want %q", got, want)
+	}
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "/tmp/o.json")
+	if got := rateLimitsPathFor("bespoke", true); got != "/tmp/o.json" {
+		t.Errorf("override = %q", got)
+	}
+}

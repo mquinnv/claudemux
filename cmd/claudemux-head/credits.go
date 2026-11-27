@@ -125,12 +125,12 @@ func fetchPrepaidCreditStatus(ctx context.Context, client *http.Client, base str
 
 // Resolve the active Claude profile without ever persisting its bearer token.
 // Custom profiles use their own config, secure store, and credit cache.
-func creditProfile() (org, dir string, err error) {
+func creditProfile(configDir string) (org, dir string, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", "", err
 	}
-	dir = os.Getenv("CLAUDE_CONFIG_DIR")
+	dir = configDir
 	config := filepath.Join(home, ".claude.json")
 	if dir == "" {
 		dir = filepath.Join(home, ".claude")
@@ -278,7 +278,7 @@ type creditMsg struct{ credits PrepaidCredits }
 // Use the first exhausted limits snapshot, rather than a timer that can run
 // before startup has loaded those limits. Read the shared cache frequently so
 // all views converge; refreshCreditCache bounds real network reads by a minute.
-func startCreditRefresh(rateOK bool, rl RateLimits, models []ModelWindow, loading *bool, checkedAt, now time.Time) tea.Cmd {
+func startCreditRefresh(rateOK bool, rl RateLimits, models []ModelWindow, loading *bool, checkedAt, now time.Time, configDir string) tea.Cmd {
 	if !rateOK || *loading || !exhaustedBudget(rl, models, now) {
 		return nil
 	}
@@ -286,7 +286,7 @@ func startCreditRefresh(rateOK bool, rl RateLimits, models []ModelWindow, loadin
 		return nil
 	}
 	*loading = true
-	return creditsCmd(true)
+	return creditsCmd(true, configDir)
 }
 
 func mergeCreditResult(previous, next PrepaidCredits, now time.Time) PrepaidCredits {
@@ -325,7 +325,7 @@ func exhaustedBudget(rl RateLimits, models []ModelWindow, now time.Time) bool {
 	return false
 }
 
-func creditsCmd(needed bool) tea.Cmd {
+func creditsCmd(needed bool, configDir string) tea.Cmd {
 	return func() tea.Msg {
 		if !needed {
 			return creditMsg{}
@@ -337,7 +337,7 @@ func creditsCmd(needed bool) tea.Cmd {
 				return creditMsg{}
 			}
 		}
-		org, dir, err := creditProfile()
+		org, dir, err := creditProfile(configDir)
 		if err != nil {
 			return creditMsg{}
 		}

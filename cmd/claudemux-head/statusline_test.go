@@ -213,3 +213,73 @@ func TestStatuslineLaggingWriterDoesNotLowerCache(t *testing.T) {
 		t.Errorf("five_hour = %v, want 22 held against the lagging 21", got.FiveHour.UsedPercentage)
 	}
 }
+
+// multiAccountHome writes a two-account config.yml (default=ameriglide, which
+// has a config dir; bespoke is the ~/.claude account) under a temp HOME and
+// returns the home and the claudemux cache dir.
+func multiAccountHome(t *testing.T) (home, cacheDir string) {
+	t.Helper()
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+	cfgDir := filepath.Join(home, ".config", "claudemux")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yml := "claude:\n  default_account: ameriglide\n  accounts:\n    ameriglide:\n      config_dir: ~/.claude-accounts/ameriglide\n    bespoke: {}\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return home, filepath.Join(home, ".claude", "claudemux")
+}
+
+func cacheFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+const statuslineTestPayload = `{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1787321400},"seven_day":{"used_percentage":62,"resets_at":1787605200}}}`
+
+func TestStatuslineWritesAccountFile(t *testing.T) {
+	home, cache := multiAccountHome(t)
+
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude-accounts", "ameriglide"))
+	runStatusline(strings.NewReader(statuslineTestPayload))
+	if got := strings.Join(cacheFiles(t, cache), ","); got != "rate-limits-ameriglide.json,rate-limits.json" {
+		t.Errorf("default account wrote %q, want its own file plus the legacy one", got)
+	}
+
+	os.RemoveAll(cache)
+	os.Unsetenv("CLAUDE_CONFIG_DIR")
+	runStatusline(strings.NewReader(statuslineTestPayload))
+	if got := strings.Join(cacheFiles(t, cache), ","); got != "rate-limits-bespoke.json" {
+		t.Errorf("non-default account wrote %q, want only rate-limits-bespoke.json", got)
+	}
+
+	os.RemoveAll(cache)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "somewhere-else"))
+	runStatusline(strings.NewReader(statuslineTestPayload))
+	if got := cacheFiles(t, cache); len(got) != 0 {
+		t.Errorf("unmappable dir wrote %v, want nothing", got)
+	}
+}
+
+// Ruling R1: with no claude: block the legacy file is written whatever
+// CLAUDE_CONFIG_DIR says.
+func TestStatuslineSingleAccountIgnoresConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CLAUDEMUX_RATE_LIMITS_PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "custom"))
+	runStatusline(strings.NewReader(statuslineTestPayload))
+	if got := strings.Join(cacheFiles(t, filepath.Join(home, ".claude", "claudemux")), ","); got != "rate-limits.json" {
+		t.Errorf("wrote %q, want rate-limits.json", got)
+	}
+}

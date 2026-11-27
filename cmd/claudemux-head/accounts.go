@@ -158,3 +158,53 @@ func (c ClaudeConfig) Validate() error {
 	}
 	return nil
 }
+
+// loadClaudeConfig returns the `claude:` block, or the implicit single-account
+// one when config.yml is missing or unreadable. The statusline command and the
+// heads must keep working through a broken config, so this never fails.
+func loadClaudeConfig() ClaudeConfig {
+	cfg, err := loadConfig()
+	if err != nil {
+		return ClaudeConfig{}
+	}
+	return cfg.Claude
+}
+
+// accountDirFor resolves an account's config dir. In the implicit single-
+// account mode there is no config to name a dir, so whatever
+// $CLAUDE_CONFIG_DIR says stays in force: that is what these callers did
+// before accounts existed.
+func accountDirFor(cc ClaudeConfig, name string) string {
+	dir, err := cc.ConfigDir(name)
+	if err != nil {
+		return ""
+	}
+	if len(cc.Accounts) == 0 {
+		return strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	}
+	return dir
+}
+
+// sessionAccountFor maps the running process's $CLAUDE_CONFIG_DIR to an
+// account, falling back to the default account when it maps to none.
+func sessionAccountFor(cc ClaudeConfig) (name, configDir string) {
+	if n, ok := cc.ForConfigDir(os.Getenv("CLAUDE_CONFIG_DIR")); ok {
+		return n, accountDirFor(cc, n)
+	}
+	n := cc.Default()
+	return n, accountDirFor(cc, n)
+}
+
+// sessionAccount is the account of the pane this head runs in; the launcher
+// starts the head pane with the account's env.
+func sessionAccount() (name, configDir string) {
+	return sessionAccountFor(loadClaudeConfig())
+}
+
+// lobbyAccount is the account the lobby meters follow: it runs outside any
+// session, so its env says nothing and the default account stands in.
+func lobbyAccount() (name, configDir string) {
+	cc := loadClaudeConfig()
+	n := cc.Default()
+	return n, accountDirFor(cc, n)
+}

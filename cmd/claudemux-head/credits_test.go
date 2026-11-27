@@ -230,22 +230,21 @@ func TestExplicitBearerCannotReadLocalCreditCache(t *testing.T) {
 	if err := writeJSONAtomic(path, PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if got := creditsCmd(true)().(creditMsg).credits; got.Amount == nil {
+	if got := creditsCmd(true, dir)().(creditMsg).credits; got.Amount == nil {
 		t.Fatal("test setup did not expose cached local balance")
 	}
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "explicit-bearer")
-	if got := creditsCmd(true)().(creditMsg).credits; got.Amount != nil || got.Enabled {
+	if got := creditsCmd(true, dir)().(creditMsg).credits; got.Amount != nil || got.Enabled {
 		t.Fatal("explicit bearer session borrowed local subscriber balance")
 	}
 }
 
 func TestCreditProfileUsesSelectedConfig(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", dir)
 	if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"oauthAccount":{"organizationUuid":"selected-org"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	org, gotDir, err := creditProfile()
+	org, gotDir, err := creditProfile(dir)
 	if err != nil || org != "selected-org" || gotDir != dir {
 		t.Fatalf("profile = %q, %q, %v", org, gotDir, err)
 	}
@@ -320,13 +319,13 @@ func TestCreditRefreshCadenceAndSingleFlight(t *testing.T) {
 	now := time.Now()
 	rl := RateLimits{SevenDay: Window{UsedPercent: 100, ResetsAt: now.Add(time.Hour)}}
 	loading := false
-	if startCreditRefresh(true, rl, nil, &loading, now.Add(-4*time.Second), now) != nil || loading {
+	if startCreditRefresh(true, rl, nil, &loading, now.Add(-4*time.Second), now, "") != nil || loading {
 		t.Fatal("reread cache too quickly")
 	}
-	if startCreditRefresh(true, rl, nil, &loading, now.Add(-5*time.Second), now) == nil || !loading {
+	if startCreditRefresh(true, rl, nil, &loading, now.Add(-5*time.Second), now, "") == nil || !loading {
 		t.Fatal("shared cache reread was skipped")
 	}
-	if startCreditRefresh(true, rl, nil, &loading, time.Time{}, now) != nil {
+	if startCreditRefresh(true, rl, nil, &loading, time.Time{}, now, "") != nil {
 		t.Fatal("overlapped an in-flight fetch")
 	}
 	knownOff := mergeCreditResult(PrepaidCredits{Enabled: true}, PrepaidCredits{FetchedAt: now}, now)
@@ -357,13 +356,13 @@ func TestStartupLockLoserReadsWinningBalanceOnNextPoll(t *testing.T) {
 			m := model{rateOK: true, rateLimits: rl}
 			u, _ := m.Update(creditMsg{loser})
 			m = u.(model)
-			if startCreditRefresh(true, rl, nil, &m.creditsLoading, m.creditCheckedAt, now.Add(time.Second)) == nil {
+			if startCreditRefresh(true, rl, nil, &m.creditsLoading, m.creditCheckedAt, now.Add(time.Second), "") == nil {
 				t.Fatal("head waited a minute after losing lock")
 			}
 			sw := swModel{}
 			s, _ := sw.Update(creditMsg{loser})
 			sw = s.(swModel)
-			if startCreditRefresh(true, rl, nil, &sw.creditsLoading, sw.creditCheckedAt, now.Add(time.Second)) == nil {
+			if startCreditRefresh(true, rl, nil, &sw.creditsLoading, sw.creditCheckedAt, now.Add(time.Second), "") == nil {
 				t.Fatal("switchboard waited a minute after losing lock")
 			}
 			winner := PrepaidCredits{Enabled: true, Amount: &amount, Currency: "USD", FetchedAt: now.Add(time.Second)}
@@ -379,5 +378,28 @@ func TestStartupLockLoserReadsWinningBalanceOnNextPoll(t *testing.T) {
 				t.Fatal("winning balance not picked up")
 			}
 		})
+	}
+}
+
+func TestCreditProfileUsesAccountDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// The env must not leak in: the dir is an argument now.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "elsewhere"))
+	acct := filepath.Join(home, "acct")
+	if err := os.MkdirAll(acct, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(acct, ".claude.json"), []byte(`{"oauthAccount":{"organizationUuid":"acct-org"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"oauthAccount":{"organizationUuid":"home-org"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if org, dir, err := creditProfile(acct); err != nil || org != "acct-org" || dir != acct {
+		t.Fatalf("account profile = %q, %q, %v", org, dir, err)
+	}
+	if org, dir, err := creditProfile(""); err != nil || org != "home-org" || dir != filepath.Join(home, ".claude") {
+		t.Fatalf("~/.claude profile = %q, %q, %v", org, dir, err)
 	}
 }

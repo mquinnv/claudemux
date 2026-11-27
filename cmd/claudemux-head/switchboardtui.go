@@ -323,6 +323,7 @@ type swModel struct {
 	// the per-model weekly rows come from the shared usage cache, refreshed by
 	// whichever pane's loop finds it stale first. Empty rows whenever that
 	// path is unavailable or broken, which must never affect the gauges above.
+	claudeConfigDir string
 	usageCachePath  string
 	modelWindows    []ModelWindow
 	credits         PrepaidCredits
@@ -445,11 +446,14 @@ type swModel struct {
 }
 
 func newSwModel(selfPane string) swModel {
+	acct, acctDir := lobbyAccount()
+	multi := loadClaudeConfig().Multi()
 	m := swModel{
-		selfPane:       selfPane,
-		cond:           newConductor(),
-		rateLimitsPath: defaultRateLimitsPath(),
-		usageCachePath: defaultUsageCachePath(),
+		selfPane:        selfPane,
+		cond:            newConductor(),
+		rateLimitsPath:  sessionRateLimitsPath(acct, multi),
+		usageCachePath:  usageCachePathFor(acct, multi),
+		claudeConfigDir: acctDir,
 	}
 	m.launchBin, m.launchBinOK = launchBinStamp()
 	m.restoreArchive = archiveRestoreOffer
@@ -507,7 +511,7 @@ func (m *swModel) toggleStandby() {
 // rows and a usage spawn can never delay a fleet poll.
 func (m swModel) Init() tea.Cmd {
 	return tea.Batch(accountCheckCmd(m.accountDirs), swPollCmd(m.selfPane, m.rateLimitsPath),
-		usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now())))
+		usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageMaySpawn(time.Now())))
 }
 
 // usageMaySpawn is the lobby's half of the head's gate: it may spawn a Claude
@@ -787,7 +791,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the heads' staleness window (conductStaleAfter) is sized against this
 		// beat, and mode toggles republish immediately on their own.
 		pub := publishConductCmd(conductMode(m.standby, m.cond.phase), time.Now())
-		creditCmd := startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.at)
+		creditCmd := startCreditRefresh(m.rateOK, m.rateLimits, m.modelWindows, &m.creditsLoading, m.creditCheckedAt, msg.at, m.claudeConfigDir)
 		// Schedule the next tick from here, not from swTickMsg: polls never
 		// overlap, and a slow tmux stretches the interval instead of queueing.
 		if msg.err != nil {
@@ -913,7 +917,7 @@ func (m swModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usageTickMsg:
 		// See the head's usageTickMsg case: the tick is a file read and never
 		// stops; usageMaySpawn is the only gate on spawning.
-		return m, usageCmd(m.usageCachePath, m.usageMaySpawn(time.Now()))
+		return m, usageCmd(m.usageCachePath, m.claudeConfigDir, m.usageMaySpawn(time.Now()))
 	case usageMsg:
 		if msg.err != nil {
 			// Keep whatever rows we already have and try again next tick; the
