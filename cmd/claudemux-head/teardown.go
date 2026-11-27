@@ -289,7 +289,8 @@ const teardownBlockedProbeInterval = 5 * time.Second
 // StateAsking (the hook-driven pending-AskUserQuestion state) counts as ended
 // for the same reason Awaiting does: the wrap-up's own confirmation question
 // is a resting point, and the worktree-gone condition still gates the second
-// press until it is answered.
+// press until it is answered. Without a worktree there is no such condition,
+// so the gates below also refuse while teardownAwaitingAnswer holds.
 func teardownTurnEnded(kind StateKind) bool {
 	switch kind {
 	case StateThinking, StateTool, StateCompacting:
@@ -298,19 +299,26 @@ func teardownTurnEnded(kind StateKind) bool {
 	return true
 }
 
+// teardownAwaitingAnswer reports whether claude is stopped on a question or a
+// permission prompt: the turn has paused, but the wrap-up has not finished.
+func teardownAwaitingAnswer(kind StateKind) bool {
+	return kind == StateAsking || kind == StateAwaiting
+}
+
 // teardownGateOpen reports whether the second `x` press should be offered.
 //
 // For a worktree session the worktree must be gone, which is the whole signal
 // that the wrap-up actually succeeded: a /done that bailed on uncommitted or
 // unpushed work leaves it standing, and the gate stays shut. A session that
 // was never in a worktree has no such evidence available, so it gates on the
-// turn ending alone.
+// turn really ending: not merely resting on a question the wrap-up is still
+// asking, which would otherwise publish `ready` and offer the kill over it.
 func teardownGateOpen(kind StateKind, inWorktree, worktreeGone bool) bool {
 	if !teardownTurnEnded(kind) {
 		return false
 	}
 	if !inWorktree {
-		return true
+		return !teardownAwaitingAnswer(kind)
 	}
 	return worktreeGone
 }
@@ -319,7 +327,8 @@ func teardownGateOpen(kind StateKind, inWorktree, worktreeGone bool) bool {
 // difference is the non-worktree arm: a manual `x` press has the user right
 // there watching, so turn-end suffices; an auto-armed teardown acts with
 // nobody at the wheel and needs the wrap-up's own success bar — clean tree,
-// nothing unpushed — before it may kill the session.
+// nothing unpushed — before it may kill the session. A pending question holds
+// it shut too: a clean tree says nothing about what the wrap-up is asking.
 func teardownAutoGateOpen(kind StateKind, inWorktree, worktreeGone bool, cleanReason string) bool {
 	if !teardownTurnEnded(kind) {
 		return false
@@ -327,7 +336,7 @@ func teardownAutoGateOpen(kind StateKind, inWorktree, worktreeGone bool, cleanRe
 	if inWorktree {
 		return worktreeGone
 	}
-	return cleanReason == ""
+	return !teardownAwaitingAnswer(kind) && cleanReason == ""
 }
 
 // teardownCommandSegment reduces a slash command to the part that identifies
