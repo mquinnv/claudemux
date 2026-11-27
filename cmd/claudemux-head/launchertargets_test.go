@@ -115,8 +115,8 @@ func TestLauncherDeclaresRestoreOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(src)
-	if !strings.Contains(s, `getopts "ndwWr:N:C:"`) {
-		t.Error(`getopts does not declare r:, N:, C:`)
+	if !strings.Contains(s, `getopts "ndwWr:a:N:C:"`) {
+		t.Error(`getopts does not declare r:, a:, N:, C:`)
 	}
 	body, ok := shellFuncBody(s, "create_session")
 	if !ok {

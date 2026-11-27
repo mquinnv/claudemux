@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch tmux sessions with a Claude Code environment.
-# Usage: claudemux [-n] [-d] [-w|-W] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]
+# Usage: claudemux [-n] [-d] [-w|-W] [-a account] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]
 #        claudemux version|config|project|hook ...   (passed to claudemux-head)
 #
 # Requires: tmux, claudemux-head (on PATH), git. Optional: op (1Password
@@ -66,18 +66,20 @@ worktree_mode_set() {
   WORKTREE_MODE="$1"
 }
 RESUME_ID=""
+ACCOUNT_FLAG=""
 EXACT_NAME=""
 CLAUDE_DIR=""
-while getopts "ndwWr:N:C:" opt; do
+while getopts "ndwWr:a:N:C:" opt; do
   case "$opt" in
     n) FORCE_NEW=true ;;
     d) DETACHED=true ;;
     w) worktree_mode_set force ;;
     W) worktree_mode_set skip ;;
     r) RESUME_ID="$OPTARG" ;;
+    a) ACCOUNT_FLAG="$OPTARG" ;;
     N) EXACT_NAME="$OPTARG" ;;
     C) CLAUDE_DIR="$OPTARG" ;;
-    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]" >&2; exit 1 ;;
+    *) echo "Usage: claudemux [-n] [-d] [-w|-W] [-a account] [-N name] [-r session-id] [-C dir] [switch|setup|dir|query ...]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -944,6 +946,19 @@ session_base_name() {
   printf '%s\n' "$base"
 }
 
+# account_env_prefix CONFIG_DIR — the env prefix that points a command at one
+# Claude account: CLAUDE_CONFIG_DIR=<dir> when the account has a config dir,
+# else an env(1) that unsets it (the ~/.claude account must not inherit the
+# launching shell's CLAUDE_CONFIG_DIR). A caller that puts it after `exec` must
+# lead with `env` when it starts with an assignment (see create_session).
+account_env_prefix() {
+  if [ -n "$1" ]; then
+    printf 'CLAUDE_CONFIG_DIR=%q ' "$1"
+  else
+    printf 'env -u CLAUDE_CONFIG_DIR '
+  fi
+}
+
 create_session() {
   local work_dir="$1"
   local session_name clone_suffix=""
@@ -971,6 +986,36 @@ create_session() {
     else
       attach "$session_name" "$work_dir"
     fi
+  fi
+
+  # Which Claude account this session runs on, decided by the head (flag, then a
+  # resumed session's account, then the project's claude_account, then the
+  # default). Resolved after the attach-to-existing branch above: switching to a
+  # running session starts no claude, so nothing is resolved or changed there.
+  # A failure is fatal, and happens before any tmux session exists.
+  local ACCOUNT="" ACCOUNT_DIR="" ACCOUNT_SRC="" acct_out acct_err acct_rc=0 acct_prefix
+  acct_err="$(mktemp)"
+  acct_out="$(claudemux-head account resolve --dir "$work_dir" \
+    ${ACCOUNT_FLAG:+--account "$ACCOUNT_FLAG"} ${RESUME_ID:+--resume "$RESUME_ID"} 2>"$acct_err")" || acct_rc=$?
+  if [ "$acct_rc" -ne 0 ]; then
+    sed 's/^/claudemux: /' "$acct_err" >&2
+    rm -f "$acct_err"
+    exit 1
+  fi
+  rm -f "$acct_err"
+  # Not `IFS=$'\t' read`: tab is IFS-whitespace, so the empty CONFIG_DIR of the
+  # ~/.claude account would collapse and shift SOURCE into it.
+  ACCOUNT="${acct_out%%$'\t'*}"
+  acct_out="${acct_out#*$'\t'}"
+  ACCOUNT_DIR="${acct_out%%$'\t'*}"
+  ACCOUNT_SRC="${acct_out#*$'\t'}"
+  # `exec` followed by a bare VAR=val is parsed as the program name (see the
+  # worktree_env note below), so an assignment prefix leads with env.
+  acct_prefix="$(account_env_prefix "$ACCOUNT_DIR")"
+  [ -n "$ACCOUNT_DIR" ] && acct_prefix="env $acct_prefix"
+  if [ -n "$ACCOUNT_DIR" ]; then
+    # Never blocks the launch: a failure only prints.
+    claudemux-head account sync-mcp "$ACCOUNT" >&2 || true
   fi
 
   # Project metadata (.claudemux.yml: color + name), passed to claude at launch:
@@ -1030,7 +1075,7 @@ create_session() {
   if worktree_requested "$work_dir"; then
     worktree_env="env CLAUDEMUX_WORKTREE_PENDING=1 "
   fi
-  claude_cmd="${worktree_env}${claude_cmd}"
+  claude_cmd="${acct_prefix}${worktree_env}${claude_cmd}"
 
   # claudemux-head (state line, meters, and the context rows below them) is
   # ALWAYS full window width and exactly $head_rows tall — the four
@@ -1100,6 +1145,13 @@ create_session() {
   tmux_new_session -d -s "$session_name" -c "$work_dir" "${size_args[@]+"${size_args[@]}"}"
   if [ -z "$EXACT_NAME" ]; then record_parent "$session_name"; fi
   claude_pane="$(tmux display-message -p -t "$session_name:0.0" '#{pane_id}')"
+  tmux set-option -t "$session_name:" @claudemux_account "$ACCOUNT"
+  tmux set -p -t "$claude_pane" @claudemux_account "$ACCOUNT"
+  if [ -n "$ACCOUNT_DIR" ]; then
+    tmux set-environment -t "$session_name:" CLAUDE_CONFIG_DIR "$ACCOUNT_DIR"
+  else
+    tmux set-environment -t "$session_name:" -r CLAUDE_CONFIG_DIR
+  fi
   shell_pane=""
   case "$layout" in
     shell-right)
@@ -1118,7 +1170,7 @@ create_session() {
       shell_pane="$(tmux split-window -h -l "$shell_size" -t "$claude_pane" -c "$work_dir" -P -F '#{pane_id}')"
       ;;
   esac
-  run_in_pane "$head_pane" "${worktree_env}$(printf '%q' "$head_bin")"
+  run_in_pane "$head_pane" "${acct_prefix}${worktree_env}$(printf '%q' "$head_bin")"
 
   # Record claude's exact command on its pane so claudemux-head can respawn
   # it later (the head's `c` key: restart claude, with or without --resume).
