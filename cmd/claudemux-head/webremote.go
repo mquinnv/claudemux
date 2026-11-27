@@ -35,8 +35,10 @@ import (
 // "Conduction" on the phone mirrors the lobby's conductor: the queue is the
 // same waitingQueue order (closing first, then oldest), and the page walks it
 // one session at a time. The summary model drafts replies for the session on screen
-// and prefetches drafts for the next stop in the queue, so each open can cost
-// two billed calls (remotesuggest.go); the keyboard is always there too.
+// and prefetches drafts for the next stop in the queue, so a view can start
+// up to two billed calls (this session's, and a prefetch for the next stop);
+// a prefetched stop costs nothing when you reach it (remotesuggest.go). The
+// keyboard is always there too.
 
 //go:embed webremote.html
 var webRemoteHTML []byte
@@ -293,6 +295,7 @@ func (r *webRemote) register(mux *http.ServeMux, tokenErr error) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
+		w.Header().Set("X-Frame-Options", webFrameOptions)
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		_, _ = w.Write(webRemoteHTML)
 	})
@@ -300,6 +303,8 @@ func (r *webRemote) register(mux *http.ServeMux, tokenErr error) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
+			w.Header().Set("X-Frame-Options", webFrameOptions)
 			if tokenErr != nil {
 				remoteError(w, http.StatusServiceUnavailable, "setup", setupReason)
 				return
@@ -370,7 +375,8 @@ type remoteSession struct {
 	// moved past is refused: an answer meant for one question must never
 	// land on the next. A send to a busy (non-waiting) session is allowed on
 	// purpose, to queue a follow-up; its episode then guards that working
-	// state the same way.
+	// state the same way, and only one follow-up is accepted per working
+	// episode.
 	Episode     string `json:"episode"`
 	Since       string `json:"since,omitempty"`
 	Topic       string `json:"topic,omitempty"`
@@ -617,10 +623,13 @@ type remoteSendReq struct {
 	Text    string `json:"text"`
 	// Replace sends C-u first instead of refusing to type over a draft. C-u
 	// clears the current input line, so a multi-line draft may not be fully
-	// cleared.
+	// cleared. When Escape dismissed a dialog first, Replace is not honoured
+	// in the same request: the server answers dismissed_draft and the page
+	// re-sends with replace.
 	Replace bool `json:"replace"`
 	// Escape dismisses an open dialog first, so the text goes in as a
-	// normal prompt instead.
+	// normal prompt instead. If the prompt behind the dialog holds a draft,
+	// the answer is dismissed_draft (see Replace).
 	Escape bool `json:"escape"`
 }
 
@@ -925,9 +934,14 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 		remoteError(w, http.StatusBadGateway, "tmux", "tmux: "+err.Error())
 		return
 	}
-	// The key may have moved a dialog on to its next question in the same
-	// episode, so the cached chips can belong to a question that is gone.
-	r.suggest.keyPressed(s.Name)
+	// A digit or Enter in an open dialog may have moved it on to its next
+	// question in the same episode, so the cached chips can belong to a
+	// question that is gone. Other keys (arrows, Tab, an Escape that
+	// interrupts a busy turn) leave the question in place, so the chips stay
+	// and no new billed call starts.
+	if remoteDialog(s.State) && (body.Key == "Enter" || (len(body.Key) == 1 && body.Key[0] >= '1' && body.Key[0] <= '9')) {
+		r.suggest.keyPressed(s.Name)
+	}
 	teardownLogf("remote: pressed %s in %s", body.Key, s.Name)
 	remoteJSON(w, remoteOK{OK: true})
 }
@@ -944,8 +958,9 @@ func (r *webRemote) handleDefer(w http.ResponseWriter, req *http.Request) {
 		remoteError(w, http.StatusBadRequest, "control", "the reason contains control characters")
 		return
 	}
-	if rs := []rune(body.Reason); len(rs) > remoteDeferReasonMaxRunes {
-		body.Reason = string(rs[:remoteDeferReasonMaxRunes])
+	if len([]rune(body.Reason)) > remoteDeferReasonMaxRunes {
+		remoteError(w, http.StatusBadRequest, "long", fmt.Sprintf("the reason is over %d characters", remoteDeferReasonMaxRunes))
+		return
 	}
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()

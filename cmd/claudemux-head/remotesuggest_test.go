@@ -298,6 +298,7 @@ func TestSuggestBackoffAPIErrors(t *testing.T) {
 		{suggestReason(&anthropic.Error{StatusCode: 500}), suggestRetryAfter},
 		{suggestErrAuth, suggestAuthRetry},
 		{suggestErrNoReplies, suggestNoRepliesRetry},
+		{suggestErrBadResp, suggestNoRepliesRetry},
 		{suggestErrNetwork, suggestRetryAfter},
 	} {
 		if got := suggestBackoff(tc.reason); got != tc.want {
@@ -356,7 +357,7 @@ func TestRemoteSuggestionsKeyPressedHold(t *testing.T) {
 }
 
 // A call already running when a key is pressed answers for the old screen:
-// finish discards it and the hold stays.
+// finishCall discards it and the hold stays.
 func TestRemoteSuggestionsKeyPressedDiscardsInFlight(t *testing.T) {
 	clock := &fakeClock{t: rt0}
 	s := idleSession()
@@ -367,7 +368,7 @@ func TestRemoteSuggestionsKeyPressedDiscardsInFlight(t *testing.T) {
 	waitFor(t, "the call to start", func() bool { return gen.begun() == 1 })
 	c.keyPressed(s.Name)
 	close(gen.gate(s.Since))
-	// The slot is given back only after finish has run.
+	// The slot is given back only after finishCall has run.
 	waitFor(t, "the call to finish", func() bool { return gen.finished() == 1 && len(c.sem) == 0 })
 	if st := c.get(s); st.Status != suggestStatusPending || len(st.Items) != 0 {
 		t.Fatalf("the in-flight result survived the key press: %+v", st)
@@ -378,6 +379,133 @@ func TestRemoteSuggestionsKeyPressedDiscardsInFlight(t *testing.T) {
 	clock.advance(suggestKeyHold)
 	if !c.needsCall(s) {
 		t.Error("needsCall false once the key hold has passed")
+	}
+}
+
+// seqSuggester holds each call until its own release, in start order, and
+// answers with whatever that release carries. Unlike gatedSuggester it can
+// tell apart two calls of the same episode.
+type seqSuggester struct {
+	mu       sync.Mutex
+	releases []chan []remoteSuggestion
+	started  int
+	done     int
+}
+
+// release returns call i's (0-based, start order) release channel.
+func (g *seqSuggester) release(i int) chan []remoteSuggestion {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.releaseLocked(i)
+}
+
+func (g *seqSuggester) releaseLocked(i int) chan []remoteSuggestion {
+	for len(g.releases) <= i {
+		g.releases = append(g.releases, make(chan []remoteSuggestion, 1))
+	}
+	return g.releases[i]
+}
+
+func (g *seqSuggester) SuggestReplies(context.Context, swSession, string, []string) ([]remoteSuggestion, error) {
+	g.mu.Lock()
+	r := g.releaseLocked(g.started)
+	g.started++
+	g.mu.Unlock()
+	items := <-r
+	g.mu.Lock()
+	g.done++
+	g.mu.Unlock()
+	return items, nil
+}
+
+func (g *seqSuggester) counts() (started, done int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.started, g.done
+}
+
+// A call superseded by a later call of the same episode is discarded even
+// once the hold is gone: call A starts, a key is pressed, the hold passes and
+// call B starts; A answering afterwards must not fill B's entry.
+func TestRemoteSuggestionsSupersededCallDiscarded(t *testing.T) {
+	clock := &fakeClock{t: rt0}
+	s := idleSession()
+	gen := &seqSuggester{}
+	c := newRemoteSuggestions(gen)
+	c.now = clock.now
+
+	c.ensure(s, nil, func() string { return "screen A" })
+	waitFor(t, "call A to start", func() bool { n, _ := gen.counts(); return n == 1 })
+	c.keyPressed(s.Name)
+	clock.advance(suggestKeyHold)
+	c.ensure(s, nil, func() string { return "screen B" })
+	waitFor(t, "call B to start", func() bool { n, _ := gen.counts(); return n == 2 })
+	time.Sleep(10 * time.Millisecond)
+	if n, _ := gen.counts(); n != 2 {
+		t.Fatalf("calls started = %d, want 2", n)
+	}
+
+	x := []remoteSuggestion{{Label: "x", Text: "answer for A"}}
+	y := []remoteSuggestion{{Label: "y", Text: "answer for B"}}
+	gen.release(0) <- x
+	// A has returned and given its slot back (B still holds one), so
+	// finishCall has run for A.
+	waitFor(t, "call A to finish", func() bool { _, d := gen.counts(); return d == 1 && len(c.sem) == 1 })
+	if st := c.get(s); st.Status != suggestStatusPending || len(st.Items) != 0 {
+		t.Fatalf("superseded call A filled the entry: %+v", st)
+	}
+
+	gen.release(1) <- y
+	waitFor(t, "call B's draft", func() bool { return c.get(s).Status == suggestStatusReady })
+	if st := c.get(s); !reflect.DeepEqual(st.Items, y) {
+		t.Errorf("items = %+v, want B's %+v", st.Items, y)
+	}
+}
+
+// A key press doesn't cut short a configuration back-off: an entry in error
+// "auth" or "api error 4xx" stays in error, and no call is due until its
+// back-off passes.
+func TestRemoteSuggestionsKeyPressedKeepsConfigBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		reason  string
+		backoff time.Duration
+	}{
+		{suggestErrAuth, suggestAuthRetry},
+		{"api error 404", suggestConfigRetry},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			clock := &fakeClock{t: rt0}
+			s := idleSession()
+			gen := &fakeSuggester{err: &suggestError{tc.reason, "nope"}}
+			c := newRemoteSuggestions(gen)
+			c.now = clock.now
+			c.ensure(s, nil, func() string { return "screen" })
+			waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusError })
+			if st := c.get(s); st.Error != tc.reason {
+				t.Fatalf("reason = %q, want %q", st.Error, tc.reason)
+			}
+
+			c.keyPressed(s.Name)
+			if st := c.get(s); st.Status != suggestStatusError || st.Error != tc.reason {
+				t.Fatalf("after keyPressed: %+v, want error %q", st, tc.reason)
+			}
+			clock.advance(suggestKeyHold + time.Second)
+			if c.needsCall(s) {
+				t.Error("needsCall once the key hold passed, inside the back-off")
+			}
+			clock.advance(tc.backoff - suggestKeyHold - 2*time.Second)
+			if c.needsCall(s) {
+				t.Error("needsCall just before the back-off ends")
+			}
+			c.ensure(s, nil, func() string { return "screen" })
+			if n := gen.count(); n != 1 {
+				t.Fatalf("calls = %d inside the back-off, want 1", n)
+			}
+			clock.advance(time.Second)
+			if !c.needsCall(s) {
+				t.Error("needsCall false once the back-off passed")
+			}
+		})
 	}
 }
 
@@ -557,6 +685,42 @@ func TestCleanSuggestions(t *testing.T) {
 	}
 	if n := drops[suggestDropOverMax]; n != 1 {
 		t.Errorf("drops[%q] = %d, want 1 (drops: %v)", suggestDropOverMax, n, drops)
+	}
+
+	// Placeholder text (see placeholderLine) is dropped, not sent.
+	ph, phDrops := cleanSuggestionsCounted([]remoteSuggestion{
+		{Label: "na", Text: "n/a"},
+		{Label: "angle", Text: "<next step>"},
+		{Label: "none", Text: "None"},
+		{Label: "ok", Text: "run the tests"},
+	}, false, nil)
+	if want := []remoteSuggestion{{Label: "ok", Text: "run the tests"}}; !reflect.DeepEqual(ph, want) {
+		t.Fatalf("placeholders:\n got %+v\nwant %+v", ph, want)
+	}
+	if n := phDrops[suggestDropPlaceholder]; n != 3 {
+		t.Errorf("drops[%q] = %d, want 3 (drops: %v)", suggestDropPlaceholder, n, phDrops)
+	}
+
+	// A label is clipped to suggestLabelRunes; the text it sends is not.
+	longLabel := strings.Repeat("é", suggestLabelRunes+5)
+	for _, dlg := range []bool{false, true} {
+		in := remoteSuggestion{Label: longLabel, Text: "ship it"}
+		if dlg {
+			in = remoteSuggestion{Label: longLabel, Key: "1"}
+		}
+		got := cleanSuggestions([]remoteSuggestion{in}, dlg, nil)
+		if len(got) != 1 {
+			t.Fatalf("dialog=%v long label: kept %d, want 1", dlg, len(got))
+		}
+		if n := len([]rune(got[0].Label)); n != suggestLabelRunes {
+			t.Errorf("dialog=%v long label: %d runes, want %d", dlg, n, suggestLabelRunes)
+		}
+		if want := truncateRunes(longLabel, suggestLabelRunes); got[0].Label != want {
+			t.Errorf("dialog=%v label = %q, want %q", dlg, got[0].Label, want)
+		}
+		if !dlg && got[0].Text != "ship it" {
+			t.Errorf("text = %q, want it unclipped", got[0].Text)
+		}
 	}
 
 	dialog := cleanSuggestions([]remoteSuggestion{

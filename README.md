@@ -415,12 +415,13 @@ the home screen.
 For each waiting session it shows:
 
 - **Suggested replies** (from the summary model, Haiku by default). These come
-  from the bottom of the session's screen, with the same key as the summaries. On a question or a
+  from the bottom of the session's screen, with the same API key as the summaries. On a question or a
   permission prompt, they're the options to pick, by number. When the session
   is waiting at its prompt, they're the next things you'd likely type. Tap one to send it.
   You get about two seconds to undo it, since a mis-tap on a phone is easy.
   Tap ✎ on a typed suggestion to load it into the keyboard and edit it first. There's at most one
-  successful call per waiting spell (a failed call retries after a back-off),
+  successful call per screen: a multi-question dialog drafts again after each
+  answer key you press, and a failed call retries after a back-off,
   and the next session in the queue is drafted while you read this one.
 - **Quick replies**, the canned answers in `web.replies` (default
   `yes, go ahead`, `continue`, `commit and push`), shown when the session is
@@ -436,10 +437,10 @@ For each waiting session it shows:
   replacing it. It never types over one silently. Replacing clears the input
   line (Ctrl-U), so a multi-line draft may not be cleared completely; the
   remote checks that the clear worked before typing, and refuses if it
-  didn't. When claude's prompt is in vim NORMAL mode, or the screen isn't
+  didn't (by then Ctrl-U has run, so part of the draft may already be gone). When claude's prompt is in vim NORMAL mode, or the screen isn't
   one it recognises, the remote refuses the send instead of offering to
   replace.
-- **Skip**, **Defer** (anything typed becomes the blocker) and **Esc** (shown on
+- **Skip**, **Defer** (anything typed, up to 200 characters, becomes the blocker) and **Esc** (shown on
   an open question, or as **Interrupt** on a busy session). Skip only
   affects the phone: the session comes back on its next waiting spell, or
   when nothing else is waiting. Defer is the lobby's `d`, so a session you
@@ -474,12 +475,14 @@ CLAUDEMUX_REMOTE_TOKEN=<16+ bytes, e.g. from openssl rand -hex 16>
 
 Open `http://<node>:7474/remote#token=<token>` on the phone once. The token is
 taken from the fragment (which never reaches the server), kept in the phone's
-browser storage, and stripped from the address bar. Without a token set, the
+browser storage, and stripped from the address bar (your browser's history may still keep
+the original link). Without a token set, the
 page loads and states what's wrong (token not set, or too short). Full
 details go only to the file named by `CLAUDEMUX_TEARDOWN_LOG`, which is off by
 default; set it in the lobby's environment before starting the lobby.
 Teammates who can see the status page can't drive anything without it. The remote shows *all* your sessions, including
-any that `hide_private_orgs` keeps off the status page.
+any that `hide_private_orgs` keeps off the status page, and drafts replies for
+them too, so their screens go to the summary model.
 
 Under the title, the lobby shows the same account budget meters as the head:
 the 5-hour and weekly rate-limit gauges with their reset times (and an

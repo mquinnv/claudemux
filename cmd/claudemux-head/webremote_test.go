@@ -48,6 +48,23 @@ type fakeRemoteTmux struct {
 	// the empty prompt). Set it to a draft to model a C-u that cleared
 	// nothing (a multi-line draft, a mode the remote misread).
 	clearScreen string
+	// events is every capture, write and settle sleep, in order ("capture
+	// %1", "keys %1 Escape", "sleep 400ms", ...): calls stays writes only so
+	// its many assertions are unaffected, and events checks the interleaving.
+	events []string
+}
+
+// sleep stands in for webRemote.sleep: it records the pause, never waits.
+func (f *fakeRemoteTmux) sleep(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "sleep "+d.String())
+}
+
+func (f *fakeRemoteTmux) eventLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
 }
 
 func (f *fakeRemoteTmux) captured() []string {
@@ -60,6 +77,7 @@ func (f *fakeRemoteTmux) capture(pane string, _ bool, _ int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.captures = append(f.captures, pane)
+	f.events = append(f.events, "capture "+pane)
 	if f.failCapture {
 		return "", errors.New("tmux down")
 	}
@@ -77,6 +95,7 @@ func (f *fakeRemoteTmux) typeText(pane, text string) error {
 		return errors.New("tmux down")
 	}
 	f.calls = append(f.calls, "type "+pane+" "+text)
+	f.events = append(f.events, "type "+pane+" "+text)
 	typing, release := f.typing, f.release
 	f.mu.Unlock()
 	if typing != nil {
@@ -95,6 +114,7 @@ func (f *fakeRemoteTmux) keys(pane string, keys ...string) error {
 		}
 	}
 	f.calls = append(f.calls, "keys "+pane+" "+strings.Join(keys, " "))
+	f.events = append(f.events, "keys "+pane+" "+strings.Join(keys, " "))
 	// An Esc closes a dialog: the fake shows the empty prompt behind it.
 	if len(keys) == 1 && keys[0] == "Escape" {
 		f.screens[pane] = idleScreen("")
@@ -118,6 +138,7 @@ func (f *fakeRemoteTmux) run(args []string) error {
 		return errors.New("tmux down")
 	}
 	f.calls = append(f.calls, "run "+strings.Join(args, " "))
+	f.events = append(f.events, "run "+strings.Join(args, " "))
 	return nil
 }
 
@@ -267,7 +288,7 @@ func newTestRemoteWith(t *testing.T, fleet *webFleet, gen remoteSuggester, token
 	r := newWebRemote(fleet, cfg, token, gen)
 	r.tmux = ft
 	r.vimMode = false
-	r.sleep = func(time.Duration) {}
+	r.sleep = ft.sleep
 	h := webHandlerWith(fleet, webAllow{}, func(mux *http.ServeMux) { r.register(mux, tokenErr) })
 	return r, ft, h
 }
@@ -476,6 +497,14 @@ func TestRemotePageHeaders(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
 	}
+	// The page holds the token and sends keystrokes: no other origin may
+	// frame it (clickjacking), by CSP and, for older browsers, X-Frame-Options.
+	if got := rec.Header().Get("X-Frame-Options"); got != webFrameOptions {
+		t.Errorf("X-Frame-Options = %q, want %q", got, webFrameOptions)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("Content-Security-Policy = %q, want frame-ancestors 'none'", csp)
+	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q", ct)
 	}
@@ -677,6 +706,20 @@ func TestRemoteSendIntoDialog(t *testing.T) {
 	want := []string{"keys %1 Escape", "type %1 use postgres", "keys %1 Enter"}
 	if got := ft.log(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	// The pauses sit where they matter: after the Esc (so the capture sees
+	// the prompt, not the closing dialog) and between typing and Enter.
+	// The refused first send captured nothing, so the log starts at the Esc.
+	order := []string{
+		"keys %1 Escape",
+		"sleep " + remoteEscapeSettle.String(),
+		"capture %1",
+		"type %1 use postgres",
+		"sleep " + teardownKeyDelay.String(),
+		"keys %1 Enter",
+	}
+	if got := ft.eventLog(); !reflect.DeepEqual(got, order) {
+		t.Fatalf("events = %q, want %q", got, order)
 	}
 }
 
@@ -1457,6 +1500,31 @@ func TestRemotePrefetchSkipsWhenNoCallIsDue(t *testing.T) {
 	}
 }
 
+// A next stop whose screen can't be read is skipped, not drafted from an
+// empty capture: no entry is made for it, so its own visit still drafts it.
+func TestRemotePrefetchSkipsUnreadableScreen(t *testing.T) {
+	s := idleSession()
+	next := swSession{Name: "b", State: "Idle", Since: rt0.Add(time.Minute), ClaudePane: "%2", Context: -1}
+	gen := &fakeSuggester{out: []remoteSuggestion{{Label: "run tests", Text: "run the tests"}}}
+	r, ft, h := newTestRemote(t, testFleet(s, next), gen)
+	ft.screens["%1"] = idleScreen("") // %2 has no screen: its capture fails
+
+	decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+	waitFor(t, "suggestions for a", func() bool { return r.suggest.get(s).Status == suggestStatusReady })
+	if got := ft.captured(); !reflect.DeepEqual(got, []string{"%1", "%2"}) {
+		t.Fatalf("captures = %q, want a's then the prefetch's attempt at b", got)
+	}
+	if n := suggestEntryCount(r.suggest); n != 1 {
+		t.Fatalf("suggest entries = %d, want 1 (a only, none for unreadable b)", n)
+	}
+	if !r.suggest.needsCall(next) {
+		t.Error("needsCall false for b after a failed prefetch: its visit would not draft it")
+	}
+	if gen.count() != 1 {
+		t.Fatalf("suggest calls = %d, want 1 (a only)", gen.count())
+	}
+}
+
 // startSwitchboardWeb with web.control on: the page always loads, and the
 // API answers 503 setup until a usable token is present.
 func TestStartSwitchboardWebWithControl(t *testing.T) {
@@ -1848,34 +1916,62 @@ func TestRemoteAnsweredEpisodeIsNotAnsweredTwice(t *testing.T) {
 	})
 }
 
-// A key can move a dialog on to its next question in the same episode, so
-// the chips drafted for the old question are dropped: the next poll shows
-// pending with no items rather than replies to a question that is gone.
+// A digit or Enter can move a dialog on to its next question in the same
+// episode, so the chips drafted for the old question are dropped: the next
+// poll shows pending with no items rather than replies to a question that is
+// gone. Keys that only move the cursor, and keys that never reached the pane,
+// leave the chips alone.
 func TestRemoteKeyDropsSuggestions(t *testing.T) {
-	s := idleSession()
-	s.State = "Tool:AskUserQuestion"
-	gen := &fakeSuggester{out: []remoteSuggestion{{Label: "postgres", Text: "use postgres"}}}
-	r, ft, h := newTestRemote(t, testFleet(s), gen)
-	// A frozen clock keeps the post-key hold from expiring mid-test.
-	clock := &fakeClock{t: rt0}
-	r.suggest.now = clock.now
-	ft.screens["%1"] = dialogScreen()
+	for _, tc := range []struct {
+		what    string
+		key     string
+		failKey bool
+		code    int
+		drops   bool
+	}{
+		{"a digit picks an option", "1", false, http.StatusOK, true},
+		{"Enter confirms the option", "Enter", false, http.StatusOK, true},
+		{"Down only moves the cursor", "Down", false, http.StatusOK, false},
+		{"a key tmux failed to send", "1", true, http.StatusBadGateway, false},
+	} {
+		s := idleSession()
+		s.State = "Tool:AskUserQuestion"
+		// In a dialog the chips are option picks, so they carry a Key.
+		gen := &fakeSuggester{out: []remoteSuggestion{{Label: "postgres", Key: "1"}}}
+		r, ft, h := newTestRemote(t, testFleet(s), gen)
+		// A frozen clock keeps the post-key hold from expiring mid-test.
+		clock := &fakeClock{t: rt0}
+		r.suggest.now = clock.now
+		ft.screens["%1"] = dialogScreen()
 
-	decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
-	waitFor(t, "suggestions for a", func() bool { return r.suggest.get(s).Status == suggestStatusReady })
-	v := decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
-	if v.Suggestions.Status != suggestStatusReady || len(v.Suggestions.Items) != 1 {
-		t.Fatalf("before the key: suggestions = %+v, want ready with one item", v.Suggestions)
-	}
+		decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+		waitFor(t, "suggestions for a", func() bool { return r.suggest.get(s).Status == suggestStatusReady })
+		v := decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+		if v.Suggestions.Status != suggestStatusReady || len(v.Suggestions.Items) != 1 {
+			t.Fatalf("%s: before the key: suggestions = %+v, want ready with one item", tc.what, v.Suggestions)
+		}
 
-	rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
-		remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: "1"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("key: got %d %s", rec.Code, rec.Body)
-	}
-	v = decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
-	if v.Suggestions.Status != suggestStatusPending || len(v.Suggestions.Items) != 0 {
-		t.Fatalf("after the key: suggestions = %+v, want pending with no items", v.Suggestions)
+		if tc.failKey {
+			ft.set(func(f *fakeRemoteTmux) { f.failKeys = map[string]bool{tc.key: true} })
+		}
+		rec := remoteDo(t, h, "POST", "/api/remote/key", testRemoteToken,
+			remoteKeyReq{Name: "a", Episode: remoteEpisode(s), Key: tc.key})
+		if rec.Code != tc.code {
+			t.Fatalf("%s: key: got %d %s, want %d", tc.what, rec.Code, rec.Body, tc.code)
+		}
+		v = decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
+		if tc.drops {
+			if v.Suggestions.Status != suggestStatusPending || len(v.Suggestions.Items) != 0 {
+				t.Errorf("%s: after the key: suggestions = %+v, want pending with no items", tc.what, v.Suggestions)
+			}
+			continue
+		}
+		if v.Suggestions.Status != suggestStatusReady || len(v.Suggestions.Items) != 1 {
+			t.Errorf("%s: after the key: suggestions = %+v, want still ready with one item", tc.what, v.Suggestions)
+		}
+		if gen.count() != 1 {
+			t.Errorf("%s: suggest calls = %d, want 1 (the chips kept, not redrafted)", tc.what, gen.count())
+		}
 	}
 }
 
@@ -2070,7 +2166,7 @@ func TestExecRemoteTmuxTypeTextSingleLine(t *testing.T) {
 }
 
 // The defer reason is shown at the desk and on the phone: control characters
-// are refused, and an over-long reason is cut to 200 runes.
+// are refused, and so is a reason over remoteDeferReasonMaxRunes.
 func TestRemoteDeferReason(t *testing.T) {
 	_, ft, h := newTestRemote(t, testFleet(idleSession()), nil)
 	for _, reason := range []string{"ci\x1b[2J", "ding\x07", "a\u009bb"} {
@@ -2082,14 +2178,23 @@ func TestRemoteDeferReason(t *testing.T) {
 	if got := ft.log(); len(got) != 0 {
 		t.Fatalf("refused defers ran tmux: %q", got)
 	}
-	long := strings.Repeat("é", 300)
+	long := strings.Repeat("é", remoteDeferReasonMaxRunes+1)
 	rec := remoteDo(t, h, "POST", "/api/remote/defer", testRemoteToken, remoteDeferReq{Name: "a", On: true, Reason: long})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("long reason: got %d %s", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest || remoteCode(t, rec) != "long" {
+		t.Fatalf("long reason: got %d %s, want 400 long", rec.Code, rec.Body)
 	}
-	want := "run " + strings.Join(deferArgs("%0", true, strings.Repeat("é", 200)), " ")
+	if got := ft.log(); len(got) != 0 {
+		t.Fatalf("refused long reason ran tmux: %q", got)
+	}
+	// At the cap (counted in runes, not bytes) it goes through whole.
+	atCap := strings.Repeat("é", remoteDeferReasonMaxRunes)
+	rec = remoteDo(t, h, "POST", "/api/remote/defer", testRemoteToken, remoteDeferReq{Name: "a", On: true, Reason: atCap})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reason at the cap: got %d %s", rec.Code, rec.Body)
+	}
+	want := "run " + strings.Join(deferArgs("%0", true, atCap), " ")
 	if got := ft.log(); len(got) != 1 || got[0] != want {
-		t.Fatalf("calls = %q, want the reason cut to 200 runes", got)
+		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }
 

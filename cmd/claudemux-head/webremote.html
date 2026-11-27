@@ -380,7 +380,13 @@ async function api(path, body) {
     try { data = await res.json(); }
     catch (e) {
       if (ctl.signal.aborted) { console.error('reading ' + path + ' timed out:', e); throw lost(); }
-      if (res.ok) { console.error('bad JSON from ' + path + ':', e); throw new ApiError(res.status, 'badjson', 'lobby sent an unexpected response'); }
+      if (res.ok) {
+        console.error('bad JSON from ' + path + ':', e);
+        // A POST the lobby answered with 2xx almost certainly landed:
+        // treat it like a lost answer, so the page refreshes before a retry.
+        if (isPost) throw lost();
+        throw new ApiError(res.status, 'badjson', 'lobby sent an unexpected response');
+      }
     }
     if (!res.ok) throw new ApiError(res.status, (data && data.code) || 'http', (data && data.message) || ('HTTP ' + res.status));
     return data;
@@ -399,7 +405,8 @@ const isHeld = s => (S.skipped.get(s.name) === s.episode) || (S.answered.get(s.n
 // A pinned session (opened from the list) stays on screen even once
 // answered: you chose that one.
 // A draft in the composer holds the current session — it never yanks the
-// screen out from under your thumbs.
+// screen out from under your thumbs. A deferred session is skipped, like
+// a held one, unless a draft holds it.
 function pickCurrent() {
   if (S.pinned) {
     if (byName(S.pinned)) return S.pinned;
@@ -440,6 +447,21 @@ function pageError(e) {
   S.apiError = 'page error: ' + e.message;
   try { render(); } catch (e2) { console.error('render failed again:', e2); }
 }
+
+// Anything that escapes a handler (an async onclick that throws, a render
+// error outside the poll loop) lands in the banner too. pageError itself
+// never throws out of render, but guard against re-entry anyway so a
+// failing render can't bounce between these handlers.
+let inGlobalError = false;
+function globalError(e) {
+  if (inGlobalError) { console.error('error while reporting an error:', e); return; }
+  inGlobalError = true;
+  try { pageError(e instanceof Error ? e : new Error(String(e))); }
+  catch (e2) { console.error('pageError failed:', e2); }
+  finally { inGlobalError = false; }
+}
+window.addEventListener('unhandledrejection', ev => globalError(ev.reason));
+window.addEventListener('error', ev => globalError(ev.error || ev.message));
 
 async function pollQueue() {
   clearTimeout(queueTimer);
@@ -522,6 +544,16 @@ function handleApiFailure(e) {
   render();
 }
 
+// A write that failed for a reason about the session going away or the
+// lobby as a whole (not this one action): route it like a poll failure.
+// Returns true when it handled e. "gone" is a 404 too, so it is checked
+// before the global test, which would read 404 as "remote is off".
+function handleWriteFailure(e) {
+  if (e.code === 'gone') { toast(e.message, { err: true }); pollQueue(); return true; }
+  if (isGlobalFailure(e)) { handleApiFailure(e); return true; }
+  return false;
+}
+
 // With no token yet, ask the lobby once anyway: if it isn't set up for
 // remote control, say so before asking for a token it can't accept.
 async function probeSetup() {
@@ -594,7 +626,7 @@ async function doSend(name, episode, text, opts = {}) {
     } else if (e.code === 'unconfirmed') {
       // It may have landed: refresh now so the screen shows whether it did.
       toast(e.message, { err: true, duration: 8000 }); pollDetail();
-    } else {
+    } else if (!handleWriteFailure(e)) {
       toast(e.message, { err: true });
     }
   }
@@ -629,6 +661,7 @@ async function doKey(name, episode, key, advance, okMsg) {
     pollDetail();
   } catch (e) {
     if (e.code === 'unconfirmed') { toast(e.message, { err: true, duration: 8000 }); pollDetail(); return; }
+    if (handleWriteFailure(e)) return;
     toast(e.message, { err: true });
     if (e.code === 'moved') pollQueue();
   }
@@ -803,8 +836,10 @@ function renderDetail() {
       box.append(el('div', 'note bad', 'Suggestions are rate-limited; retrying shortly.'));
     } else if (sg.status === 'error' && sg.error === 'network') {
       box.append(el('div', 'note bad', 'Suggestions failed (can’t reach the API) — retrying shortly.'));
-    } else if (sg.status === 'error' && sg.error && sg.error.startsWith('api error 4')) {
+    } else if (sg.status === 'error' && sg.error && sg.error.startsWith('api error 404')) {
       box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request — check summary.model. Retrying in a few minutes.'));
+    } else if (sg.status === 'error' && sg.error && sg.error.startsWith('api error 4')) {
+      box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request (CLAUDEMUX_TEARDOWN_LOG has the details). Retrying in a few minutes.'));
     } else if (sg.status === 'error' && sg.error === 'busy') {
       box.append(el('div', 'note', 'Suggestions are queued behind other drafts — retrying shortly.'));
     } else if (sg.status === 'error' && sg.error !== 'no usable replies') {
@@ -1054,7 +1089,16 @@ $('deferBtn').onclick = async () => {
     if (on) { input.value = ''; autosize(); toast('Deferred ' + s.name + (reason ? ': ' + reason : ''), { duration: 1600 }); }
     else toast('Undeferred ' + s.name, { duration: 1400 });
     pollQueue();
-  } catch (e) { toast(e.message, { err: true }); }
+  } catch (e) {
+    if (e.code === 'long') {
+      // The reason stays in the composer (it's only cleared on success).
+      toast('Not deferred: ' + e.message + '. Shorten the reason and try again.', { err: true, duration: 6000 });
+    } else if (e.code === 'unconfirmed') {
+      toast(e.message, { err: true, duration: 8000 }); pollQueue();
+    } else if (!handleWriteFailure(e)) {
+      toast(e.message, { err: true });
+    }
+  }
 };
 $('conductBtn').onclick = () => { S.conduct = !S.conduct; if (S.conduct) S.pinned = null; pollQueue(); render(); };
 
