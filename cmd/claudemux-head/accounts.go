@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -207,4 +208,31 @@ func lobbyAccount() (name, configDir string) {
 	cc := loadClaudeConfig()
 	n := cc.Default()
 	return n, accountDirFor(cc, n)
+}
+
+// accountPalette mirrors the named palette in bin/project-color-resolve.sh
+// (Claude Code's /color set); keep the two in step.
+var accountPalette = []struct{ name, hex string }{
+	{"red", "#ff4d4d"}, {"blue", "#4d79ff"}, {"green", "#4dd24d"}, {"yellow", "#ffd24d"},
+	{"purple", "#b34dff"}, {"orange", "#ff944d"}, {"pink", "#ff4dd2"}, {"cyan", "#4dd2d2"},
+}
+
+// accountColor returns the account's display colour as "#rrggbb": its
+// configured color (a palette name or hex) when valid, otherwise a stable pick
+// from the palette by hashing the account name.
+func accountColor(cfg ClaudeConfig, name string) string {
+	raw := strings.TrimSpace(cfg.Accounts[name].Color)
+	if raw != "" {
+		for _, c := range accountPalette {
+			if raw == c.name {
+				return c.hex
+			}
+		}
+		if h := strings.TrimPrefix(raw, "#"); isHex6(h) {
+			return "#" + strings.ToLower(h)
+		}
+	}
+	h := fnv.New32a()
+	h.Write([]byte(name))
+	return accountPalette[h.Sum32()%uint32(len(accountPalette))].hex
 }
