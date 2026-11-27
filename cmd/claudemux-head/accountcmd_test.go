@@ -131,3 +131,27 @@ func TestAccountResolveCLI(t *testing.T) {
 		t.Errorf("record: code=%d out=%q", code, out)
 	}
 }
+
+func TestProjectAccountForIgnoresUnconfigured(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".project.yml"), []byte("claude_account: bespoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	multi := ClaudeConfig{DefaultAccount: "a", Accounts: map[string]ClaudeAccount{"a": {ConfigDir: "/a"}, "bespoke": {}}}
+	var buf bytes.Buffer
+	if got := projectAccountFor(multi, dir, &buf); got != "bespoke" || buf.Len() != 0 {
+		t.Errorf("configured: got %q, stderr %q", got, buf.String())
+	}
+	for name, cfg := range map[string]ClaudeConfig{
+		"implicit":    {},
+		"other accts": {DefaultAccount: "a", Accounts: map[string]ClaudeAccount{"a": {}}},
+	} {
+		buf.Reset()
+		if got := projectAccountFor(cfg, dir, &buf); got != "" {
+			t.Errorf("%s: got %q, want \"\"", name, got)
+		}
+		if !strings.Contains(buf.String(), `"bespoke"`) || !strings.Contains(buf.String(), ".project.yml") {
+			t.Errorf("%s: warning %q", name, buf.String())
+		}
+	}
+}

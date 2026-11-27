@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 )
 
 // accountChoice is the account a session runs on. Source says why:
@@ -107,11 +108,29 @@ func runAccountResolve(args []string, stdout, stderr io.Writer) int {
 	recDir := sessionRecordDir()
 	c, err := resolveAccount(cfg.Claude, *dir, *acct, *resume,
 		func(id string) (string, bool) { return recordedAccount(recDir, id) },
-		func(d string) string { return projectField(d, "claude_account") })
+		func(d string) string { return projectAccountFor(cfg.Claude, d, stderr) })
 	if err != nil {
 		fmt.Fprintf(stderr, "claudemux-head: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\n", c.Name, c.ConfigDir, c.Source)
 	return 0
+}
+
+// projectAccountFor reads the project's claude_account and drops a name this
+// machine has not configured, with a warning. The project file is committed and
+// shared, so it can name an account a teammate (or a machine with no claude:
+// block) does not have; that must not stop their launches. A bad -a or a bad
+// record name still fails, because only this user put those there.
+func projectAccountFor(cfg ClaudeConfig, dir string, stderr io.Writer) string {
+	name := projectField(dir, "claude_account")
+	if name == "" {
+		return ""
+	}
+	if _, err := cfg.ConfigDir(name); err != nil {
+		fmt.Fprintf(stderr, "claudemux: %s names claude account %q, which is not configured here; using %s\n",
+			filepath.Base(projectConfigPath(dir)), name, cfg.Default())
+		return ""
+	}
+	return name
 }

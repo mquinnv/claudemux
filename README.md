@@ -1076,7 +1076,9 @@ The account for a launch is, highest first: `claudemux -a <account>`,
 `claude_account: <name>` in the project's `.claudemux.yml` (or `.project.yml`), then
 `claude.default_account`. `default_account` is required once any account is declared:
 leaving it unset, or naming an account that isn't listed, is a startup error. An unknown
-name anywhere is an error that names it. The account covers the whole tmux session (shell
+`-a` name is an error that names it. A project file that names an account this machine
+hasn't configured is skipped with a warning, so a committed `claude_account` never
+blocks a teammate's launch. The account covers the whole tmux session (shell
 pane and hooks included). Handoffs resolve the *target* project's account. With more than
 one account configured, sessions show an account badge and the lobby shows a meter row
 per account; an account whose meters can't be read yet shows `meters unavailable`.

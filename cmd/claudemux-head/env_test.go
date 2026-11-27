@@ -19,7 +19,16 @@ import (
 // future) that forgets to.
 func TestMain(m *testing.M) {
 	os.Setenv("CLAUDEMUX_ENV", filepath.Join(os.TempDir(), "claudemux-head-absent-env"))
-	os.Exit(m.Run())
+	// Keep the developer's real ~/.config/claudemux out of the suite: a claude:
+	// block there turns on multi-account rendering and breaks view goldens.
+	xdg, err := os.MkdirTemp("", "claudemux-head-xdg")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_CONFIG_HOME", xdg)
+	code := m.Run()
+	os.RemoveAll(xdg)
+	os.Exit(code)
 }
 
 func writeEnvFile(t *testing.T, contents string) string {
