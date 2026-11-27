@@ -90,7 +90,10 @@ const (
 // Failure reasons shown on the page (remoteSuggestState.Error). Short and
 // sanitized: the full error goes to the log only. suggestErrAPI is a prefix:
 // the reason is "api error <status>", e.g. "api error 404", for an API status
-// with no reason of its own. suggestErrBusy is running out of time while
+// with no reason of its own, followed by ": <type>: <message>" from the API's
+// error body when it has one, e.g. "api error 400: invalid_request_error:
+// Your credit balance is too low" (see apiErrorDetail). Callers match on the
+// "api error <status>" prefix only. suggestErrBusy is running out of time while
 // waiting for a call slot, as distinct from a slow API call (timeout).
 const (
 	suggestErrAuth      = "auth"
@@ -130,7 +133,11 @@ func suggestReason(err error) string {
 		case 408, 504:
 			return suggestErrTimeout
 		}
-		return fmt.Sprintf("%s %d", suggestErrAPI, ae.StatusCode)
+		reason := fmt.Sprintf("%s %d", suggestErrAPI, ae.StatusCode)
+		if d := apiErrorDetail(ae.RawJSON()); d != "" {
+			reason += ": " + d
+		}
+		return reason
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return suggestErrTimeout
@@ -151,6 +158,38 @@ func suggestReason(err error) string {
 		return suggestErrNetwork
 	}
 	return suggestErrInternal
+}
+
+// suggestAPIDetailRunes caps the API error detail appended to an
+// "api error <status>" reason.
+const suggestAPIDetailRunes = 120
+
+// apiErrorDetail is "<type>: <message>" from an API error body of the form
+// {"error":{"type":...,"message":...}}, whitespace collapsed and clipped to
+// suggestAPIDetailRunes; either half alone when the other is missing. It is
+// "" when the body doesn't parse, carries neither, or contains a control
+// character, so the reason falls back to plain "api error <status>".
+func apiErrorDetail(raw string) string {
+	var body struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if raw == "" || json.Unmarshal([]byte(raw), &body) != nil {
+		return ""
+	}
+	typ, msg := body.Error.Type, body.Error.Message
+	if hasControlRunes(typ) || hasControlRunes(msg) {
+		return ""
+	}
+	var parts []string
+	for _, p := range []string{collapseWhitespace(typ), collapseWhitespace(msg)} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return truncateRunes(strings.Join(parts, ": "), suggestAPIDetailRunes)
 }
 
 var suggestSystemPrompt = `You draft one-tap replies that a developer sends from their PHONE to a Claude Code session that is waiting on them. You see the bottom of the session's terminal and its state.
@@ -411,7 +450,8 @@ func tailRunes(s string, n int) string {
 //     next call waits out suggestKeyHold;
 //   - ready: Items holds the drafted replies;
 //   - error: Error is the short reason, a suggestErr* value ("api error"
-//     carries the HTTP status, e.g. "api error 404"). Besides the call's own
+//     carries the HTTP status and, when the body has them, the API's error
+//     type and message, e.g. "api error 404: not_found_error: ..."). Besides the call's own
 //     failures this includes "no pane" and "no screen", which handleSession
 //     sets when there is nothing to draft from; SuggestReplies also returns
 //     "no screen" for an empty capture.

@@ -234,14 +234,72 @@ func TestSuggestRepliesAPIErrors(t *testing.T) {
 		{401, "authentication_error", suggestErrAuth},
 		{403, "permission_error", suggestErrAuth},
 		{429, "rate_limit_error", suggestErrRateLimit},
-		{404, "not_found_error", "api error 404"},
-		{400, "invalid_request_error", "api error 400"},
+		{404, "not_found_error", "api error 404: not_found_error: nope"},
+		{400, "invalid_request_error", "api error 400: invalid_request_error: nope"},
 	} {
 		api := newFakeMessagesAPI(t, tc.status, apiErrorBody(tc.kind))
 		_, err := api.summarizer().SuggestReplies(context.Background(), waitingSession("Idle"), "screen", nil)
 		if got := suggestReason(err); err == nil || got != tc.reason {
 			t.Errorf("%d: err %v, reason %q, want %q", tc.status, err, got, tc.reason)
 		}
+	}
+}
+
+// An "api error <status>" reason carries the API's error type and message,
+// sanitized, so the page can tell low credit from a bad model; the
+// "api error <status>" prefix the page and suggestBackoff match on stays.
+func TestSuggestRepliesAPIErrorDetail(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	for _, tc := range []struct {
+		what   string
+		status int
+		body   string
+		want   string
+	}{
+		{"credit", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low"}}`,
+			"api error 400: invalid_request_error: Your credit balance is too low"},
+		{"whitespace collapsed", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"  too\n\tlow  "}}`,
+			"api error 400: invalid_request_error: too low"},
+		{"control rune", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"bad\u0007bell"}}`,
+			"api error 400"},
+		{"control rune in type", 400, `{"type":"error","error":{"type":"x\u001b[31m","message":"m"}}`,
+			"api error 400"},
+		{"no error object", 400, `{"type":"error"}`, "api error 400"},
+		{"not json", 400, `oops`, "api error 400"},
+		{"message only", 400, `{"error":{"message":"only"}}`, "api error 400: only"},
+		{"long", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"` + long + `"}}`,
+			"api error 400: " + truncateRunes("invalid_request_error: "+long, suggestAPIDetailRunes)},
+	} {
+		api := newFakeMessagesAPI(t, tc.status, tc.body)
+		_, err := api.summarizer().SuggestReplies(context.Background(), waitingSession("Idle"), "screen", nil)
+		got := suggestReason(err)
+		if err == nil || got != tc.want {
+			t.Errorf("%s: err %v, reason %q, want %q", tc.what, err, got, tc.want)
+		}
+		if !strings.HasPrefix(got, "api error 400") {
+			t.Errorf("%s: reason %q lost the api error 400 prefix", tc.what, got)
+		}
+	}
+
+	// The long reason is clipped: the detail is at most suggestAPIDetailRunes.
+	api := newFakeMessagesAPI(t, 400, `{"type":"error","error":{"type":"invalid_request_error","message":"`+long+`"}}`)
+	_, err := api.summarizer().SuggestReplies(context.Background(), waitingSession("Idle"), "screen", nil)
+	reason := suggestReason(err)
+	if n := len([]rune(strings.TrimPrefix(reason, "api error 400: "))); n != suggestAPIDetailRunes {
+		t.Errorf("long detail is %d runes, want %d: %q", n, suggestAPIDetailRunes, reason)
+	}
+	if !strings.HasSuffix(reason, "…") {
+		t.Errorf("long reason %q has no ellipsis", reason)
+	}
+	if got := suggestBackoff(reason); got != suggestConfigRetry {
+		t.Errorf("suggestBackoff(long 400) = %v, want suggestConfigRetry", got)
+	}
+
+	// A 404 with a body keeps its "api error 404" prefix.
+	api = newFakeMessagesAPI(t, 404, `{"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"}}`)
+	_, err = api.summarizer().SuggestReplies(context.Background(), waitingSession("Idle"), "screen", nil)
+	if got := suggestReason(err); !strings.HasPrefix(got, "api error 404") || got != "api error 404: not_found_error: model: claude-nope" {
+		t.Errorf("404 reason %q", got)
 	}
 }
 

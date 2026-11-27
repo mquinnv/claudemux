@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -266,11 +265,12 @@ func newWebRemote(fleet *webFleet, cfg Config, token string, gen remoteSuggester
 		}
 	}
 	home, err := os.UserHomeDir()
-	vim := claudeVimMode(os.Getenv, home)
+	vim, parsed := claudeVimModeDetail(os.Getenv, home)
+	assumed := !parsed
+	vim = vim || assumed
 	if err != nil {
 		teardownLogf("remote: UserHomeDir failed (%v); vim mode detected as %v", err, vim)
 	}
-	assumed := vim && !claudeConfigReadable(os.Getenv, home)
 	if assumed {
 		teardownLogf("remote: no claude settings could be read; assuming vim mode, so sends are refused unless the footer shows -- INSERT --")
 	}
@@ -285,29 +285,6 @@ func newWebRemote(fleet *webFleet, cfg Config, token string, gen remoteSuggester
 		sleep:      time.Sleep,
 		answered:   map[string]string{},
 	}
-}
-
-// claudeConfigReadable reports whether any of the files claudeVimMode reads
-// parses, mirroring its path choice. When none does, claudeVimMode returns
-// true as a guess, and the remote says so in its refusals.
-func claudeConfigReadable(getenv func(string) string, home string) bool {
-	paths := []string{filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")}
-	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		paths = []string{filepath.Join(dir, ".claude.json"), filepath.Join(dir, "settings.json")}
-	}
-	for _, p := range paths {
-		blob, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var body struct {
-			EditorMode string `json:"editorMode"`
-		}
-		if json.Unmarshal(blob, &body) == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // vimNormalMsg is the vim_normal refusal text. When vim mode is only assumed

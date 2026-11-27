@@ -79,6 +79,74 @@ func TestPromptEmpty(t *testing.T) {
 	}
 }
 
+func TestClaudeVimModeDetail(t *testing.T) {
+	type file struct{ rel, body string }
+	cases := []struct {
+		name        string
+		home        []file // written under a temp home
+		cfg         []file // written under a temp CLAUDE_CONFIG_DIR, which is then set
+		emptyHome   bool   // pass home "" and chdir into the temp home
+		vim, parsed bool
+	}{
+		{name: "no files"},
+		{name: "unparseable JSON", home: []file{{".claude.json", `{not json`}}},
+		{name: "valid JSON without vim", home: []file{{".claude.json", `{"editorMode":"normal"}`}}, parsed: true},
+		{name: "editorMode vim", home: []file{{filepath.Join(".claude", "settings.json"), `{"editorMode":"vim"}`}}, vim: true, parsed: true},
+		{
+			name:   "CLAUDE_CONFIG_DIR overrides home",
+			home:   []file{{".claude.json", `{"editorMode":"vim"}`}},
+			cfg:    []file{{"settings.json", `{"editorMode":"normal"}`}},
+			parsed: true,
+		},
+		{
+			name: "CLAUDE_CONFIG_DIR set but empty ignores home",
+			home: []file{{".claude.json", `{"editorMode":"vim"}`}},
+			cfg:  []file{},
+		},
+		{
+			name:      "empty home reads nothing from the current directory",
+			home:      []file{{".claude.json", `{"editorMode":"vim"}`}},
+			emptyHome: true,
+		},
+	}
+	write := func(t *testing.T, dir string, files []file) {
+		t.Helper()
+		for _, f := range files {
+			path := filepath.Join(dir, f.rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(f.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := t.TempDir()
+			write(t, h, tc.home)
+			env := map[string]string{}
+			if tc.cfg != nil {
+				d := t.TempDir()
+				write(t, d, tc.cfg)
+				env["CLAUDE_CONFIG_DIR"] = d
+			}
+			home := h
+			if tc.emptyHome {
+				t.Chdir(h)
+				home = ""
+			}
+			vim, parsed := claudeVimModeDetail(func(k string) string { return env[k] }, home)
+			if vim != tc.vim || parsed != tc.parsed {
+				t.Errorf("got (vim=%v, parsed=%v), want (%v, %v)", vim, parsed, tc.vim, tc.parsed)
+			}
+			if got, want := claudeVimMode(func(k string) string { return env[k] }, home), tc.vim || !tc.parsed; got != want {
+				t.Errorf("claudeVimMode = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestClaudeVimMode(t *testing.T) {
 	write := func(t *testing.T, path, body string) {
 		t.Helper()

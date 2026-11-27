@@ -99,18 +99,28 @@ func dimOnly(raw string) bool {
 	return strings.TrimSpace(text) != ""
 }
 
-// claudeVimMode reports whether claude's editor is in vim mode, read from the
-// top-level "editorMode" of .claude.json and settings.json (under
-// CLAUDE_CONFIG_DIR when set, else the home directory). True if either file
-// says "vim"; false if at least one was read and none says vim; true when
-// neither could be read, because a wrong "false" types into a prompt that may
-// be in NORMAL mode. Only that one field is decoded.
+// claudeVimMode reports whether claude's editor is in vim mode. True if any
+// config file says "vim"; false if at least one was read and none says vim;
+// true when none could be read, because a wrong "false" types into a prompt
+// that may be in NORMAL mode. claudeVimModeDetail says which files are read.
 func claudeVimMode(getenv func(string) string, home string) bool {
-	paths := []string{filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")}
+	vim, parsed := claudeVimModeDetail(getenv, home)
+	return vim || !parsed
+}
+
+// claudeVimModeDetail reads the top-level "editorMode" of .claude.json and
+// settings.json (under CLAUDE_CONFIG_DIR when set, else the home directory)
+// and reports whether a parsed file says "vim" and whether any file parsed at
+// all. An empty home (UserHomeDir failed) skips the home paths rather than
+// reading .claude.json from the current directory. Only that one field is
+// decoded.
+func claudeVimModeDetail(getenv func(string) string, home string) (vim, parsed bool) {
+	var paths []string
 	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		paths = []string{filepath.Join(dir, ".claude.json"), filepath.Join(dir, "settings.json")}
+	} else if home != "" {
+		paths = []string{filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")}
 	}
-	parsed := false
 	for _, p := range paths {
 		blob, err := os.ReadFile(p)
 		if err != nil {
@@ -124,10 +134,10 @@ func claudeVimMode(getenv func(string) string, home string) bool {
 		}
 		parsed = true
 		if body.EditorMode == "vim" {
-			return true
+			return true, true
 		}
 	}
-	return !parsed
+	return false, parsed
 }
 
 // vimNotInsert reports whether the footer names a vim mode that is not INSERT.
