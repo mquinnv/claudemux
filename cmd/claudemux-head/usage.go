@@ -494,5 +494,23 @@ func refreshUsageCache(ctx context.Context, path, claudeBin, configDir string, n
 		markUsageFailure(path, now)
 		return usage, nil
 	}
+	mirrorLegacyUsage(path, usage)
 	return usage, nil
+}
+
+// mirrorLegacyUsage copies a fresh poll to the legacy usage.json when path is
+// the default account's file and several accounts exist, so readers of the
+// legacy name keep following the default account. One poll, two files; locks
+// and backoff stay on the per-account path.
+func mirrorLegacyUsage(path string, usage PlanUsage) {
+	cc := loadClaudeConfig()
+	if !cc.Multi() || os.Getenv("CLAUDEMUX_USAGE_CACHE_PATH") != "" {
+		return
+	}
+	if path != usageCachePathFor(cc.Default(), true) {
+		return
+	}
+	if legacy := defaultUsageCachePath(); legacy != "" && legacy != path {
+		_ = writeUsageCache(legacy, usage)
+	}
 }

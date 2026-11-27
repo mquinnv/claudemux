@@ -403,3 +403,39 @@ func TestCreditProfileUsesAccountDir(t *testing.T) {
 		t.Fatalf("~/.claude profile = %q, %q, %v", org, dir, err)
 	}
 }
+
+func TestCredentialService(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	none := func(string) (string, bool) { return "", false }
+	hash := func(s string) string {
+		sum := sha256.Sum256([]byte(s))
+		return fmt.Sprintf("Claude Code-credentials-%x", sum[:4])
+	}
+	def := filepath.Join(home, ".claude")
+
+	if svc, dir := credentialService("", none); svc != "Claude Code-credentials" || dir != def {
+		t.Errorf(`"" = %q, %q`, svc, dir)
+	}
+	if svc, dir := credentialService(def, none); svc != "Claude Code-credentials" || dir != def {
+		t.Errorf("~/.claude = %q, %q", svc, dir)
+	}
+	if svc, dir := credentialService("/x/acct", none); svc != hash("/x/acct") || dir != "/x/acct" {
+		t.Errorf("/x/acct = %q, %q", svc, dir)
+	}
+	// SECURESTORAGE set: today's behaviour, whatever dir says.
+	store := func(v string) func(string) (string, bool) {
+		return func(k string) (string, bool) {
+			if k == "CLAUDE_SECURESTORAGE_CONFIG_DIR" {
+				return v, true
+			}
+			return "", false
+		}
+	}
+	if svc, dir := credentialService("/x/acct", store("/y/store")); svc != hash("/y/store") || dir != "/y/store" {
+		t.Errorf("securestorage = %q, %q", svc, dir)
+	}
+	if svc, dir := credentialService("/x/acct", store("")); svc != "Claude Code-credentials" || dir != def {
+		t.Errorf("securestorage empty = %q, %q", svc, dir)
+	}
+}

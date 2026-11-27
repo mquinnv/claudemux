@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/text/unicode/norm"
 	"io"
 	"net/http"
 	"net/url"
@@ -155,21 +156,41 @@ func creditProfile(configDir string) (org, dir string, err error) {
 	return body.Account.Org, dir, nil
 }
 
-func creditToken(ctx context.Context, dir string) (string, error) {
-	storeDir, custom := os.LookupEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-	if !custom {
-		storeDir = dir
-	} else if storeDir == "" {
-		home, _ := os.UserHomeDir()
-		storeDir = filepath.Join(home, ".claude")
+// credentialService picks the keychain service and the credentials-file
+// directory for an account's config dir, the way Claude Code does. With
+// CLAUDE_SECURESTORAGE_CONFIG_DIR set the old behaviour stands (that value
+// names the store, hashed when non-empty). Otherwise the ~/.claude account
+// (dir "" or canonically ~/.claude) is unhashed, and any other dir is hashed
+// over the exact CLAUDE_CONFIG_DIR string, NFC-normalized. The decision comes
+// from the dir argument, never the process env: the lobby runs with no
+// CLAUDE_CONFIG_DIR yet polls credits for the default account.
+func credentialService(dir string, env func(string) (string, bool)) (service, fileDir string) {
+	service = "Claude Code-credentials"
+	home, _ := os.UserHomeDir()
+	if store, custom := env("CLAUDE_SECURESTORAGE_CONFIG_DIR"); custom {
+		if store == "" {
+			return service, filepath.Join(home, ".claude")
+		}
+		return service + "-" + dirHash(store), store
 	}
+	if dir == "" || (home != "" && canonicalDir(dir) == canonicalDir(filepath.Join(home, ".claude"))) {
+		if dir == "" {
+			dir = filepath.Join(home, ".claude")
+		}
+		return service, dir
+	}
+	return service + "-" + dirHash(dir), dir
+}
+
+func dirHash(dir string) string {
+	sum := sha256.Sum256([]byte(norm.NFC.String(dir)))
+	return fmt.Sprintf("%x", sum[:4])
+}
+
+func creditToken(ctx context.Context, dir string) (string, error) {
+	service, storeDir := credentialService(dir, os.LookupEnv)
 	var blob []byte
 	if runtime.GOOS == "darwin" {
-		service := "Claude Code-credentials"
-		if custom && os.Getenv("CLAUDE_SECURESTORAGE_CONFIG_DIR") != "" || !custom && os.Getenv("CLAUDE_CONFIG_DIR") != "" {
-			hash := sha256.Sum256([]byte(storeDir))
-			service += fmt.Sprintf("-%x", hash[:4])
-		}
 		// Never put the token on an argument list or in diagnostics. The
 		// keychain may be locked; the enclosing timeout bounds that wait.
 		blob, _ = exec.CommandContext(ctx, "security", "find-generic-password", "-w", "-s", service).Output()

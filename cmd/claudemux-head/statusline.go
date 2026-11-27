@@ -106,6 +106,8 @@ func statuslineWritePaths(cc ClaudeConfig, envDir string) []string {
 	}
 	acct, ok := cc.ForConfigDir(envDir)
 	if !ok {
+		// Silent on purpose: the statusline command has no log and its
+		// stdout is the user's status line, so nothing may be printed.
 		return nil
 	}
 	var paths []string

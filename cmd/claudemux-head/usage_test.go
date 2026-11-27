@@ -647,3 +647,30 @@ func TestUsageLocksAreSeparate(t *testing.T) {
 		t.Error("one account's failure marker blocks the other")
 	}
 }
+
+func TestUsageMirrorsLegacyForDefaultAccountOnly(t *testing.T) {
+	home, _ := multiAccountHome(t) // default=ameriglide, other=bespoke
+	t.Setenv("CLAUDEMUX_USAGE_CACHE_PATH", "")
+	bin := childEnvClaude(t, filepath.Join(t.TempDir(), "env"))
+	base := filepath.Join(home, ".claude", "claudemux")
+	now := time.Now()
+
+	if _, err := refreshUsageCache(context.Background(), usageCachePathFor("bespoke", true), bin, "", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "usage-bespoke.json")); err != nil {
+		t.Errorf("own file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "usage.json")); err == nil {
+		t.Error("non-default account wrote the legacy usage.json")
+	}
+
+	if _, err := refreshUsageCache(context.Background(), usageCachePathFor("ameriglide", true), bin, "/x", now); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"usage-ameriglide.json", "usage.json"} {
+		if _, err := os.Stat(filepath.Join(base, f)); err != nil {
+			t.Errorf("default account did not write %s: %v", f, err)
+		}
+	}
+}
