@@ -461,7 +461,7 @@ function globalError(e) {
   finally { inGlobalError = false; }
 }
 window.addEventListener('unhandledrejection', ev => globalError(ev.reason));
-window.addEventListener('error', ev => globalError(ev.error || ev.message));
+window.addEventListener('error', ev => globalError(ev.error || new Error(ev.message || 'script error')));
 
 async function pollQueue() {
   clearTimeout(queueTimer);
@@ -667,8 +667,9 @@ async function doKey(name, episode, key, advance, okMsg) {
   }
 }
 
-// A typed send or a text chip answers the episode: hold it so conduction
-// moves on even before the session's state catches up.
+// Any successful send (typed, a text chip, or a quick reply) answers the
+// episode: hold it so conduction moves on even before the session's state
+// catches up.
 function afterAnswer(name, episode) {
   S.answered.set(name, episode);
   pollQueue();
@@ -831,17 +832,19 @@ function renderDetail() {
     } else if (sg.status === 'error' && sg.error === 'no pane') {
       box.append(el('div', 'note', 'This session has no claude pane to read.'));
     } else if (sg.status === 'error' && sg.error === 'auth') {
-      box.append(el('div', 'note bad', 'Suggestions failed: the API key was refused (check ANTHROPIC_API_KEY / summary.api_key_file).'));
+      box.append(el('div', 'note bad', 'Suggestions failed: the API key was refused (check ANTHROPIC_API_KEY / summary.api_key_file). Retrying in about 5 minutes.'));
     } else if (sg.status === 'error' && sg.error === 'rate limit') {
       box.append(el('div', 'note bad', 'Suggestions are rate-limited; retrying shortly.'));
     } else if (sg.status === 'error' && sg.error === 'network') {
       box.append(el('div', 'note bad', 'Suggestions failed (can’t reach the API) — retrying shortly.'));
     } else if (sg.status === 'error' && sg.error && sg.error.startsWith('api error 404')) {
-      box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request — check summary.model. Retrying in a few minutes.'));
+      box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request — check summary.model. Retrying in about 5 minutes.'));
     } else if (sg.status === 'error' && sg.error && sg.error.startsWith('api error 4')) {
-      box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request (CLAUDEMUX_TEARDOWN_LOG has the details). Retrying in a few minutes.'));
+      box.append(el('div', 'note bad', 'Suggestions failed (' + sg.error + '): the API refused the request (CLAUDEMUX_TEARDOWN_LOG has the details). Retrying in about 5 minutes.'));
     } else if (sg.status === 'error' && sg.error === 'busy') {
       box.append(el('div', 'note', 'Suggestions are queued behind other drafts — retrying shortly.'));
+    } else if (sg.status === 'error' && sg.error === 'bad response') {
+      box.append(el('div', 'note bad', 'Suggestions failed: the model’s answer was unusable (cut off or refused). Retrying in about 10 minutes, or after you press an answer key.'));
     } else if (sg.status === 'error' && sg.error !== 'no usable replies') {
       box.append(el('div', 'note bad', 'Suggestions failed (' + (sg.error || 'unknown') + ') — retrying shortly.'));
     } else if (sg.status === 'error' || !sg.items || !sg.items.length) {

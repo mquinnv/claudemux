@@ -28,7 +28,8 @@ const (
 	webWriteTimeout      = 10 * time.Second
 	webShutdownBudget    = time.Second
 
-	// webContentSecurityPolicy locks the page route to its own origin: no
+	// webContentSecurityPolicy locks the pages (status and remote) and the
+	// remote's API responses to their own origin: no
 	// external scripts, styles or images (data: URIs excepted for the
 	// gauges), matching the spec's "no external requests" rule.
 	// frame-ancestors 'none' (with webFrameOptions for older browsers) keeps

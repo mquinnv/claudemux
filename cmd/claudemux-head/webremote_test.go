@@ -601,7 +601,9 @@ func TestRemoteSendMultiLineAndSemicolon(t *testing.T) {
 		// CRLF from a phone keyboard becomes LF, trailing newlines go, and
 		// the message is typed in ONE call (a paste), submitted once.
 		{"line1\r\nline2\n\n", "line1\nline2"},
-		// A trailing ';' is text, not a tmux command separator.
+		// A trailing ';' reaches typeText unchanged. This runs against the
+		// fake tmux, so it says nothing about tmux's own ';' separator: the
+		// real-tmux check is TestExecRemoteTmuxTypeTextSingleLine.
 		{"ls;", "ls;"},
 		{"a\tb", "a\tb"},
 	} {
@@ -1924,25 +1926,37 @@ func TestRemoteAnsweredEpisodeIsNotAnsweredTwice(t *testing.T) {
 func TestRemoteKeyDropsSuggestions(t *testing.T) {
 	for _, tc := range []struct {
 		what    string
+		state   string
 		key     string
 		failKey bool
 		code    int
 		drops   bool
 	}{
-		{"a digit picks an option", "1", false, http.StatusOK, true},
-		{"Enter confirms the option", "Enter", false, http.StatusOK, true},
-		{"Down only moves the cursor", "Down", false, http.StatusOK, false},
-		{"a key tmux failed to send", "1", true, http.StatusBadGateway, false},
+		{"a digit picks an option", "Tool:AskUserQuestion", "1", false, http.StatusOK, true},
+		{"Enter confirms the option", "Tool:AskUserQuestion", "Enter", false, http.StatusOK, true},
+		{"Down only moves the cursor", "Tool:AskUserQuestion", "Down", false, http.StatusOK, false},
+		{"a key tmux failed to send", "Tool:AskUserQuestion", "1", true, http.StatusBadGateway, false},
+		// No dialog is open, so there is no question for the key to move on:
+		// the reply chips stay and no new billed call starts.
+		{"Enter at an idle prompt", "Idle", "Enter", false, http.StatusOK, false},
+		{"a digit at an idle prompt", "Idle", "1", false, http.StatusOK, false},
 	} {
 		s := idleSession()
-		s.State = "Tool:AskUserQuestion"
-		// In a dialog the chips are option picks, so they carry a Key.
-		gen := &fakeSuggester{out: []remoteSuggestion{{Label: "postgres", Key: "1"}}}
+		s.State = tc.state
+		// In a dialog the chips are option picks, so they carry a Key; at an
+		// idle prompt they are text replies.
+		chip := remoteSuggestion{Label: "postgres", Key: "1"}
+		screen := dialogScreen()
+		if !remoteDialog(tc.state) {
+			chip = remoteSuggestion{Label: "run tests", Text: "run the tests"}
+			screen = idleScreen("")
+		}
+		gen := &fakeSuggester{out: []remoteSuggestion{chip}}
 		r, ft, h := newTestRemote(t, testFleet(s), gen)
 		// A frozen clock keeps the post-key hold from expiring mid-test.
 		clock := &fakeClock{t: rt0}
 		r.suggest.now = clock.now
-		ft.screens["%1"] = dialogScreen()
+		ft.screens["%1"] = screen
 
 		decodeSessionView(t, remoteDo(t, h, "GET", "/api/remote/session?name=a", testRemoteToken, nil))
 		waitFor(t, "suggestions for a", func() bool { return r.suggest.get(s).Status == suggestStatusReady })
@@ -2257,5 +2271,107 @@ func TestExecRemoteTmuxTypeTextTab(t *testing.T) {
 	}
 	if bufs := tmuxRemoteBuffers(t); len(bufs) != 0 {
 		t.Fatalf("paste buffers left behind: %q", bufs)
+	}
+}
+
+// remoteDialog is what marks a session's screen as a picker: the page shows
+// option chips, send refuses to type over it, and keys can move it on.
+func TestRemoteDialogStates(t *testing.T) {
+	for _, tc := range []struct {
+		state  string
+		dialog bool
+	}{
+		{"Asking", true},
+		{"Tool:AskUserQuestion", true},
+		{"Awaiting", true},
+		{"Idle", false},
+		{"Thinking", false},
+	} {
+		s := idleSession()
+		s.State = tc.state
+		if got := toRemoteSession(s, 0).Dialog; got != tc.dialog {
+			t.Errorf("%s: Dialog = %v, want %v", tc.state, got, tc.dialog)
+		}
+	}
+}
+
+// An Awaiting picker (a permission prompt) is a dialog too: a send without
+// escape is refused rather than typed into it.
+func TestRemoteSendIntoAwaitingDialog(t *testing.T) {
+	s := idleSession()
+	s.State = "Awaiting"
+	_, ft, h := newTestRemote(t, testFleet(s), nil)
+	ft.screens["%1"] = dialogScreen()
+	rec := remoteDo(t, h, "POST", "/api/remote/send", testRemoteToken,
+		remoteSendReq{Name: "a", Episode: remoteEpisode(s), Text: "yes", Escape: false})
+	if rec.Code != http.StatusConflict || remoteCode(t, rec) != "dialog" {
+		t.Fatalf("got %d %s, want 409 dialog", rec.Code, rec.Body)
+	}
+	if got := ft.log(); len(got) != 0 {
+		t.Fatalf("calls = %q, want none", got)
+	}
+}
+
+// With a suggester configured the queue tells the page to show chips.
+func TestRemoteQueueReportsSuggest(t *testing.T) {
+	gen := &fakeSuggester{out: []remoteSuggestion{{Label: "x", Text: "x"}}}
+	_, _, h := newTestRemote(t, testFleet(idleSession()), gen)
+	rec := remoteDo(t, h, "GET", "/api/remote/queue", testRemoteToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	var v remoteQueueView
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if !v.Suggest {
+		t.Errorf("suggest = false, want true with a suggester")
+	}
+}
+
+// Every API answer, served or refused, is uncacheable and unframeable: the
+// responses carry screen text and drive the token-gated controls.
+func TestRemoteAPIHeaders(t *testing.T) {
+	check := func(what string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		for k, want := range map[string]string{
+			"Cache-Control":          "no-store",
+			"X-Content-Type-Options": "nosniff",
+			"X-Frame-Options":        webFrameOptions,
+		} {
+			if got := rec.Header().Get(k); got != want {
+				t.Errorf("%s: %s = %q, want %q", what, k, got, want)
+			}
+		}
+		if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+			t.Errorf("%s: Content-Security-Policy = %q, want frame-ancestors 'none'", what, csp)
+		}
+	}
+	s := idleSession()
+	for _, rt := range remoteRoutes(s) {
+		what := rt.method + " " + rt.path
+		_, ft, h := newTestRemote(t, testFleet(s), nil)
+		ft.screens["%1"] = idleScreen("")
+		rec := remoteDoRaw(t, h, rt.method, rt.path, "Bearer "+testRemoteToken, routeBody(t, rt))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d %s, want 200", what, rec.Code, rec.Body)
+		}
+		check(what, rec)
+		rec = remoteDoRaw(t, h, rt.method, rt.path, "Bearer wrong", routeBody(t, rt))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: bad token: got %d %s, want 401", what, rec.Code, rec.Body)
+		}
+		check(what+" (401)", rec)
+	}
+}
+
+// The page renders screen text and session names that come from panes: it
+// must build the DOM with textContent, never by parsing HTML strings.
+func TestRemotePageNeverParsesHTML(t *testing.T) {
+	page := string(webRemoteHTML)
+	for _, banned := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
+		if strings.Contains(page, banned) {
+			t.Errorf("webremote.html uses %s", banned)
+		}
 	}
 }

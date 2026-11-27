@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,8 +73,8 @@ var defaultRemoteReplies = []string{"yes, go ahead", "continue", "commit and pus
 // buttons send). Digits pick a dialog option;
 // the arrows, Tab, BTab, Space and Enter move around one; Escape dismisses a
 // dialog or interrupts a turn. No key in this allowlist can signal the pane's
-// process (no C-c, no C-z). Typed text is a separate, token-gated path
-// (handleSend) that refuses control characters. handleSend additionally
+// process (no C-c, no C-z). Typed text is a separate path (handleSend)
+// that refuses control characters. handleSend additionally
 // presses Escape and C-u itself.
 var remoteKeys = map[string]bool{
 	"1": true, "2": true, "3": true, "4": true, "5": true, "6": true, "7": true, "8": true, "9": true,
@@ -187,6 +188,9 @@ type webRemote struct {
 	tmux    remoteTmux
 	suggest *remoteSuggestions
 	vimMode bool
+	// vimAssumed: vimMode is true only because no claude config could be
+	// read (claudeVimMode's safe default), not because editorMode says vim.
+	vimAssumed bool
 	// sleep is time.Sleep, swapped out by tests.
 	sleep func(time.Duration)
 	// writeMu serializes everything that types: two phones (or a double
@@ -266,16 +270,54 @@ func newWebRemote(fleet *webFleet, cfg Config, token string, gen remoteSuggester
 	if err != nil {
 		teardownLogf("remote: UserHomeDir failed (%v); vim mode detected as %v", err, vim)
 	}
-	return &webRemote{
-		fleet:    fleet,
-		token:    token,
-		replies:  replies,
-		tmux:     execRemoteTmux{},
-		suggest:  newRemoteSuggestions(gen),
-		vimMode:  vim,
-		sleep:    time.Sleep,
-		answered: map[string]string{},
+	assumed := vim && !claudeConfigReadable(os.Getenv, home)
+	if assumed {
+		teardownLogf("remote: no claude settings could be read; assuming vim mode, so sends are refused unless the footer shows -- INSERT --")
 	}
+	return &webRemote{
+		fleet:      fleet,
+		token:      token,
+		replies:    replies,
+		tmux:       execRemoteTmux{},
+		suggest:    newRemoteSuggestions(gen),
+		vimMode:    vim,
+		vimAssumed: assumed,
+		sleep:      time.Sleep,
+		answered:   map[string]string{},
+	}
+}
+
+// claudeConfigReadable reports whether any of the files claudeVimMode reads
+// parses, mirroring its path choice. When none does, claudeVimMode returns
+// true as a guess, and the remote says so in its refusals.
+func claudeConfigReadable(getenv func(string) string, home string) bool {
+	paths := []string{filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")}
+	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		paths = []string{filepath.Join(dir, ".claude.json"), filepath.Join(dir, "settings.json")}
+	}
+	for _, p := range paths {
+		blob, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var body struct {
+			EditorMode string `json:"editorMode"`
+		}
+		if json.Unmarshal(blob, &body) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// vimNormalMsg is the vim_normal refusal text. When vim mode is only assumed
+// (no settings readable), it says so, since every send would otherwise read
+// as a NORMAL-mode refusal with no hint why.
+func (r *webRemote) vimNormalMsg(msg string) string {
+	if r.vimAssumed {
+		return "the remote assumes vim mode because claude's settings couldn't be read; " + msg
+	}
+	return msg
 }
 
 // register adds the remote's routes to mux. tokenErr, when set, is why the
@@ -371,7 +413,8 @@ type remoteSession struct {
 	// keypress (an option number), not a typed prompt.
 	Dialog bool `json:"dialog"`
 	// Episode identifies this waiting spell (state + since). The page echoes
-	// it on every write, and a write against an episode the session has
+	// it on every send and answer key; Defer and the Esc/Interrupt button
+	// carry none (see target), and a write against an episode the session has
 	// moved past is refused: an answer meant for one question must never
 	// land on the next. A send to a busy (non-waiting) session is allowed on
 	// purpose, to queue a follow-up; its episode then guards that working
@@ -624,8 +667,9 @@ type remoteSendReq struct {
 	// Replace sends C-u first instead of refusing to type over a draft. C-u
 	// clears the current input line, so a multi-line draft may not be fully
 	// cleared. When Escape dismissed a dialog first, Replace is not honoured
-	// in the same request: the server answers dismissed_draft and the page
-	// re-sends with replace.
+	// in the same request: the server answers dismissed_draft, and the page
+	// re-reads the session's new episode, asks the user, and only then
+	// re-sends with replace and without escape.
 	Replace bool `json:"replace"`
 	// Escape dismisses an open dialog first, so the text goes in as a
 	// normal prompt instead. If the prompt behind the dialog holds a draft,
@@ -843,7 +887,7 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 			case "draft":
 				remoteError(w, http.StatusConflict, "dismissed_draft", "dialog dismissed, but the prompt isn't empty")
 			case "vim_normal":
-				remoteError(w, http.StatusConflict, "vim_normal", "dialog dismissed, but claude's prompt is in vim NORMAL mode; nothing was typed")
+				remoteError(w, http.StatusConflict, "vim_normal", r.vimNormalMsg("dialog dismissed, but claude's prompt is in vim NORMAL mode; nothing was typed"))
 			default:
 				remoteError(w, http.StatusConflict, "unrecognized", "dialog dismissed, but the remote doesn't recognise the screen now; nothing was typed")
 			}
@@ -854,7 +898,7 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 			// Replace is honoured only here, where a box with text in it was
 			// positively recognised.
 		case "vim_normal":
-			remoteError(w, http.StatusConflict, "vim_normal", "claude's prompt is in vim NORMAL mode; switch it to insert mode first")
+			remoteError(w, http.StatusConflict, "vim_normal", r.vimNormalMsg("claude's prompt is in vim NORMAL mode; switch it to insert mode first"))
 			return
 		default:
 			remoteError(w, http.StatusConflict, "unrecognized", "the remote doesn't recognise this screen; nothing was typed")
@@ -891,7 +935,8 @@ func (r *webRemote) handleSend(w http.ResponseWriter, req *http.Request) {
 			remoteError(w, http.StatusBadGateway, "partial", "typing may have partly landed ("+err.Error()+"); check the screen")
 			return
 		}
-		fail("type", err)
+		teardownLogf("remote: send to %s failed at type (after %q): %v", s.Name, done, err)
+		remoteError(w, http.StatusBadGateway, "partial", done+", then typing failed and may have partly landed ("+err.Error()+"); check the screen")
 		return
 	}
 	// Let the typed text settle before the Enter that submits it.
@@ -936,9 +981,10 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 	}
 	// A digit or Enter in an open dialog may have moved it on to its next
 	// question in the same episode, so the cached chips can belong to a
-	// question that is gone. Other keys (arrows, Tab, an Escape that
-	// interrupts a busy turn) leave the question in place, so the chips stay
-	// and no new billed call starts.
+	// question that is gone. An Escape in a dialog closes it, which ends the
+	// episode anyway (and an Escape that interrupts a busy turn has no
+	// chips). Arrows, Tab and Space leave the question in place, so the
+	// chips stay and no billed call starts.
 	if remoteDialog(s.State) && (body.Key == "Enter" || (len(body.Key) == 1 && body.Key[0] >= '1' && body.Key[0] <= '9')) {
 		r.suggest.keyPressed(s.Name)
 	}
@@ -946,8 +992,9 @@ func (r *webRemote) handleKey(w http.ResponseWriter, req *http.Request) {
 	remoteJSON(w, remoteOK{OK: true})
 }
 
-// handleDefer sets or clears the session's defer mark, the same toggle as
-// the lobby's d key: a deferred session leaves the conduct queue, here and
+// handleDefer sets or clears the session's defer mark, the same defer mark
+// the lobby's d sets (free text only: it never links to another session,
+// and clearing it doesn't message the session): a deferred session leaves the conduct queue, here and
 // at the desk.
 func (r *webRemote) handleDefer(w http.ResponseWriter, req *http.Request) {
 	var body remoteDeferReq

@@ -122,7 +122,9 @@ func TestSuggestRepliesParsesAndCleans(t *testing.T) {
 		remoteSuggestion{Label: "key", Key: "1"},
 		remoteSuggestion{Label: "ship", Text: "ship it"},
 	)))
-	got, err := api.summarizer().SuggestReplies(context.Background(), waitingSession("Idle"), "● Done.\n", []string{"continue"})
+	sess := waitingSession("Idle")
+	sess.Prompt = "  add the\n  migration  "
+	got, err := api.summarizer().SuggestReplies(context.Background(), sess, "● Done.\n", []string{"continue"})
 	if err != nil {
 		t.Fatalf("SuggestReplies: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestSuggestRepliesParsesAndCleans(t *testing.T) {
 	if strings.Contains(text, "DIALOG") {
 		t.Errorf("a prompt state was sent as a dialog:\n%s", text)
 	}
-	for _, s := range []string{"Session topic: db choice", "Fixed replies (do not repeat): continue", "● Done."} {
+	for _, s := range []string{"Session topic: db choice", "Developer's last prompt: add the migration\n", "Fixed replies (do not repeat): continue", "● Done."} {
 		if !strings.Contains(text, s) {
 			t.Errorf("request lacks %q:\n%s", s, text)
 		}
@@ -153,6 +155,7 @@ func TestSuggestRepliesBadResponses(t *testing.T) {
 		what, body, reason string
 	}{
 		{"cut off at max_tokens", suggestResponse("max_tokens", suggestToolName, ok), suggestErrBadResp},
+		{"refused", suggestResponse("refusal", suggestToolName, ok), suggestErrBadResp},
 		{"no tool_use", string(textOnly), suggestErrBadResp},
 		{"another tool", suggestResponse("tool_use", "summarize", ok), suggestErrBadResp},
 		{"tool input of the wrong shape", suggestResponse("tool_use", suggestToolName, json.RawMessage(`{"replies":"run the tests"}`)), suggestErrBadResp},
@@ -462,9 +465,9 @@ func TestRemoteSuggestionsSupersededCallDiscarded(t *testing.T) {
 	}
 }
 
-// A key press doesn't cut short a configuration back-off: an entry in error
-// "auth" or "api error 4xx" stays in error, and no call is due until its
-// back-off passes.
+// A key press doesn't cut short a configuration or rate-limit back-off: an
+// entry in error "auth", "rate limit" or "api error 4xx" stays in error, and
+// no call is due until its back-off passes.
 func TestRemoteSuggestionsKeyPressedKeepsConfigBackoff(t *testing.T) {
 	for _, tc := range []struct {
 		reason  string
@@ -472,6 +475,7 @@ func TestRemoteSuggestionsKeyPressedKeepsConfigBackoff(t *testing.T) {
 	}{
 		{suggestErrAuth, suggestAuthRetry},
 		{"api error 404", suggestConfigRetry},
+		{suggestErrRateLimit, suggestRetryAfter},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			clock := &fakeClock{t: rt0}
@@ -506,6 +510,65 @@ func TestRemoteSuggestionsKeyPressedKeepsConfigBackoff(t *testing.T) {
 				t.Error("needsCall false once the back-off passed")
 			}
 		})
+	}
+}
+
+// A key press ends an ordinary back-off: the screen is about to change, so an
+// entry in error "no usable replies" or "api error 500" goes pending under
+// the key hold, and a call is due once the hold passes.
+func TestRemoteSuggestionsKeyPressedEndsOrdinaryBackoff(t *testing.T) {
+	for _, reason := range []string{suggestErrNoReplies, "api error 500"} {
+		t.Run(reason, func(t *testing.T) {
+			clock := &fakeClock{t: rt0}
+			s := idleSession()
+			gen := &fakeSuggester{err: &suggestError{reason, "nope"}}
+			c := newRemoteSuggestions(gen)
+			c.now = clock.now
+			c.ensure(s, nil, func() string { return "screen" })
+			waitFor(t, "the failed call", func() bool { return c.get(s).Status == suggestStatusError })
+			if st := c.get(s); st.Error != reason {
+				t.Fatalf("reason = %q, want %q", st.Error, reason)
+			}
+
+			c.keyPressed(s.Name)
+			if st := c.get(s); st.Status != suggestStatusPending || len(st.Items) != 0 || st.Error != "" {
+				t.Fatalf("after keyPressed: %+v, want pending with no items", st)
+			}
+			if c.needsCall(s) {
+				t.Error("needsCall during the key hold")
+			}
+			clock.advance(suggestKeyHold - time.Millisecond)
+			if c.needsCall(s) {
+				t.Error("needsCall just before the key hold ends")
+			}
+			clock.advance(time.Millisecond)
+			if !c.needsCall(s) {
+				t.Error("needsCall false once the key hold passed")
+			}
+		})
+	}
+}
+
+// A pending entry with a call in flight needs no second call, however long
+// the call runs: only a failed entry's back-off expires.
+func TestRemoteSuggestionsPendingNeedsNoCall(t *testing.T) {
+	clock := &fakeClock{t: rt0}
+	s := idleSession()
+	gate := make(chan struct{})
+	gen := &gatedSuggester{gates: map[time.Time]chan struct{}{s.Since: gate}}
+	c := newRemoteSuggestions(gen)
+	c.now = clock.now
+	defer close(gate)
+	c.ensure(s, nil, func() string { return "screen" })
+	waitFor(t, "the call to start", func() bool { return gen.begun() == 1 })
+	clock.advance(31 * time.Second)
+	if c.needsCall(s) {
+		t.Error("needsCall for a pending entry with a call in flight")
+	}
+	c.ensure(s, nil, func() string { return "screen" })
+	time.Sleep(10 * time.Millisecond)
+	if n := gen.begun(); n != 1 {
+		t.Errorf("calls started = %d, want 1", n)
 	}
 }
 

@@ -49,9 +49,9 @@ type remoteSuggester interface {
 const (
 	suggestToolName = "suggest"
 	// suggestMaxTokens leaves room for suggestMax replies of up to
-	// suggestTextRunes each plus their labels and the tool-call framing; 600
-	// could truncate a full answer (4 x 300 runes alone can exceed it), which
-	// would end as a billed "bad response".
+	// suggestTextRunes each plus their labels and the tool-call framing: 600
+	// left too little headroom for four full replies (non-Latin text
+	// especially), and a truncated answer ends as a billed "bad response".
 	suggestMaxTokens   = 1200
 	suggestMax         = 4
 	suggestLabelRunes  = 40
@@ -515,9 +515,10 @@ func (c *remoteSuggestions) needsCallLocked(sess swSession, ep string) bool {
 // the pane can redraw before a new screen is captured; once the hold has
 // passed, the next ensure starts a call. The episode is unchanged. A call in
 // flight from before the key press is discarded when it finishes (see
-// finishCall). An entry in error for an auth failure or another "api error
-// 4xx" is left alone: a key press can't fix a bad API key or model, so its
-// back-off stays. No-op when name has no entry or suggestions are off.
+// finishCall). An entry in error for an auth failure, a rate limit or
+// another "api error 4xx" is left alone: a key press can't fix a bad API key
+// or model, nor lift a rate limit, so its back-off stays. No-op when name has
+// no entry or suggestions are off.
 func (c *remoteSuggestions) keyPressed(name string) {
 	if !c.enabled() {
 		return
@@ -528,7 +529,7 @@ func (c *remoteSuggestions) keyPressed(name string) {
 	if !ok {
 		return
 	}
-	if e.status == suggestStatusError && (e.reason == suggestErrAuth || strings.HasPrefix(e.reason, suggestErrAPI+" 4")) {
+	if e.status == suggestStatusError && (e.reason == suggestErrAuth || e.reason == suggestErrRateLimit || strings.HasPrefix(e.reason, suggestErrAPI+" 4")) {
 		return
 	}
 	e.status = suggestStatusPending

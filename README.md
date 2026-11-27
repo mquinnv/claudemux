@@ -421,7 +421,7 @@ For each waiting session it shows:
   You get about two seconds to undo it, since a mis-tap on a phone is easy.
   Tap ✎ on a typed suggestion to load it into the keyboard and edit it first. There's at most one
   successful call per screen: a multi-question dialog drafts again after each
-  answer key you press, and a failed call retries after a back-off,
+  number key or Enter you press, and a failed call retries after a back-off,
   and the next session in the queue is drafted while you read this one.
 - **Quick replies**, the canned answers in `web.replies` (default
   `yes, go ahead`, `continue`, `commit and push`), shown when the session is
@@ -431,7 +431,8 @@ For each waiting session it shows:
   The number keys get the same undo window; Up/Down, Enter and Esc go
   straight through.
 - **The keyboard**, which is always there at the bottom, on every session.
-  Return sends, and multi-line text goes in as one paste. If a question is
+  Return sends (Shift+Return on a hardware keyboard adds a newline), and
+  multi-line text, pasted say, goes in as one paste. If a question is
   open, the remote offers to dismiss it and send your text as a normal
   prompt. If there's a draft in the session's input box, it asks before
   replacing it. It never types over one silently. Replacing clears the input
@@ -443,7 +444,8 @@ For each waiting session it shows:
 - **Skip**, **Defer** (anything typed, up to 200 characters, becomes the blocker) and **Esc** (shown on
   an open question, or as **Interrupt** on a busy session). Skip only
   affects the phone: the session comes back on its next waiting spell, or
-  when nothing else is waiting. Defer is the lobby's `d`, so a session you
+  when nothing else is waiting. Defer sets the lobby's `d` mark (free text only: it never links to
+  another session, and clearing it doesn't message the session), so a session you
   defer leaves both queues.
 
 Every reply carries the waiting spell it was meant for. If the session has
@@ -455,7 +457,8 @@ carry a spell (the Answer row's Esc does): they act on whatever the session is
 doing now. Tap
 **☰** to open any session, including busy ones, and type to it. A busy
 session's state changes often, so if it changes before your send lands, the
-send is refused and your text stays in the box to resend. **Conduct** pauses and resumes the walk.
+send is refused and your text stays in the box to resend; only one follow-up
+is accepted per busy spell. **Conduct** pauses and resumes the walk.
 
 Because it types into your sessions, the remote is off unless you turn it on,
 and every API request also needs a token (the page itself loads without one),
