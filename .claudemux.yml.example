@@ -52,3 +52,9 @@ name: my-project
 # repo's GitHub org through `onepassword.accounts` in ~/.config/claudemux/config.yml,
 # then falls back to `onepassword.default_account`, then to op's own default.
 # op_account: my.1password.com
+
+# Claude account for this project, one of the names under `claude.accounts` in
+# ~/.config/claudemux/config.yml. Optional: without it the project gets
+# `claude.default_account`; `claudemux -a <name>` overrides both. An unknown
+# name is an error.
+# claude_account: work

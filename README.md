@@ -540,6 +540,7 @@ Restore uses three launcher options `claudemux` gained for this (see
   fails rather than attach if a session by that name already exists, since
   restore must never merge into another session.
 - `-r session-id` — resume this claude conversation (`claude --resume`).
+- `-a account` — launch on this Claude account (see **Multiple Claude accounts**).
 - `-C dir` — start the claude pane in this directory instead of the launch
   dir. Ignored if the directory no longer exists (a worktree since
   removed) — claude starts in the launch dir instead.
@@ -861,6 +862,15 @@ onepassword:
   default_account: ""
   accounts: {}
 
+# Several Claude logins; see "Multiple Claude accounts". Omit for one login.
+# claude:
+#   default_account: work
+#   accounts:
+#     work:
+#       config_dir: ~/.claude-accounts/work
+#       color: blue            # optional badge color
+#     personal: {}             # no config_dir = ~/.claude
+
 launch:
   auto_worktree: false
   layout: ""
@@ -1041,6 +1051,53 @@ web:
 `sumary:` fails loudly at launch instead of quietly behaving as if you'd written nothing.
 A missing file is fine — that's just defaults.
 
+## Multiple Claude accounts
+
+If you use two Claude logins (say work and personal), switching `/login` in `~/.claude`
+breaks every live session, because their signed thinking blocks belong to the old login.
+So claudemux pins one account to each session at launch and never changes it. Declare the
+accounts in `config.yml`:
+
+```yaml
+claude:
+  default_account: work
+  accounts:
+    work:
+      config_dir: ~/.claude-accounts/work
+      color: blue          # optional badge color; claudemux picks one if unset
+    personal: {}           # no config_dir = the login already in ~/.claude
+```
+
+An account with no `config_dir` uses `~/.claude` and launches with `CLAUDE_CONFIG_DIR`
+unset; at most one account may do that. Names match `[a-z0-9][a-z0-9_-]{0,31}`. With no
+`claude:` block nothing changes: one implicit account, no badges.
+
+The account for a launch is, highest first: `claudemux -a <account>` (or `--account`),
+`claude_account: <name>` in the project's `.claudemux.yml` (or `.project.yml`), then
+`claude.default_account`. An unknown name anywhere is an error that names it. The account
+covers the whole tmux session (shell pane and hooks included). Handoffs resolve the
+*target* project's account. With more than one account configured, sessions show an
+account badge and the lobby shows a meter row per account.
+
+Resuming (`-r <id>`, reboot restore) always uses the account recorded for that session;
+a `-a` that contradicts the record is an error rather than a switch. A session with no
+recorded account resumes on `~/.claude`.
+
+Manage account folders with the head binary:
+
+```bash
+claudemux-head account setup <name>   # create the folder, symlink the shared parts of ~/.claude
+claudemux-head account check [name]   # report missing or replaced symlinks
+claudemux-head account login <name>   # throwaway claude on that account: run /login, then /exit
+claudemux-head account list           # accounts and their folders
+```
+
+`setup` links what describes you or the machine (settings, `CLAUDE.md`, skills, plugins,
+`projects/`, history) and leaves the login (`.claude.json`, keychain item) per account.
+Your user-level MCP servers from the `~/.claude` account are synced into the others at
+launch. **MCP logins are per account — run `/mcp` once in each.** The lobby also warns at
+startup when an account folder needs repair.
+
 ## `.claudemux.yml`
 
 `claudemux` reads an optional `.claudemux.yml` from the root of the project directory you
@@ -1056,6 +1113,7 @@ shell_size: 40%       # how big this project's shell pane is (optional)
 shell_command: gh-hud --repo mquinnv/claudemux  # run it in that pane (optional)
 op_env: abcdefghijklmnopqrstuvwxyz  # 1Password Environment ID (optional)
 op_account: my.1password.com        # 1Password account for op_env (optional)
+claude_account: work                # Claude account for this project (optional)
 ```
 
 `shell_size` and `shell_command` override `launch.shell_size` / `launch.shell_command`
